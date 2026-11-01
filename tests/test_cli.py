@@ -306,3 +306,19 @@ def test_trace_and_gate_g4_requirements(
     pyproject.write_text(pyproject.read_text().replace('rigor = "production"', 'rigor = "mvp"'))
     test.unlink()
     spec.unlink()
+
+
+def test_gate_g5_requires_budget_and_telemetry_for_llm_products(
+    llm_project: Path, simple_project: Path
+) -> None:
+    row = "per-request budget and GenAI telemetry wired into the entry point"
+    _, results = evaluate("G5", Project.load(llm_project))
+    assert next(r for r in results if r.description == row).ok is True
+    _, simple_results = evaluate("G5", Project.load(simple_project))
+    assert all(r.description != row for r in simple_results)
+    entry = llm_project / "src" / "xm_agent" / "app" / "entrypoint.py"
+    original = entry.read_text()
+    entry.write_text(original.replace("Meter(", "object("))
+    _, results = evaluate("G5", Project.load(llm_project))
+    assert next(r for r in results if r.description == row).ok is False  # mvp: required
+    entry.write_text(original)

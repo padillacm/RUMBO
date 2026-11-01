@@ -1,0 +1,43 @@
+"""The per-request budget is a hard limit (phase O)."""
+
+import pytest
+
+from {{package}}.app.budget import Budget, BudgetExceeded, Meter
+
+
+def test_charges_accumulate_and_stop_at_the_limit() -> None:
+    meter = Meter(Budget(max_input_tokens=100, max_cost_usd=0.01))
+    meter.charge(input_tokens=60, cost_usd=0.004)
+    meter.charge(input_tokens=40, cost_usd=0.004)
+    with pytest.raises(BudgetExceeded, match="input tokens"):
+        meter.charge(input_tokens=1)
+
+
+def test_cost_limit() -> None:
+    meter = Meter(Budget(max_cost_usd=0.01))
+    with pytest.raises(BudgetExceeded, match="cost"):
+        meter.charge(cost_usd=0.02)
+
+
+def test_time_limit() -> None:
+    meter = Meter(Budget(max_seconds=0.0))
+    meter.started -= 1.0
+    with pytest.raises(BudgetExceeded, match="elapsed"):
+        meter.check()
+
+
+def test_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUMBO_BUDGET_COST_USD", "0.5")
+    monkeypatch.setenv("RUMBO_BUDGET_SECONDS", "5")
+    budget = Budget.from_env()
+    assert (budget.max_cost_usd, budget.max_seconds) == (0.5, 5.0)
+    assert budget.max_input_tokens == Budget.max_input_tokens
+
+
+def test_snapshot_uses_otel_names() -> None:
+    meter = Meter()
+    meter.charge(input_tokens=3, output_tokens=2, cost_usd=0.001)
+    snap = meter.snapshot()
+    assert snap["gen_ai.usage.input_tokens"] == 3
+    assert snap["gen_ai.usage.output_tokens"] == 2
+    assert snap["cost.usd"] == 0.001

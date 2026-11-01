@@ -5,5 +5,10 @@
 |---|---|---|---|---|
 | Availability | ≥ 99 % | 30 days | | |
 | Latency p95 | < X s | 30 days | | |
+{{#llm}}
+| Cost per request (p95, `cost.usd` in the spans) | < Y USD | 7 days | | |
+| Requests abstaining for budget (`abstain_reason=budget`) | < Z % | 7 days | | |
+| Online accuracy (sampled traces graded weekly) | ≥ W % | 30 days | | |
+{{/llm}}
 
 When the error budget is exhausted, features freeze.

@@ -340,6 +340,19 @@ def _g5(p: Project, _run: bool) -> list[Result]:
             "no .github/dependabot.yml or renovate.json (not generated for prototype)",
         )
     )
+    if p.llm:
+        app = p.root / "src" / p.package / "app"
+        instrumented = (app / "budget.py").exists() and (app / "telemetry.py").exists()
+        entry = p.read(f"src/{p.package}/app/entrypoint.py") or ""
+        wired = "Meter(" in entry and "span(" in entry
+        results.append(
+            Result(
+                "per-request budget and GenAI telemetry wired into the entry point",
+                (instrumented and wired) if ops else ((instrumented and wired) or None),
+                "app/budget.py + app/telemetry.py must exist and entrypoint.answer must open a "
+                "span and a Meter (see /rumbo-o)",
+            )
+        )
     if p.at_least("production"):
         ci = p.read(".github/workflows/ci.yml") or ""
         results.append(Result("SBOM generated in CI", "sbom" in ci.lower()))

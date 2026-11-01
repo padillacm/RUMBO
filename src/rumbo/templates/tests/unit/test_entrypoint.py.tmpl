@@ -1,5 +1,7 @@
 """Tests of the evals entry-point skeleton. Replace them together with the real workflow."""
 
+import pytest
+
 from {{package}}.app.entrypoint import answer
 
 
@@ -7,6 +9,13 @@ def test_example_case() -> None:
     assert answer({"question": "ping"}) == {"answer": "pong"}
 
 
-def test_abstains_when_offline(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_abstains_when_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
     assert answer({"question": "something else"})["abstain"] is True
+
+
+def test_abstains_when_the_budget_is_exceeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUMBO_EVALS_LIVE", "1")
+    monkeypatch.setenv("RUMBO_BUDGET_SECONDS", "-1")  # every request is already over time
+    result = answer({"question": "anything"})
+    assert result["abstain"] is True and result["reason"].startswith("budget exceeded")

@@ -72,11 +72,17 @@ def test_llm_only_files() -> None:
         "src/x/app/entrypoint.py",
         "src/x/adapters/llm.py",
         "src/x/app/ports.py",
+        "src/x/app/budget.py",
+        "src/x/app/telemetry.py",
+        "tests/unit/test_budget.py",
+        "tests/unit/test_telemetry.py",
         "docs/evals/plan.md",
         ".env.example",
     }
     assert llm_only <= with_llm.keys()
     assert not llm_only & without.keys()
+    assert "Budget abstentions spike" in str(with_llm["docs/ops/runbook.md"])
+    assert "cost.usd" not in str(without["docs/ops/slos.md"])
     assert "src/x/adapters/claude_code.py" not in with_llm
 
 

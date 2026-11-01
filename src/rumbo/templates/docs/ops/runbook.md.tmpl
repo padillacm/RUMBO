@@ -1,0 +1,29 @@
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
+# Runbook
+
+**Dashboards:**
+
+**Key rotation:** <where each credential lives, who rotates it, how often>
+
+**Vendor contacts:**
+
+## <Alert / failure mode>
+- **Symptom:**
+- **Diagnosis** (trace query):
+- **Mitigation** (flag / rollback to the previous image):
+- **Escalation:**
+{{#llm}}
+
+## Budget abstentions spike
+- **Symptom:** share of spans with `abstain_reason=budget` above the SLO.
+- **Diagnosis:** query spans by `request.id`; compare `gen_ai.usage.input_tokens` and `cost.usd` with
+  RUMBO_BUDGET_*; a prompt or retrieval change usually explains it (see the latest commits).
+- **Mitigation:** roll back the image; or raise the budget in the environment only if cost allows.
+- **Escalation:** product owner (cost) · the human who signed the last G4.
+
+## Model provider degraded or unavailable
+- **Symptom:** spans with `status=error`, `error.type` from the SDK, latency p95 above the SLO.
+- **Diagnosis:** provider status page; error rate per model in the spans.
+- **Mitigation:** fail closed (abstain with reason); switch model via configuration if an ADR allows.
+- **Escalation:**
+{{/llm}}

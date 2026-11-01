@@ -1,0 +1,78 @@
+"""Per-request budget: tokens, cost and wall time (phase O, "cost limits configured").
+
+A hard limit the model cannot talk its way out of. The use case opens a `Meter` per request,
+charges every model call to it and lets `BudgetExceeded` propagate to the boundary, which
+answers with an abstention and the reason. Defaults come from the environment so operations
+can tighten them without a deploy (see .env.example).
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from dataclasses import dataclass, field
+
+
+class BudgetExceeded(RuntimeError):
+    """A request went over its token, cost or time budget."""
+
+
+@dataclass(frozen=True)
+class Budget:
+    max_input_tokens: int = 20_000
+    max_output_tokens: int = 4_000
+    max_cost_usd: float = 0.05
+    max_seconds: float = 30.0
+
+    @classmethod
+    def from_env(cls) -> Budget:
+        env = os.environ
+        return cls(
+            max_input_tokens=int(env.get("RUMBO_BUDGET_INPUT_TOKENS", cls.max_input_tokens)),
+            max_output_tokens=int(env.get("RUMBO_BUDGET_OUTPUT_TOKENS", cls.max_output_tokens)),
+            max_cost_usd=float(env.get("RUMBO_BUDGET_COST_USD", cls.max_cost_usd)),
+            max_seconds=float(env.get("RUMBO_BUDGET_SECONDS", cls.max_seconds)),
+        )
+
+
+@dataclass
+class Meter:
+    """Accumulates what one request has spent and raises as soon as a limit is crossed."""
+
+    budget: Budget = field(default_factory=Budget)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    started: float = field(default_factory=time.perf_counter)
+
+    @property
+    def elapsed_seconds(self) -> float:
+        return time.perf_counter() - self.started
+
+    def charge(
+        self, *, input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0.0
+    ) -> None:
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.cost_usd += cost_usd
+        self.check()
+
+    def check(self) -> None:
+        b = self.budget
+        if self.input_tokens > b.max_input_tokens:
+            raise BudgetExceeded(f"input tokens {self.input_tokens} > {b.max_input_tokens}")
+        if self.output_tokens > b.max_output_tokens:
+            raise BudgetExceeded(f"output tokens {self.output_tokens} > {b.max_output_tokens}")
+        if self.cost_usd > b.max_cost_usd:
+            raise BudgetExceeded(f"cost {self.cost_usd:.4f} USD > {b.max_cost_usd} USD")
+        if self.elapsed_seconds > b.max_seconds:
+            raise BudgetExceeded(f"elapsed {self.elapsed_seconds:.1f} s > {b.max_seconds} s")
+
+    def snapshot(self) -> dict[str, float | int]:
+        """Attributes for the request's telemetry span."""
+        return {
+            "gen_ai.usage.input_tokens": self.input_tokens,
+            "gen_ai.usage.output_tokens": self.output_tokens,
+            "cost.usd": round(self.cost_usd, 6),
+            "duration.seconds": round(self.elapsed_seconds, 3),
+        }

@@ -1,0 +1,86 @@
+"""GenAI telemetry without a dependency: spans as structured JSON log records (phase O).
+
+Attribute names follow the OpenTelemetry GenAI semantic conventions (`gen_ai.operation.name`,
+`gen_ai.request.model`, `gen_ai.usage.input_tokens`, ...) plus `cost.usd`, so the records can be
+shipped as they are to Langfuse, Phoenix or any OTLP collector. When you reach production,
+`uv add opentelemetry-sdk` (verify it first) and attach a real tracer in an adapter: the
+call sites in app/ do not change. The weekly trace-review ritual reads these records.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any
+
+from {{package}}.app.budget import Meter
+
+LOGGER_NAME = "{{package}}.telemetry"
+log = logging.getLogger(LOGGER_NAME)
+
+
+@dataclass
+class Span:
+    name: str
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+    def set(self, **attributes: Any) -> None:
+        self.attributes.update(attributes)
+
+
+class JsonFormatter(logging.Formatter):
+    """One JSON object per line; `record.span` carries the span attributes."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        payload.update(getattr(record, "span", {}))
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def configure_json_logging(level: int = logging.INFO) -> None:
+    """Call once at the process boundary (api/http.py, __main__); idempotent."""
+    root = logging.getLogger()
+    if any(isinstance(h.formatter, JsonFormatter) for h in root.handlers):
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    root.addHandler(handler)
+    root.setLevel(level)
+
+
+@contextmanager
+def span(
+    operation: str,
+    *,
+    model: str = "",
+    request_id: str | None = None,
+    meter: Meter | None = None,
+    **attributes: Any,
+) -> Iterator[Span]:
+    """Times a GenAI operation and logs it with OTel attribute names, cost and outcome."""
+    current = Span(operation, {"gen_ai.operation.name": operation, **attributes})
+    current.set(**{"request.id": request_id or uuid.uuid4().hex})
+    if model:
+        current.set(**{"gen_ai.request.model": model})
+    start = time.perf_counter()
+    try:
+        yield current
+        current.set(status="ok")
+    except Exception as exc:
+        current.set(status="error", **{"error.type": type(exc).__name__})
+        raise
+    finally:
+        if meter is not None:
+            current.set(**meter.snapshot())
+        current.set(**{"duration.ms": round((time.perf_counter() - start) * 1000, 1)})
+        log.info(operation, extra={"span": current.attributes})

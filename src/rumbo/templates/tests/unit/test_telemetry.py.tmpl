@@ -1,0 +1,42 @@
+"""Spans are logged as structured records with OTel GenAI attribute names."""
+
+import json
+import logging
+
+import pytest
+
+from {{package}}.app.budget import Meter
+from {{package}}.app.telemetry import LOGGER_NAME, JsonFormatter, span
+
+
+def test_span_logs_attributes_cost_and_status(caplog: pytest.LogCaptureFixture) -> None:
+    meter = Meter()
+    with (
+        caplog.at_level(logging.INFO, logger=LOGGER_NAME),
+        span("answer", model="test-model", request_id="r1", meter=meter) as current,
+    ):
+        meter.charge(input_tokens=10, output_tokens=5, cost_usd=0.002)
+        current.set(**{"gen_ai.tool.name": "query"})
+    record = caplog.records[-1]
+    attrs = record.__dict__["span"]
+    assert attrs["gen_ai.operation.name"] == "answer"
+    assert attrs["gen_ai.request.model"] == "test-model"
+    assert attrs["request.id"] == "r1"
+    assert attrs["gen_ai.usage.input_tokens"] == 10
+    assert attrs["cost.usd"] == 0.002
+    assert attrs["gen_ai.tool.name"] == "query"
+    assert attrs["status"] == "ok" and attrs["duration.ms"] >= 0
+    line = json.loads(JsonFormatter().format(record))
+    assert line["message"] == "answer" and line["gen_ai.operation.name"] == "answer"
+
+
+def test_span_records_errors_and_reraises(caplog: pytest.LogCaptureFixture) -> None:
+    with (
+        caplog.at_level(logging.INFO, logger=LOGGER_NAME),
+        pytest.raises(ValueError),
+        span("answer"),
+    ):
+        raise ValueError("boom")
+    attrs = caplog.records[-1].__dict__["span"]
+    assert attrs["status"] == "error" and attrs["error.type"] == "ValueError"
+    assert len(attrs["request.id"]) == 32  # generated when the caller has none
