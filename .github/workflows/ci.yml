@@ -3,7 +3,7 @@ name: ci
 
 on:
   push:
-    branches: ["**"]   # tags are release.yml's job
+    branches: [main]   # feature branches run through their pull request; tags are release.yml's job
   pull_request:
 
 permissions:
