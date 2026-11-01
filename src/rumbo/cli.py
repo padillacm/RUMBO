@@ -572,6 +572,8 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
         return _err("no evals/ in this project (LLM products only); did you run 'rumbo init'?")
     if not re.fullmatch(r"[a-z0-9_-]+", args.suite):
         return _err("suite must be a plain name (letters, digits, - or _)")
+    if args.suite == "all":
+        return _err("'all' is reserved: run_evals.py --suite all means every dataset")
     try:
         case_input = json.loads(args.input)
         expected = json.loads(args.expected)

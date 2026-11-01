@@ -415,6 +415,15 @@ def test_eval_add_appends_a_case_and_logs_it(
     dataset.unlink()
 
 
+def test_eval_add_rejects_the_reserved_suite_name(
+    llm_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = ["eval", "add", "all", "--dir", str(llm_project), "--grader", "abstention"]
+    assert main([*args, "--input", "{}", "--expected", "{}"]) == 2
+    assert "reserved" in capsys.readouterr().err
+    assert not (llm_project / "evals" / "datasets" / "all.jsonl").exists()
+
+
 def test_eval_add_needs_an_llm_project(simple_project: Path) -> None:
     args = ["eval", "add", "s", "--dir", str(simple_project), "--grader", "x"]
     assert main([*args, "--input", "{}", "--expected", "{}"]) == 2
