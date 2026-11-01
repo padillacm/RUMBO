@@ -1,10 +1,23 @@
 [project]
 name = "rumbo"
-version = "0.1.0"
-description = "RUMBO: framework de punta a punta para construir software con agentes de IA (ANCLA como núcleo)."
+version = "0.2.0"
+description = "RUMBO: an end-to-end framework for building software with AI coding agents (ANCLA at its core)."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
-dependencies = []  # Solo stdlib: el CLI no debe arrastrar dependencias a los proyectos.
+dependencies = []  # standard library only: the CLI must not drag dependencies into projects
+keywords = ["ai-agents", "harness", "software-engineering", "claude-code", "evals"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.urls]
+Homepage = "https://github.com/padillacm/RUMBO"
+Changelog = "https://github.com/padillacm/RUMBO/blob/main/CHANGELOG.md"
 
 [project.scripts]
 rumbo = "rumbo.cli:main"
@@ -23,13 +36,14 @@ extend-exclude = ["src/rumbo/templates"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
-allowed-confusables = ["–"]
+allowed-confusables = ["–", "−"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S603", "S607"]
 "src/rumbo/sensors/**" = ["S603", "S607"]
 "src/rumbo/cli.py" = ["S603", "S607"]
 "src/rumbo/scaffold.py" = ["S603", "S607"]
+"src/rumbo/tour.py" = ["S603", "S607"]
 "src/rumbo/gates.py" = ["S603", "S607"]
 
 [tool.pyright]
