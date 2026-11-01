@@ -1,5 +1,6 @@
 import ast
 import itertools
+import os
 import tomllib
 from pathlib import Path
 
@@ -194,7 +195,7 @@ def test_force_overwrites_but_merges_pyproject_and_gitignore(simple_project: Pat
 def test_sensor_is_copied_and_executable(simple_project: Path) -> None:
     sensor = simple_project / "scripts" / "check_tests_not_weakened.py"
     assert sensor.exists()
-    assert sensor.stat().st_mode & 0o111
+    assert os.name == "nt" or sensor.stat().st_mode & 0o111  # no exec bits on Windows
 
 
 def test_merge_pyproject_keeps_existing_sections() -> None:

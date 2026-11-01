@@ -373,7 +373,8 @@ MERGEABLE = {"pyproject.toml": merge_pyproject, ".gitignore": merge_lines}
 def _write(target: Path, item: str | Path, rel: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(item, str):
-        target.write_text(item, encoding="utf-8")
+        with target.open("w", encoding="utf-8", newline="\n") as f:  # LF on every platform
+            f.write(item)
     else:
         shutil.copyfile(item, target)
     if rel.startswith("scripts/"):
