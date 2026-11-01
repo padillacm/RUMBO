@@ -1,6 +1,6 @@
 <!-- RUMBO pull request. The agent may draft the first section; the HUMAN ticks the checklist. -->
 ## What and why
-Spec: `specs/F-NNNN-….md` · ADRs touched: none
+Spec: `specs/NNNN-….md` (F-NNNN) · ADRs touched: none
 
 Three sentences written by the human after reading the diff, not the agent's summary
 (explanation test).

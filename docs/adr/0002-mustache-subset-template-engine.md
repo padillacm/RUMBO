@@ -20,7 +20,7 @@ Option 3 (`src/rumbo/render.py`). Sections without nesting cover every variation
 engine refuses what it cannot render instead of emitting a half-rendered file.
 
 ## Consequences (+/−)
-+ 80 lines, fully tested; templates look like their output.
++ A few dozen lines, fully tested; templates look like their output.
 − No loops, no filters, no nested sections: variations that need them become separate files
   with a `CONDITIONS` entry in `scaffold.py`.
 

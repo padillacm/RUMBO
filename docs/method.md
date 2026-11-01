@@ -308,7 +308,7 @@ human.
 | Specs | Criteria list | EARS on core features | EARS everywhere, requirement→test traceability |
 | ADRs | 0–1 | Irreversible decisions | All significant ones + fitness function |
 | Tests | Smoke | Unit + integration + Hypothesis | + mutation, contract tests with external APIs |
-| Evals | 20 questions by hand | Error analysis + 50–100 cases + smoke in CI | + validated judge, pass^k, OWASP red teaming, online evals |
+| Evals | 20 questions by hand | Error analysis + 50 cases + smoke in CI | 100 cases, validated judge, pass^k, OWASP red teaming, online evals |
 | Security | No secrets in the code | Threat model, bandit, pip-audit, gitleaks | + SBOM, Scorecard, SLSA, red team, privacy review |
 | Observability | Logs | OTel + Langfuse/Phoenix + cost alerts | SLOs with error budget, complete runbooks |
 | Deployment | Local | PaaS with rehearsed rollback | Canary/flags per cohort |
@@ -359,7 +359,7 @@ agent that hands out energy figures used in commercial decisions is, at the very
 | 6–7 | First complete ANCLA task and the explanation test | Implements with TDD in a sandbox; another session acts as second reviewer |
 
 **Week-1 gate:** CI green (ruff, pyright, pytest, lint-imports, gitleaks, pip-audit);
-AGENTS.md ≤100 lines; one ADR with a fitness function; ≥30 real questions in the dataset (LLM
+AGENTS.md ≤100 lines; one ADR with a fitness function; ≥20 real questions in the dataset (LLM
 products).
 
 ### Month 1

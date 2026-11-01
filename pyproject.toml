@@ -1,6 +1,6 @@
 [project]
 name = "rumbo"
-version = "0.2.0"
+version = "0.3.0"
 description = "RUMBO: an end-to-end framework for building software with AI coding agents (ANCLA at its core)."
 readme = "README.md"
 license = "MIT"

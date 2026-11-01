@@ -17,9 +17,9 @@ no version drift between the CLI and the project; auditable in one read.
 3. Pydantic for the configuration: validation for free, one heavy dependency.
 
 ## Decision and rationale
-Option 1. The CLI needs ~2,000 lines of plain Python; the comfort of option 2 does not pay for
-a dependency tree in every user's project. Templates use a Mustache subset written in 80 lines
-(ADR-0002) instead of Jinja2.
+Option 1. The CLI is a few thousand lines of plain Python; the comfort of option 2 does not pay
+for a dependency tree in every user's project. Templates use a small Mustache subset (ADR-0002)
+instead of Jinja2.
 
 ## Consequences (+/−)
 + `uvx` works offline after the first fetch; nothing to audit but our code.

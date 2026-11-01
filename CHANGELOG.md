@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
 ### Added
 - Claude Code hooks: the generated `.claude/settings.json` pre-approves the harness commands
   and wires `scripts/rumbo_guard.py` (PreToolUse and Stop) so the agent cannot edit the
@@ -42,7 +44,15 @@ All notable changes to this project are documented here. The format follows
   never the human's documents.
 
 ### Fixed
-- Generated files are written with LF on every platform (CRLF on Windows before).
+- Generated files are written with LF on every platform (CRLF on Windows before), including
+  merged `pyproject.toml` / `.gitignore`.
+- Review fixes before release: the guard's Bash rules are backed by a git-based post-check
+  (protected files vs HEAD) and `.claude/` is protected; the generated skeleton configures JSON
+  logging at the process boundaries (spans were never emitted) and treats blank `RUMBO_BUDGET_*`
+  as defaults; `rumbo metrics` tolerates hand-written decision headings, missing git and
+  malformed eval files; `rumbo eval add` reads `GRADERS` with the AST and escapes the log table;
+  `rumbo trace` ignores nested `R1.1` items and `R10a` look-alikes; release notes stop at the
+  Keep-a-Changelog link references and PyPI publishes the released files.
 
 ## [0.2.0] - 2026-11-01
 

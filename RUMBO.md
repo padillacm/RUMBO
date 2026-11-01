@@ -203,8 +203,10 @@ only_mutate = ["src/<pkg>/domain/*"]
 
 ### A3. Makefile: one verification command
 
+Illustrative excerpt; `rumbo init` writes the exact file for the rigor and the provider.
+
 ```make
-.PHONY: check test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
+.PHONY: check check-brief test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
 
 RUMBO ?= uvx --from git+https://github.com/padillacm/RUMBO rumbo
 BASE ?= origin/main
@@ -212,12 +214,12 @@ BASE ?= origin/main
 lint:       ; uv run ruff check . && uv run ruff format --check .
 fmt:        ; uv run ruff check --fix . && uv run ruff format .
 types:      ; uv run pyright
-test:       ; uv run pytest
+test:       ; uv run pytest --cov --cov-report=term-missing:skip-covered   # no --cov in prototype
 arch:       ; uv run lint-imports
 security:   ; uv run bandit -q -r src evals && uv run bandit -q -r scripts -s B404,B603,B607 && uv run pip-audit --skip-editable
 evals:      ; uv run python evals/run_evals.py --suite smoke            # offline
 evals-live: ; uv run python evals/run_evals.py --suite all --live --k 1 # real model
-mutation:   ; uv run mutmut run && uv run mutmut results
+mutation:   ; uv run mutmut run && uv run mutmut results   # the generated file skips an empty domain/
 sensor:     ; uv run python scripts/check_tests_not_weakened.py --base $(BASE)
 sbom:       ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
 hooks:      ; uv run pre-commit install
@@ -580,7 +582,7 @@ Test or eval case added:
 | Specs | Criteria list | EARS in the core | EARS everywhere, requirement → test traceability |
 | ADRs | 0–1 | Irreversible decisions | All + fitness function |
 | Tests | Smoke | Unit + integration + Hypothesis | + mutation testing, contract tests with external APIs |
-| Evals (LLM) | 20 cases by hand | Error analysis + 50–100 cases in CI | + validated judges, pass^k, red teaming |
+| Evals (LLM) | 20 cases by hand | Error analysis + 50 cases in CI | 100 cases, validated judges, pass^k, red teaming |
 | Security | No secrets in code | Threat model + bandit + pip-audit + gitleaks | + SBOM, privacy review |
 | Observability | Logs | OTel + LLM traces + cost alerts | SLOs with error budget |
 | Deployment | Local | PaaS + rehearsed rollback | Canary / feature flags |

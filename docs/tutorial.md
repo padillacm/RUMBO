@@ -25,7 +25,7 @@ in `SECURITY.md`.
 
 ## 2. Phase R: the brief, written by you first (5 min)
 
-Open `docs/product/brief.md`, write five lines (problem, who has it, what success looks like,
+Open `docs/product/brief.md`, write a few lines (problem, who has it, what success looks like,
 what would make you abandon it) and delete the first line (the template mark). Then open
 Claude Code and type `/rumbo-r`: the agent critiques the brief and proposes interview
 questions. It does not write the brief for you.
@@ -51,6 +51,7 @@ rumbo gate G2                   # EARS present, contracts filled (recommendation
 
 ## 4. Phase B, ANCLA: one spec, one fresh session (10 min)
 
+Work on a branch so the sensors have a base to compare against: `git checkout -b f-0001`.
 Start a **new** Claude Code session (`/clear`) and type `/rumbo-ancla F-0001`.
 
 - **Anchor.** The agent writes failing tests first. Each test names its requirement in the
@@ -63,8 +64,8 @@ Start a **new** Claude Code session (`/clear`) and type `/rumbo-ancla F-0001`.
 
 ```bash
 rumbo trace                     # every requirement has a test?
-rumbo gate G4                   # sensor, make check, diff size, traceability
-make review                     # docs/reviews/<date>-<sha>.md: your guided tour
+rumbo gate G4                   # sensor, make check, diff size vs main, traceability
+make review BASE=main           # docs/reviews/<date>-<sha>.md: your guided tour (BASE defaults to origin/main)
 ```
 
 Read the tour, not the agent's summary: risk hotspots first, tests before code, three

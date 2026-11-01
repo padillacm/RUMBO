@@ -105,7 +105,7 @@ reported. Two things only you can do afterwards: replace `@your-handle` in
 `.github/CODEOWNERS` and the contact in `SECURITY.md`.
 
 Permanent install: `uv tool install git+https://github.com/padillacm/RUMBO`. Pin a release once
-one is tagged: `…/RUMBO@v0.2.0`. Inside a generated project the CLI is also available as
+one is tagged: `…/RUMBO@v0.3.0`. Inside a generated project the CLI is also available as
 `make rumbo ARGS="gate G4"`.
 
 Without the CLI: copy `RUMBO.md` to the repository root and ask Claude Code to *"Read RUMBO.md
