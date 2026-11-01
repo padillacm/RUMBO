@@ -15,7 +15,8 @@ from pathlib import Path
 from rumbo.project import numbered_documents, section
 
 # `- R1 (event): text`; nested items such as `R1.1` are not requirements.
-REQ_LINE = re.compile(r"^\s*-\s*(R\d+)(?![\w.])[^:]*:\s*(.*)$")
+# `- R1 (event): text` or `- R1: text`; the parenthetical may itself contain colons.
+REQ_LINE = re.compile(r"^\s*-\s*(R\d+)(?![\w.])\s*(?:\([^)]*\))?\s*:\s*(.*)$")
 SOURCE_GLOBS = ("tests/**/*.py", "evals/datasets/*.jsonl")
 
 

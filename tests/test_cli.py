@@ -517,14 +517,18 @@ def test_trace_ignores_nested_items_and_lookalikes(simple_project: Path) -> None
         "- R1 (event): When a, the system shall b | c\n"
         "  - R1.1: a nested note\n"
         "- R10 (state): While x, the system shall y\n"
+        "- R11 (event: login): When z, the system shall w\n"
+        "- R12: The system shall v: always\n"
         "## Acceptance criteria\n"
     )
     (simple_project / "tests" / "unit" / "test_edge.py").write_text(
         'def test_x() -> None:\n    """F-0001.R10a is not R10; F-0001.R1. ends a sentence"""\n'
     )
     reqs = trace(simple_project)
-    assert [r.rid for r in reqs] == ["R1", "R10"]
+    assert [r.rid for r in reqs] == ["R1", "R10", "R11", "R12"]
     assert reqs[0].covered_by and not reqs[1].covered_by
+    assert reqs[2].text == "When z, the system shall w"  # colon inside the parenthetical
+    assert reqs[3].text == "The system shall v: always"  # colon inside the text
     from rumbo.trace import render
 
     assert "shall b \\| c" in render(reqs)
