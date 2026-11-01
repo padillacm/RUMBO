@@ -1,143 +1,162 @@
-# RUMBO — Instrucciones para Claude Code
+# RUMBO — Instructions for Claude Code
 
-> **Cómo usar este archivo**
+> **How to use this file**
 >
-> 1. Pon `RUMBO.md` en la raíz de un repositorio nuevo (o del proyecto que quieras ordenar).
->    Si instalaste el CLI, `rumbo init` lo copia por ti junto con todo el arnés.
-> 2. Abre Claude Code en esa carpeta y escribe: **"Lee RUMBO.md y ejecuta la Parte A."**
-> 3. Claude Code te hará unas preguntas, montará el arnés y se detendrá en cada punto de aprobación.
+> - **New project:** install the harness with `rumbo init` (Part A, "fast path") or copy
+>   `RUMBO.md` to the repository root, open Claude Code there and say:
+>   **"Read RUMBO.md and run Part A."** Claude Code asks the A0 questions, mounts the harness
+>   and stops at every approval point.
+> - **Project that already has the harness** (`AGENTS.md` exists and `pyproject.toml` has a
+>   `[tool.rumbo]` section): Part A is done. Do **not** ask the A0 questions again — the answers
+>   are in `docs/decisions.md`. Go to A8 if `make check` was never green, otherwise to Part C.
 >
-> RUMBO es un framework para construir software con agentes de IA de punta a punta:
-> **R**econocer → **U**nificar → **M**odelar → **B**uild con ANCLA → **O**perar/Observar/Optimizar,
-> con una "brújula humana" transversal. ANCLA es el bucle de cada cambio:
-> **A**cotar en verificadores → **N**avegar con plan → **C**errar el ciclo en sandbox →
-> **L**imitar y revisar → **A**prender y medir.
+> RUMBO is an end-to-end framework for building software with AI coding agents:
+> **R**ecognize → **U**nify → **M**odel → **B**uild with ANCLA → **O**perate/Observe/Optimize,
+> with a transversal "human compass". ANCLA is the loop of every change:
+> **A**nchor in verifiers → **N**avigate with a plan → **C**lose the loop in a sandbox →
+> **L**imit and review → Learn **A**nd measure.
 >
-> Principio rector: la IA amplifica la disciplina que existe; no la reemplaza. Por eso el foco
-> está en **verificadores ejecutables** (tests, propiedades, tipos, contratos de arquitectura,
-> evals) y no en prompts.
+> Guiding principle: AI amplifies the discipline that already exists; it does not replace it.
+> That is why the focus is on **executable verifiers** (tests, properties, types, architecture
+> contracts, evals) and not on prompts.
 
 ---
 
-## Instrucciones para Claude (léelas antes de actuar)
+## Instructions for Claude (read before acting)
 
-- Eres el agente de implementación. El humano (dueño del proyecto) decide el **qué** y el
-  **por qué**; tú propones, implementas y verificas.
-- Trabaja **por pasos**. Al final de cada paso marcado con 🛑, detente, resume lo que hiciste
-  en ≤5 líneas y espera aprobación.
-- Nunca borres ni debilites tests para que pasen. Si un test parece incorrecto, detente y pregunta.
-- No añadas dependencias que no estén listadas aquí sin pedir permiso y verificar que el paquete
-  existe en PyPI (nombre exacto, repositorio oficial, antigüedad): `rumbo verify-dep <paquete>`.
-- Usa siempre las versiones estables más recientes de cada herramienta; no copies números de
-  versión de memoria. Para pre-commit, ejecuta `pre-commit autoupdate` tras crear la configuración.
-- Si algo de este archivo choca con la realidad del entorno (una herramienta no instala, una
-  opción cambió), dilo y propón la alternativa más cercana; no lo ocultes.
+- You are the implementation agent. The human (project owner) decides the **what** and the
+  **why**; you propose, implement and verify.
+- Work **step by step**. At the end of every step marked 🛑, stop, summarize what you did in
+  ≤5 lines and wait for approval.
+- Never delete or weaken tests to make them pass. If a test looks wrong, stop and ask.
+- Do not add dependencies that are not listed here without asking for permission and verifying
+  that the package exists on PyPI (exact name, official repository, age):
+  `rumbo verify-dep <package>`.
+- Always use the latest stable versions of every tool; do not copy version numbers from
+  memory. For pre-commit, run `pre-commit autoupdate` after creating the configuration.
+- Never remove the `<!-- rumbo:template` mark from a document and never write
+  `[tests-change-approved]`: both belong to the human.
+- If something in this file clashes with the environment (a tool does not install, an option
+  changed), say so and propose the closest alternative; do not hide it.
 
 ---
 
-## PARTE A — Montar el arnés (una vez por repositorio)
+## PART A — Mount the harness (once per repository)
 
-### A0. Preguntas iniciales 🛑
+### A0. Initial questions 🛑
 
-Pregunta al humano (todas juntas, en un solo mensaje):
+Ask the human (all at once, in a single message):
 
-1. Nombre del proyecto y del paquete Python (snake_case).
-2. ¿Es un producto con LLM? (sí/no). Si sí: ¿qué proveedor de modelo?
-3. Nivel de rigor: `prototipo`, `mvp` o `produccion` (ver Parte E).
-4. ¿Hay un caso concreto? (por ejemplo: agente conversacional sobre datos del mercado eléctrico
-   colombiano de XM).
+1. Project name and Python package name (snake_case).
+2. Is it an LLM product? (yes/no). If yes: which model provider? (`anthropic`, `openai`,
+   `google`, `mistral`, `claude-code` — the Claude Code CLI with the developer's own login, no
+   API key — or `other`).
+3. Rigor level: `prototype`, `mvp` or `production` (see Part E).
+4. Is there a concrete use case? (for example: a conversational agent over the Colombian
+   electricity market data published by XM).
 
-No continúes sin respuestas. Usa `<pkg>` para referirte al paquete en adelante.
+Do not continue without answers. Use `<pkg>` to refer to the package from here on.
 
-### A1–A7. Ruta rápida: el CLI `rumbo`
+### A1–A7. Fast path: the `rumbo` CLI
 
-Si `uv` está disponible, monta todo el arnés (A1–A7) con un comando, usando las respuestas de A0:
+If `uv` is available, mount the whole harness (A1–A7) with one command, using the A0 answers:
 
 ```bash
 uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
-  --nombre "<proyecto>" --pkg <pkg> --rigor <rigor> \
-  [--llm --proveedor anthropic|openai|google|mistral | --no-llm] [--caso "<caso>"]
+  --name "<project>" --package <pkg> --rigor <rigor> \
+  [--llm --provider anthropic|openai|google|mistral|claude-code | --no-llm] [--case "<case>"]
 ```
 
-`rumbo init` crea la estructura, instala las dependencias con `uv add` (últimas versiones
-estables), ejecuta `pre-commit autoupdate` e `install`, y anota las respuestas de A0 en
-`docs/decisiones.md`. Si un archivo ya existía no lo sobrescribe (fusiona `pyproject.toml` y
-`.gitignore`) y lo reporta. Revisa la salida, explica al humano lo que se omitió o falló y salta a
-**A8**. Si no puedes usar el CLI, sigue A1–A7 a mano.
+`rumbo init` creates the structure, installs the dependencies with `uv add` (latest stable
+versions), runs `pre-commit autoupdate` and `install`, and logs the A0 answers in
+`docs/decisions.md`. It never overwrites an existing file (it merges `pyproject.toml` and
+`.gitignore`) and reports what it skipped. Review the output, explain to the human what was
+skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7 by hand.
 
-### A1. Estructura del repositorio
+### A1. Repository structure
 
 ```
 .
-├── AGENTS.md                 # contenido de la Parte B
-├── CLAUDE.md                 # una sola línea: @AGENTS.md
-├── RUMBO.md                  # este archivo
+├── AGENTS.md                 # Part B
+├── CLAUDE.md                 # one line: @AGENTS.md
+├── RUMBO.md                  # this file
 ├── README.md
 ├── Makefile
-├── pyproject.toml
+├── pyproject.toml            # includes [tool.rumbo], read by rumbo gate/doctor/update
 ├── .pre-commit-config.yaml
 ├── .gitignore
+├── .env.example              # LLM products: which variable holds the credential
 ├── .github/workflows/ci.yml
-├── .github/workflows/nightly.yml     # rigor mvp o produccion
-├── .github/dependabot.yml            # rigor mvp o produccion
-├── .claude/commands/rumbo-*.md       # /rumbo-r, /rumbo-u, /rumbo-m, /rumbo-ancla, /rumbo-o…
+├── .github/workflows/nightly.yml     # rigor mvp or production
+├── .github/dependabot.yml            # rigor mvp or production
+├── .claude/commands/rumbo-*.md       # /rumbo-r, -u, -m, -ancla, -review, -o, -gate, -tour
 ├── docs/
 │   ├── product/brief.md
 │   ├── product/prd.md
-│   ├── adr/0000-plantilla.md
+│   ├── adr/0000-template.md
 │   ├── architecture/c4.md
 │   ├── security/threat-model.md
 │   ├── ops/runbook.md
 │   ├── ops/slos.md
-│   ├── postmortems/0000-plantilla.md
-│   ├── evals/plan.md         # solo si hay LLM
-│   └── decisiones.md         # diario de decisiones humanas (brújula)
-├── specs/0000-plantilla.md
+│   ├── postmortems/0000-template.md
+│   ├── evals/plan.md         # LLM products only
+│   ├── reviews/              # guided review guides (rumbo tour)
+│   └── decisions.md          # human decisions log (the compass)
+├── specs/0000-template.md
 ├── src/<pkg>/
-│   ├── __init__.py
-│   ├── domain/__init__.py    # lógica pura: sin I/O, sin SDKs de LLM, sin HTTP
-│   ├── app/__init__.py       # casos de uso; depende solo de domain
-│   ├── adapters/__init__.py  # APIs externas, BD, LLM
-│   ├── prompts/__init__.py   # prompts versionados (solo si hay LLM)
-│   └── api/__init__.py       # FastAPI / CLI
+│   ├── __init__.py, __main__.py
+│   ├── domain/__init__.py    # pure logic: no I/O, no LLM SDKs, no HTTP
+│   ├── app/__init__.py       # use cases; depends only on domain (+ ports.py, entrypoint.py with LLM)
+│   ├── adapters/__init__.py  # external APIs, DB, LLM (+ llm.py, claude_code.py with LLM)
+│   ├── prompts/__init__.py   # versioned prompts (LLM products only)
+│   └── api/__init__.py       # FastAPI / CLI (+ http.py with LLM)
 ├── tests/
-│   ├── unit/
+│   ├── unit/                 # + test_check_tests_not_weakened.py (tests of the sensor)
 │   ├── property/
 │   ├── integration/
 │   └── architecture/
-├── evals/                    # solo si hay LLM
+├── evals/                    # LLM products only
 │   ├── datasets/smoke.jsonl
 │   ├── graders/__init__.py
 │   ├── error_analysis/.gitkeep
 │   └── run_evals.py
 ├── scripts/check_tests_not_weakened.py
-├── spikes/README.md          # "Código desechable. Nunca se importa desde src/."
+├── spikes/README.md          # "Throwaway code. Never imported from src/."
 └── infra/Dockerfile
 ```
 
-Los documentos de `docs/` y `specs/` empiezan con la marca `<!-- rumbo:plantilla … -->`. El humano
-la borra cuando el documento está completo; `rumbo gate` lo verifica.
+Documents under `docs/` and `specs/` start with the mark `<!-- rumbo:template … -->`. The
+human deletes it when the document is complete; `rumbo gate` checks it.
 
-### A2. Entorno y herramientas (uv)
+### A2. Environment and tools (uv)
 
-- Inicializa con `uv init --package` (o adapta si ya existe) y añade dependencias de desarrollo:
-  `ruff`, `pyright`, `pytest`, `pytest-cov`, `hypothesis`, `import-linter`, `pre-commit`,
-  `pip-audit`, `bandit`, `mutmut`.
-- Si hay LLM, añade (runtime): `pydantic`, `fastapi`, `httpx` y el SDK oficial del proveedor
-  elegido. Observabilidad (`opentelemetry-sdk`, Langfuse o Phoenix) se añade en la fase O, no ahora.
+- Initialize with `uv init --package` (or adapt if it exists) and add the development
+  dependencies: `ruff`, `pyright`, `pytest`, `pytest-cov`, `hypothesis`, `import-linter`,
+  `pre-commit`, `pip-audit`, `bandit`, `mutmut`.
+- LLM products add (runtime): `pydantic`, `fastapi`, `httpx`, `uvicorn` and the official SDK of
+  the provider (none for `claude-code`). Observability (`opentelemetry-sdk`, Langfuse or
+  Phoenix) is added in phase O, not now.
 
-En `pyproject.toml` configura como mínimo:
+Configure at least this in `pyproject.toml`:
 
 ```toml
+[tool.rumbo]                   # what rumbo gate / doctor / update read
+version = "<rumbo version>"
+package = "<pkg>"
+llm = false
+provider = "none"
+rigor = "mvp"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["spikes"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S603", "S607"]
 
 [tool.pyright]
 include = ["src", "tests"]
@@ -148,360 +167,400 @@ strict = ["src/<pkg>/domain"]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 
+[tool.bandit]
+skips = ["B101"]
+
 [tool.importlinter]
 root_package = "<pkg>"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "Capas hexagonales"
+name = "Hexagonal layers"
 type = "layers"
 layers = ["<pkg>.api", "<pkg>.adapters", "<pkg>.app", "<pkg>.domain"]
 
 [[tool.importlinter.contracts]]
-name = "El dominio es puro"
+name = "The domain is pure"
 type = "forbidden"
 source_modules = ["<pkg>.domain"]
-forbidden_modules = ["httpx", "requests", "fastapi"]   # añade aquí el SDK del LLM (p. ej. "anthropic")
+forbidden_modules = ["httpx", "requests", "fastapi"]   # add the LLM SDK here (e.g. "anthropic")
+
+[tool.mutmut]
+source_paths = ["src/"]
+only_mutate = ["src/<pkg>/domain/*"]
 ```
 
-(Ajusta las claves si la versión instalada de una herramienta las cambió; verifica ejecutándola.)
+(Adjust the keys if the installed version of a tool changed them; verify by running it.)
 
-### A3. Makefile: un único comando de verificación
+### A3. Makefile: one verification command
 
 ```make
-.PHONY: check test lint types arch security evals mutation
+.PHONY: check test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
 
-lint:      ; uv run ruff check . && uv run ruff format --check .
-types:     ; uv run pyright
-test:      ; uv run pytest
-arch:      ; uv run lint-imports
-security:  ; uv run bandit -q -r src && uv run pip-audit --skip-editable
-evals:     ; uv run python evals/run_evals.py --suite smoke
-mutation:  ; uv run mutmut run && uv run mutmut results
+RUMBO ?= uvx --from git+https://github.com/padillacm/RUMBO rumbo
+BASE ?= origin/main
+
+lint:       ; uv run ruff check . && uv run ruff format --check .
+fmt:        ; uv run ruff check --fix . && uv run ruff format .
+types:      ; uv run pyright
+test:       ; uv run pytest
+arch:       ; uv run lint-imports
+security:   ; uv run bandit -q -r src evals && uv run bandit -q -r scripts -s B404,B603,B607 && uv run pip-audit --skip-editable
+evals:      ; uv run python evals/run_evals.py --suite smoke            # offline
+evals-live: ; uv run python evals/run_evals.py --suite all --live --k 1 # real model
+mutation:   ; uv run mutmut run && uv run mutmut results
+sensor:     ; uv run python scripts/check_tests_not_weakened.py --base $(BASE)
+sbom:       ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
+hooks:      ; uv run pre-commit install
+review:     ; $(RUMBO) tour $(BASE) --out docs/reviews/$$(date +%Y-%m-%d)-$$(git rev-parse --short HEAD).md
+rumbo:      ; $(RUMBO) $(ARGS)
 
 check: lint types test arch security
 ```
 
-Si el proyecto tiene LLM, añade `evals` a `check`. Ajusta `check` al rigor (Parte E).
+LLM products add `evals` to `check`; prototypes drop `security`. **`make check` is offline**:
+it never needs a model credential. The real model runs only in `make evals-live`.
 
 ### A4. pre-commit
 
-Hooks: `ruff-check` y `ruff-format` (astral-sh/ruff-pre-commit), `gitleaks`,
-`check-added-large-files`, `end-of-file-fixer`, y un hook local que ejecute `uv run lint-imports`.
-Luego `pre-commit autoupdate` y `pre-commit install`.
+Hooks: `ruff-check` and `ruff-format` (astral-sh/ruff-pre-commit), `gitleaks` (staged files),
+`check-added-large-files`, `end-of-file-fixer`, `trailing-whitespace`, `check-yaml`,
+`check-toml`, `check-merge-conflict`, `detect-private-key`, `uv-lock` (astral-sh/uv-pre-commit)
+and a local hook that runs `uv run lint-imports`. Then `pre-commit autoupdate` and
+`pre-commit install`.
 
 ### A5. CI (GitHub Actions)
 
-- `ci.yml` (en cada push y PR): checkout con `fetch-depth: 0` → `astral-sh/setup-uv` →
-  `uv sync --locked` → `make check` → `uv run python scripts/check_tests_not_weakened.py --strict`.
-  Acciones fijadas por SHA.
-- `nightly.yml` (cron diario): `make mutation` sobre `src/<pkg>/domain` y, si hay LLM, la suite
-  completa de evals.
+- `ci.yml` (every push and PR), actions pinned by SHA, `permissions: contents: read`:
+  checkout with `fetch-depth: 0` → `astral-sh/setup-uv` → `uv sync --locked` → `make check`
+  (no secrets) → `scripts/check_tests_not_weakened.py --strict` with `RUMBO_BASE_REF` set to
+  the PR base → `pre-commit run --all-files` (mvp+) → SBOM artifact (production). A separate
+  `secrets` job runs `gitleaks/gitleaks-action` over the full history: the pre-commit hook only
+  sees staged files, so this job is the sensor that actually protects the repository.
+- `nightly.yml` (daily cron, mvp+): `make mutation` on `src/<pkg>/domain` and, for LLM
+  products, `make evals-live` in a protected `evals` environment. **That is the only workflow
+  that holds a model credential**, and it never runs on pull requests.
 
-### A6. Sensor anti-trampa: `scripts/check_tests_not_weakened.py`
+### A6. Anti-cheat sensor: `scripts/check_tests_not_weakened.py`
 
-Script que, comparando contra `origin/main` (o el commit base del PR):
+Comparing against `origin/main` (or the PR base commit), the script fails if:
 
-- falla si se eliminan funciones `def test_` o archivos en `tests/`;
-- falla si disminuye el número total de `assert` en `tests/`;
-- permite saltarse la regla solo si el mensaje del último commit contiene
-  `[tests-change-approved]` (que pone el humano, nunca tú).
+- a file under `tests/` is deleted or a `test_*` function disappears;
+- a test loses `assert` statements, or the total number of asserts in `tests/` drops;
+- a test gains always-true asserts (`assert True`), `skip`/`xfail` markers, or a shorter
+  `parametrize` list.
 
-Tiene sus propios tests (`tests/unit/test_check_tests_not_weakened.py`).
+It can only be bypassed by a **human**: a commit in `base..HEAD` with `[tests-change-approved]`
+in its message that was not authored by an agent, or the `tests-change-approved` label on the
+PR. What it does not see (review by hand; mutation testing covers part of it): early `return`,
+mocks that empty the behavior, asserts moved into helpers, changes to pytest configuration.
+It ships with its own tests (`tests/unit/test_check_tests_not_weakened.py`).
 
-### A7. Esqueleto de evals (solo si hay LLM)
+### A7. Evals skeleton (LLM products only)
 
 `evals/run_evals.py`:
 
-- lee casos JSONL (`{"id", "input", "expected", "grader", "tags"}`) desde
+- reads JSONL cases (`{"id", "input", "expected", "grader", "tags"}`) from
   `evals/datasets/<suite>.jsonl`;
-- ejecuta el sistema real (función de entrada en `src/<pkg>/app`, por defecto
-  `<pkg>.app.entrypoint:responder`) para cada caso, `k` veces (`--k`, por defecto 1; usa 3 para
-  medir consistencia);
-- aplica graders **deterministas** de `evals/graders/` (exactitud numérica con tolerancia,
-  igualdad de campos, aserciones sobre argumentos de tool calls, abstención cuando falta el dato);
-- reporta `pass@1` y `pass^k` (un caso pasa solo si las `k` ejecuciones pasan) y sale con código
-  ≠ 0 si `pass^k` cae por debajo del umbral (`--min-pass`).
+- runs the real system (entry function in `src/<pkg>/app`, by default
+  `<pkg>.app.entrypoint:answer`) for each case, `k` times (`--k`, default 1; use 3 to measure
+  consistency);
+- applies **deterministic** graders from `evals/graders/` (numeric accuracy with tolerance,
+  field equality, assertions on tool-call arguments, abstention when the data is missing);
+- reports `pass@1` and `pass^k` (a case passes only if all `k` runs pass) and exits non-zero
+  when `pass^k` falls below the threshold (`--min-pass`);
+- is **offline** unless `--live` is passed: adapters raise `OfflineError` instead of calling the
+  model, so the smoke suite must run from recorded fixtures. Cases tagged `example` do not
+  count toward the dataset minimum (20 prototype · 50 mvp · 100 production).
 
-Los jueces LLM se añaden **después** del primer análisis de errores y solo validados contra
-etiquetas humanas.
+LLM judges are added **after** the first error analysis and only once validated against human
+labels.
 
-### A8. Verificación final de la Parte A 🛑
+### A8. Final verification of Part A 🛑
 
-Ejecuta `make check` y muestra el resultado. Debe quedar en verde con un test trivial de ejemplo
-en cada carpeta de `tests/`. Ejecuta `rumbo doctor` si está disponible. Haz un commit:
-`chore: arnés RUMBO inicial`. Detente y resume.
+Run `make check` and show the result. It must be green with a trivial example test in every
+`tests/` folder. Run `rumbo doctor` if available. Commit: `chore: initial RUMBO harness`.
+Stop and summarize.
 
 ---
 
-## PARTE B — Contenido de `AGENTS.md`
+## PART B — Content of `AGENTS.md`
 
-`rumbo init` genera `AGENTS.md` con este esquema (ajustado a `<pkg>`, al rigor y a si hay LLM):
+`rumbo init` generates `AGENTS.md` from this outline (adjusted to `<pkg>`, the rigor and the
+LLM flag; the generated file also has a "Commands" and a "Human compass" section):
 
 ```markdown
-# AGENTS.md — mapa del proyecto (léeme antes de cada tarea)
+# AGENTS.md — project map (read me before every task)
 
-## Mapa
-- Producto: docs/product/brief.md, docs/product/prd.md
-- Specs de features (EARS): specs/
-- Decisiones de arquitectura: docs/adr/  (léelas antes de cualquier decisión estructural)
-- Capas: src/<pkg>/{domain,app,adapters,api}; contratos en pyproject.toml [tool.importlinter]
-- Seguridad: docs/security/threat-model.md
-- Evals: evals/ (solo productos LLM)
+## Map
+- Product: docs/product/brief.md, docs/product/prd.md
+- Feature specs (EARS): specs/
+- Architecture decisions: docs/adr/  (read them before any structural decision)
+- Layers: src/<pkg>/{domain,app,adapters,api}; contracts in pyproject.toml [tool.importlinter]
+- Security: docs/security/threat-model.md
+- Evals: evals/ (LLM products only)
 
-## Antes de declarar una tarea terminada
-make check   # debe estar en verde; pega la salida resumida
+## Before declaring a task done
+make check   # must be green; paste the summarized output
 
-## Flujo por tarea (ANCLA)
-1. Lee la spec y los ADRs relevantes.
-2. Propón un plan corto (archivos, tests, riesgos) y espera aprobación.
-3. Escribe primero los tests (deben fallar), luego el código mínimo, luego refactoriza.
-4. Itera hasta que `make check` pase.
-5. Resume el cambio en 3 frases y lista dependencias nuevas (si las hay).
+## Per-task flow (ANCLA)
+1. Read the spec and the relevant ADRs.
+2. Write the tests first (they must fail) and wait for the human to approve them.
+3. Propose a short plan (files, tests, risks) and wait for approval.
+4. Minimal code, then refactor; iterate until `make check` passes.
+5. Summarize the change in 3 sentences and list new dependencies (if any).
 
-## Reglas duras
-- Nunca borres, saltes ni debilites tests. Si un test parece incorrecto, detente y pregunta.
-- Separa commits estructurales (refactor) de commits de comportamiento.
-- Diffs pequeños (~300 líneas máximo). Si la tarea es más grande, propón dividirla.
-- `domain/` es puro: sin I/O, sin HTTP, sin SDKs de LLM.
-- Los cálculos numéricos que se muestran al usuario se hacen con código, nunca con el LLM.
-- Prompts solo en src/<pkg>/prompts/, con identificador de versión.
-- Ninguna dependencia nueva sin aprobación y verificación en PyPI.
-- No toques infra/, secretos ni workflows de CI sin pedirlo.
-- Nada de spikes/ se importa desde src/.
-- Si cometes el mismo error dos veces, propón un test, regla de lint o contrato que lo atrape.
+## Hard rules
+- Never delete, skip or weaken tests. If a test looks wrong, stop and ask.
+- Never write [tests-change-approved] or remove the rumbo:template mark: only the human does.
+- Separate structural commits (refactor) from behavioral commits.
+- Small diffs (~300 lines max). If the task is bigger, propose splitting it.
+- `domain/` is pure: no I/O, no HTTP, no LLM SDKs.
+- Numbers shown to the user are computed by code, never by the LLM.
+- Prompts live only in src/<pkg>/prompts/, with a version identifier.
+- No new dependency without approval and PyPI verification.
+- Do not touch infra/, secrets, the Makefile, CI workflows or evals/run_evals.py unless asked.
+- Nothing in spikes/ is imported from src/.
+- If you make the same mistake twice, propose a test, lint rule or contract that catches it.
 ```
 
-Mantén este archivo por debajo de ~100 líneas (`rumbo doctor` lo verifica). Es un mapa, no un
-manual.
+Keep the file under ~100 lines (`rumbo doctor` checks it). It is a map, not a manual.
 
 ---
 
-## PARTE C — El ciclo RUMBO (cómo trabajamos después del arnés)
+## PART C — The RUMBO cycle (how we work after the harness)
 
-Cuando el humano diga **"fase R"**, **"fase U"**, etc. (o use `/rumbo-r`, `/rumbo-u`, `/rumbo-m`,
-`/rumbo-ancla`, `/rumbo-o`), sigue la sección correspondiente. Cada gate se evalúa con
-`rumbo gate G1..G5` (chequeos automáticos + checklist que firma el humano).
+When the human says **"phase R"**, **"phase U"**, etc. (or uses `/rumbo-r`, `/rumbo-u`,
+`/rumbo-m`, `/rumbo-ancla`, `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`, `/rumbo-tour`), follow
+the matching section. Every gate is evaluated with `rumbo gate G1..G5` (automatic checks scaled
+to the rigor + a checklist the human signs; the exit code never means "signed").
 
-### R — Reconocer (¿vale la pena construirlo?)
+### R — Recognize (is it worth building?)
 
-- El humano escribe primero `docs/product/brief.md`. Tú lo criticas: supuestos débiles, métrica
-  ausente, alternativas actuales.
-- Propón guiones de entrevista; el humano hace las entrevistas.
-- Prototipos **solo en `spikes/`**. Lo que pasa a la siguiente fase es lo aprendido, no el código.
-- En productos LLM: prueba de factibilidad con 20–30 preguntas reales, ejecutadas "a mano" con el
-  modelo y los datos.
-- 🛑 **Gate G1:** problema validado con usuarios o datos reales (≥5), métrica de éxito y criterio
-  de abandono escritos.
+- The human writes `docs/product/brief.md` first. You critique it: weak assumptions, missing
+  metric, current alternatives.
+- Propose interview scripts; the human runs the interviews.
+- Prototypes **only in `spikes/`**. What moves to the next phase is what was learned, not the
+  code.
+- LLM products: feasibility test with 20–30 real questions, run "by hand" with the model and
+  the data.
+- 🛑 **Gate G1:** problem validated with users or real data (≥5), success metric and
+  abandonment criterion written down.
 
-### U — Unificar (¿qué debe hacer y cómo sabremos que lo hace?)
+### U — Unify (what must it do and how will we know?)
 
-- PRD ligero con no-objetivos y requisitos no funcionales **con números** (latencia p95, costo por
-  solicitud, disponibilidad).
-- Specs en `specs/` (`rumbo new spec "<nombre>"`) con patrones EARS:
-  - Ubicuo: "El sistema deberá…"
-  - Evento: "Cuando…, el sistema deberá…"
-  - Estado: "Mientras…, el sistema deberá…"
-  - No deseado: "Si…, entonces el sistema deberá…"
-  - Opcional: "Donde…, el sistema deberá…"
-- Tu rol: interrogar la spec (ambigüedades, casos borde, contradicciones) y proponer tests de
-  aceptación. El humano firma.
-- Si hay LLM: dataset semilla de preguntas **reales** en `evals/datasets/` y plan de evals.
-- 🛑 **Gate G2:** cada requisito tiene un test o eval planeado.
+- Light PRD with non-goals and non-functional requirements **with numbers** (p95 latency, cost
+  per request, availability). Prototypes may replace it with a criteria list.
+- Specs in `specs/` (`rumbo new spec "<name>"`) with EARS patterns:
+  - Ubiquitous: "The system shall…"
+  - Event: "When…, the system shall…"
+  - State: "While…, the system shall…"
+  - Unwanted: "If…, then the system shall…"
+  - Optional: "Where…, the system shall…"
+- Your role: interrogate the spec (ambiguities, edge cases, contradictions) and propose
+  acceptance tests. The human signs.
+- LLM products: seed dataset of **real** questions in `evals/datasets/` and the eval plan.
+- 🛑 **Gate G2:** every requirement has a planned test or eval; the dataset has the minimum of
+  real cases for the rigor.
 
-### M — Modelar (¿cómo lo estructuramos para cambiarlo con seguridad?)
+### M — Model (how do we structure it to change it safely?)
 
-- Monolito modular por defecto. ADRs en `docs/adr/` (`rumbo new adr "<decisión>"`, formato MADR,
-  Parte D); **cada ADR con una fitness function** (contrato import-linter, test de arquitectura o
-  umbral en CI).
-- El humano esboza primero las decisiones irreversibles; tú completas opciones y trade-offs.
-- Si hay LLM: ADR explícito **workflow vs. agente** (empezar por lo más simple: llamada única →
-  workflow → agente solo si los evals lo exigen). Herramientas pocas, tipadas con Pydantic, de
-  solo lectura salvo necesidad.
-- Threat model de 1 hora: STRIDE por frontera, mapeo a OWASP Top 10 LLM 2025 y Agentic 2026, y
-  prueba de la **trifecta letal** (datos privados + contenido no confiable + comunicación
-  externa): documenta qué pata se elimina.
-- 🛑 **Gate G3:** contratos en CI, threat model revisado, C4 niveles 1–2 en
+- Modular monolith by default. ADRs in `docs/adr/` (`rumbo new adr "<decision>"`, MADR format,
+  Part D); **every ADR with a fitness function** (import-linter contract, architecture test or
+  CI threshold) — required in production, recommended before.
+- The human sketches the irreversible decisions first; you complete options and trade-offs.
+- LLM products: an explicit **workflow vs. agent** ADR (start with the simplest: single call →
+  workflow → agent only if the evals demand it). Few tools, typed with Pydantic, read-only
+  unless needed.
+- One-hour threat model: STRIDE per boundary, the OWASP Top 10 for LLM Applications 2025 and
+  Agentic Applications 2026 checklist, and the **lethal trifecta** test (private data +
+  untrusted content + external communication): document which leg is removed and which sensor
+  proves it.
+- 🛑 **Gate G3:** contracts in CI, threat model reviewed, C4 levels 1–2 in
   `docs/architecture/c4.md`.
 
-### B — Build con ANCLA (cada PR)
+### B — Build with ANCLA (every PR)
 
-- **A**cotar: tests de aceptación primero (Hypothesis para invariantes de dominio). El humano los
-  aprueba.
-- **N**avegar: plan corto antes de codificar.
-- **C**errar: itera en sandbox hasta `make check` verde.
-- **L**imitar: diff pequeño; revisión humana + una segunda revisión con sesión limpia o con otro
-  modelo (`/rumbo-revisar`).
-- **A**prender: errores repetidos → nuevo sensor o línea en AGENTS.md.
-- 🛑 **Gate G4 (por PR):** CI verde, ningún test debilitado, dependencias verificadas, y el humano
-  puede explicar el cambio en 3 frases sin leer tu resumen.
+- **A**nchor: acceptance tests first (Hypothesis for domain invariants). The human approves
+  them.
+- **N**avigate: short plan before coding.
+- **C**lose the loop: iterate in a sandbox until `make check` is green.
+- **L**imit: small diff; human review + a second review by a clean session or another model
+  (`/rumbo-review`). `make review` writes a guided review for the human: risk hotspots first,
+  reading order (tests first), verification commands and three explanation-test questions.
+- Learn **A**nd measure: repeated mistakes → a new sensor or a line in AGENTS.md.
+- 🛑 **Gate G4 (per PR):** CI green, no test weakened, dependencies verified, and the human can
+  explain the change in 3 sentences without reading your summary.
 
-**Regla de oro del arnés:** si el agente comete el mismo error dos veces, se añade un sensor
-(test, regla de lint, contrato) o una guía, además de corregir el código.
+**Golden rule of the harness:** if the agent makes the same mistake twice, add a sensor (test,
+lint rule, contract) or a guide, besides fixing the code.
 
-### O — Operar, Observar, Optimizar
+### O — Operate, Observe, Optimize
 
-- Despliegue en una PaaS (Fly.io, Railway, Render o Cloud Run) con imagen inmutable
-  (`infra/Dockerfile`, tag = SHA) y **rollback ensayado**.
-- OpenTelemetry + 2–3 SLOs en `docs/ops/slos.md`. Si hay LLM: trazas GenAI (modelo, tokens,
-  costo, herramienta) hacia Langfuse o Phoenix, con versiones fijadas porque las convenciones aún
-  están en desarrollo.
-- Presupuesto de costo por solicitud, límites duros y alertas.
-- `docs/ops/runbook.md` con una entrada por modo de fallo; postmortems sin culpables
-  (`rumbo new postmortem "<título>"`) que respondan "¿qué sensor faltó?".
-- Ritual semanal: el humano revisa 20–30 trazas (open coding); tú propones categorías; los fallos
-  nuevos se vuelven casos de eval.
-- Mantenimiento: Dependabot/Renovate semanal; limpieza quincenal con refactors Tidy First;
-  documentación actualizada en el mismo PR.
-- 🛑 **Gate G5:** rollback probado, SLOs y alertas activas, límites de costo configurados.
+- Deploy on a PaaS (Fly.io, Railway, Render or Cloud Run) with an immutable image
+  (`infra/Dockerfile`, tag = SHA) and a **rehearsed rollback**.
+- OpenTelemetry + 2–3 SLOs in `docs/ops/slos.md`. LLM products: GenAI traces (model, tokens,
+  cost, tool) to Langfuse or Phoenix, with pinned versions because the conventions are still
+  in development.
+- Cost budget per request, hard limits and alerts.
+- `docs/ops/runbook.md` with one entry per failure mode; blameless postmortems
+  (`rumbo new postmortem "<title>"`) that answer "which sensor was missing?".
+- Weekly ritual: the human reviews 20–30 traces (open coding); you propose categories; new
+  failures become eval cases.
+- Maintenance: Dependabot/Renovate weekly with a cooldown; biweekly cleanup with Tidy First
+  refactors; documentation updated in the same PR.
+- 🛑 **Gate G5:** rollback rehearsed, SLOs and alerts active, cost limits configured.
 
-### Brújula humana (siempre)
+### Human compass (always)
 
-- Ante decisiones de diseño, pide al humano su versión primero.
-- Cuando el humano esté aprendiendo algo nuevo, explica y pregunta en lugar de resolver todo.
-- No propongas usar agentes para: decisiones irreversibles, código de seguridad sin tests previos,
-  o temas que el humano necesite dominar (p. ej., su tesis).
-- Anota en `docs/decisiones.md` las decisiones que tomó el humano y por qué
-  (`rumbo decision "<título>" --porque "<razón>"`).
+- For design decisions, ask the human for their version first.
+- When the human is learning something new, explain and ask instead of solving everything.
+- Do not propose agents for: irreversible decisions, security code without prior tests, or
+  topics the human needs to master (e.g. their thesis).
+- Log the decisions the human made, and why, in `docs/decisions.md`
+  (`rumbo decision "<title>" --why "<reason>"`).
 
 ---
 
-## PARTE D — Plantillas
+## PART D — Templates
 
-`rumbo init` crea estas plantillas; `rumbo new adr|spec|postmortem "<título>"` crea documentos
-numerados a partir de ellas.
+`rumbo init` creates these templates; `rumbo new adr|spec|postmortem "<title>"` creates
+numbered documents from them.
 
 **`docs/product/brief.md`**
 
 ```
 # Brief
-Problema: <quién> no puede <qué> porque <causa>; hoy usa <alternativa>.
-Evidencia: <entrevistas/datos, n=>
-Métrica de resultado:
-Supuestos riesgosos (valor / usabilidad / factibilidad / viabilidad):
-Experimentos y criterio de éxito/fracaso:
-No-objetivos:
-Decisión G1: construir / iterar / abandonar
+Problem: <who> cannot <what> because <cause>; today they use <alternative>.
+Evidence: <interviews/data, n=>
+Outcome metric:
+Risky assumptions (value / usability / feasibility / viability):
+Experiments and success/failure criterion:
+Non-goals:
+G1 decision: build / iterate / abandon
 ```
 
-**`docs/adr/0000-plantilla.md`** (MADR)
+**`docs/adr/0000-template.md`** (MADR)
 
 ```
-# ADR-000N: <decisión>
-Estado: propuesto | aceptado | reemplazado por ADR-XXXX    Fecha:
-## Contexto
-## Drivers (requisitos no funcionales)
-## Opciones consideradas
-## Decisión y razón
-## Consecuencias (+/-)
+# ADR-000N: <decision>
+Status: proposed | accepted | superseded by ADR-XXXX    Date:
+## Context
+## Drivers (non-functional requirements)
+## Options considered
+## Decision and rationale
+## Consequences (+/−)
 ## Fitness function
-<contrato / test / umbral en CI que la hace cumplir>
-## Reversibilidad: alta | media | baja
+<contract / test / CI threshold that enforces it>
+## Reversibility: high | medium | low
 ```
 
-Los ADRs aceptados son inmutables: para cambiar una decisión se escribe uno nuevo que reemplaza al
-anterior. Si la reversibilidad es baja, el humano decide sin un borrador previo del agente.
+Accepted ADRs are immutable: to change a decision, write a new ADR that supersedes it. When
+reversibility is low, the human decides without a prior draft from the agent.
 
-**`specs/0000-plantilla.md`**
+**`specs/0000-template.md`**
 
 ```
-# F-000N: <nombre>
-Historia: Como <usuario> quiero <capacidad> para <beneficio>.
-## Requisitos (EARS)
-- R1 (evento): Cuando …, el sistema deberá …
-- R2 (no deseado): Si …, entonces el sistema deberá …
-## Criterios de aceptación
-<tests pytest / propiedades Hypothesis que los verifican>
-## Evals (si hay LLM): <IDs de casos, umbral>
-## RNF: p95 < X s · costo < Y USD
-## Fuera de alcance
+# F-000N: <name>
+Story: As a <user> I want <capability> so that <benefit>.
+## Requirements (EARS)
+- R1 (event): When …, the system shall …
+- R2 (unwanted): If …, then the system shall …
+## Acceptance criteria
+<pytest tests / Hypothesis properties that verify them>
+## Evals (LLM products): <case IDs, threshold>
+## NFR: p95 < X s · cost < Y USD
+## Out of scope
 ```
 
 **`docs/security/threat-model.md`**
 
 ```
 # Threat model
-Flujo de datos (diagrama Mermaid):
-Activos:
-Fronteras de confianza:
-STRIDE por frontera:
-OWASP LLM 2025 / Agentic 2026 aplicables:
-Trifecta letal: ¿datos privados? ¿contenido no confiable? ¿comunicación externa?
-Mitigaciones (cada una con su test):
-Riesgos aceptados (firmados por el humano):
+Data flow (Mermaid diagram):
+Assets:
+Trust boundaries:
+STRIDE per boundary:
+Lethal trifecta: private data? untrusted content? external communication? which leg is removed?
+OWASP LLM 2025 / Agentic 2026 checklist (ID · applies? · mitigation · test):
+Mitigations (each with its test):
+Accepted risks (signed by the human):
 ```
 
 **`docs/ops/runbook.md`**
 
 ```
 # Runbook
-Dashboards:
-## <Alerta / modo de fallo>
-Síntoma · Diagnóstico (consulta de trazas) · Mitigación (flag / rollback) · Escalamiento
+Dashboards:  Key rotation:  Vendor contacts:
+## <Alert / failure mode>
+Symptom · Diagnosis (trace query) · Mitigation (flag / rollback) · Escalation
 ```
 
-**`docs/postmortems/AAAA-MM-DD-titulo.md`**
+**`docs/postmortems/YYYY-MM-DD-title.md`**
 
 ```
-Resumen · Impacto · Línea de tiempo · Causa raíz
-Sensor o guía que faltó:
-Acciones (dueño, fecha):
-Test o caso de eval añadido:
+Summary · Impact · Timeline · Root cause
+Which sensor or guide was missing:
+Actions (owner, date):
+Test or eval case added:
 ```
 
 ---
 
-## PARTE E — Escalar el rigor
+## PART E — Scaling the rigor
 
-| Práctica | prototipo | mvp | produccion |
+| Practice | prototype | mvp | production |
 |---|---|---|---|
-| Producto | Brief de 5 líneas | Brief + PRD | PRD revisado |
-| Specs | Lista de criterios | EARS en el núcleo | EARS en todo |
-| ADRs | 0–1 | Decisiones irreversibles | Todas + fitness function |
-| Tests | Smoke | Unit + integración + Hypothesis | + mutation testing |
-| Evals (LLM) | 20 casos a mano | Análisis de errores + 50–100 casos en CI | + jueces validados, pass^k, red teaming |
-| Seguridad | Sin secretos en código | Threat model + bandit + pip-audit + gitleaks | + SBOM, revisión de privacidad |
-| Observabilidad | Logs | OTel + trazas LLM + alertas de costo | SLOs con error budget |
-| Despliegue | Local | PaaS + rollback ensayado | Canary / feature flags |
-| Revisión | Informal | Humano + segundo modelo | + dos pares de ojos en zonas críticas |
-| Brújula humana | Opcional | Prueba de explicación | Obligatoria + documentar modelos mentales |
+| Product | 5-line brief | Brief + PRD | Reviewed PRD |
+| Specs | Criteria list | EARS in the core | EARS everywhere, requirement → test traceability |
+| ADRs | 0–1 | Irreversible decisions | All + fitness function |
+| Tests | Smoke | Unit + integration + Hypothesis | + mutation testing, contract tests with external APIs |
+| Evals (LLM) | 20 cases by hand | Error analysis + 50–100 cases in CI | + validated judges, pass^k, red teaming |
+| Security | No secrets in code | Threat model + bandit + pip-audit + gitleaks | + SBOM, privacy review |
+| Observability | Logs | OTel + LLM traces + cost alerts | SLOs with error budget |
+| Deployment | Local | PaaS + rehearsed rollback | Canary / feature flags |
+| Review | Informal | Human + second model | + two pairs of eyes in critical areas |
+| Human compass | Optional | Explanation test | Mandatory + documented mental models |
 
-Lo que genera `rumbo init` según el rigor:
+What `rumbo init` and `rumbo gate` do per rigor:
 
-| | prototipo | mvp | produccion |
+| | prototype | mvp | production |
 |---|---|---|---|
-| `make check` | lint, types, test, arch (+evals) | + security | + cobertura ≥ 80 % |
-| CI | check + sensor | + pre-commit/gitleaks | + SBOM CycloneDX |
-| Nightly | — | mutation (+ evals completas) | mutation + evals con k=3 |
-| Dependabot | — | sí | sí |
+| `make check` | lint, types, test, arch (+evals) | + security, coverage report | same (coverage is informational: mutation testing is the sensor) |
+| CI | check + sensor + gitleaks | + pre-commit on all files | + SBOM (CycloneDX from uv.lock) |
+| Nightly | — | mutation (+ live evals) | mutation + live evals with k=3 |
+| Dependabot | — | weekly, 7-day cooldown | same |
+| Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases | + fitness function per ADR, nightly, SBOM; 100 cases |
 
-Manda el **peor impacto plausible**, no el tamaño del código. Un agente que da cifras usadas en
-decisiones comerciales es, como mínimo, un "MVP con controles de producción" en lo que respecta a
-exactitud. Ajusta `make check` y CI al nivel elegido en A0.
+What matters is the **worst plausible impact**, not the size of the code. An agent that hands
+out figures used in commercial decisions is, at the very least, an "MVP with production
+controls" as far as accuracy goes. Adjust `make check` and CI to the level chosen in A0.
 
 ---
 
-## PARTE F — Perfiles de caso (opcional)
+## PART F — Case profiles (optional)
 
-Ejemplos de cómo aplicar RUMBO a un caso concreto. El completo está en
-`docs/ejemplos/agente-xm.md` del repositorio de RUMBO.
+Examples of how to apply RUMBO to a concrete case. The complete one is in
+`docs/examples/xm-agent.md` of the RUMBO repository.
 
-### Agente conversacional sobre el mercado eléctrico colombiano (XM)
+### Conversational agent over the Colombian electricity market (XM)
 
-- Fuente de datos: librería oficial `pydataxm` (verifica en PyPI y en el repositorio
-  `EquipoAnaliticaXM/API_XM` antes de instalar: `rumbo verify-dep pydataxm`). La API pública
-  limita el rango por llamada: el adaptador debe paginar por bloques y cachear (DuckDB/Parquet).
-- Arquitectura (ADR-0001): **workflow, no agente**:
-  1. el LLM extrae `{métrica, entidad, rango, agregación}` en un esquema Pydantic con un enum
-     cerrado de métricas;
-  2. código determinista valida y consulta XM vía el adaptador;
-  3. código determinista calcula;
-  4. el LLM redacta usando solo los datos devueltos, mostrando unidad, fuente y fecha de consulta.
-- Propiedades Hypothesis iniciales: la unión de bloques de fechas cubre exactamente el rango sin
-  solapes; agregaciones diarias consistentes con los datos horarios; conversiones de unidades
-  invertibles; zona horaria `America/Bogota`.
-- Evals deterministas: exactitud numérica con tolerancia, argumentos correctos de las
-  herramientas, abstención ante datos inexistentes; consistencia con pass^3.
-- Seguridad: sin herramientas de escritura ni de red arbitraria, salida sin enlaces ni imágenes
-  remotas → trifecta rota por diseño.
-- Primera tarea ANCLA: el adaptador XM con caché y paginación.
+- Data source: the official `pydataxm` library (verify on PyPI and in the
+  `EquipoAnaliticaXM/API_XM` repository before installing: `rumbo verify-dep pydataxm`). The
+  public API limits the range per call: the adapter must page by blocks and cache
+  (DuckDB/Parquet).
+- Architecture (ADR-0001): **workflow, not agent**:
+  1. the LLM extracts `{metric, entity, range, aggregation}` into a Pydantic schema with a
+     closed enum of metrics;
+  2. deterministic code validates and queries XM through the adapter;
+  3. deterministic code computes;
+  4. the LLM writes the answer using only the returned data, showing unit, source and query
+     date.
+- Initial Hypothesis properties: the union of date blocks covers the range exactly with no
+  overlap; daily aggregations consistent with hourly data; unit conversions invertible;
+  `America/Bogota` time zone.
+- Deterministic evals: numeric accuracy with tolerance, correct tool arguments, abstention on
+  missing data; consistency with pass^3.
+- Security: no write or arbitrary-network tools, output rendered without links or remote
+  images → the trifecta is broken by design.
+- First ANCLA task: the XM adapter with cache and pagination.

@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -16,18 +20,29 @@ jobs:
       - run: uv sync --locked
       - run: make check
 
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   e2e:
-    # Monta proyectos reales con `rumbo init` y exige `make check` en verde en cada uno.
+    # Mounts real projects with `rumbo init` and requires `make check` to be green in each.
     runs-on: ubuntu-latest
     needs: check
     strategy:
       fail-fast: false
       matrix:
         flags:
-          - "--no-llm --rigor prototipo"
+          - "--no-llm --rigor prototype"
           - "--no-llm --rigor mvp"
-          - "--llm --proveedor anthropic --rigor mvp"
-          - "--llm --proveedor openai --rigor produccion"
+          - "--llm --provider anthropic --rigor mvp"
+          - "--llm --provider claude-code --rigor mvp"
+          - "--llm --provider openai --rigor production"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
