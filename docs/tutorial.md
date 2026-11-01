@@ -7,7 +7,7 @@ Python project. Times are approximate.
 ## 1. Mount the harness (5 min)
 
 ```bash
-mkdir price-agent && cd price-agent && git init
+mkdir price-agent && cd price-agent && git init -b main
 uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
   --name "Price Agent" --package price_agent --llm --provider claude-code --rigor mvp \
   --case "answers questions about daily spot prices"
@@ -46,7 +46,8 @@ Fill the EARS requirements (keep the ids: `R1`, `R2`…), the acceptance criteri
 spec owns. Delete the template mark. `/rumbo-u` lists the ambiguities the agent sees.
 
 ```bash
-rumbo gate G2                   # EARS present; data contracts are recommended at mvp, required at production
+rumbo gate G2                   # the spec rows must be green; PRD, eval plan and the 50-case
+                                # dataset will still be red at mvp: expected until phase U is complete
 ```
 
 ## 4. Phase B, ANCLA: one spec, one fresh session (10 min)
@@ -65,8 +66,7 @@ Start a **new** Claude Code session (`/clear`) and type `/rumbo-ancla F-0001`.
 ```bash
 rumbo trace                     # every requirement has a test?
 rumbo gate G4                   # sensor, make check, diff size, traceability (compares with main)
-make sensor BASE=main           # the anti-cheat sensor; BASE defaults to origin/main, which this repo lacks
-make review BASE=main           # docs/reviews/<date>-<sha>.md: your guided tour
+make review                     # docs/reviews/<date>-<sha>.md: your guided tour (base: main here)
 ```
 
 Read the tour, not the agent's summary: risk hotspots first, tests before code, three

@@ -40,6 +40,14 @@ All notable changes to this project are documented here. The format follows
   traceability table in `/rumbo-review`, and a session-count log when a spec closes.
 
 ### Changed
+- Newcomer UX (from a from-zero usability run): `rumbo` alone prints help and the two commands
+  to start with; `rumbo tour` and the generated Makefile fall back to `main` when `origin/main`
+  does not exist; the Makefile uses a locally installed `rumbo` before fetching it with `uvx`;
+  the gate header is ✅ when no check failed (still "NOT SIGNED" until the human ticks the
+  checklist); interactive `rumbo init` asks before writing into a non-empty directory;
+  `rumbo doctor` warns about the `@your-handle` and security-contact placeholders; gate G3 no
+  longer accepts sections of untouched templates; `pre-commit autoupdate` rev bumps are not
+  reported as drift; the README opens with the install block and a "just the sensors" path.
 - `rumbo update` lists only harness files (Makefile, AGENTS.md, CI, hooks…) under "differ",
   never the human's documents.
 

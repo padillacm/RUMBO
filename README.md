@@ -13,6 +13,16 @@ Learn **A**nd measure.
 > invests in **executable verifiers** (tests, properties, types, architecture contracts, evals,
 > hooks) and in keeping the human in charge of the decisions, not in prompts.
 
+```bash
+mkdir my-project && cd my-project && git init -b main
+uvx --from git+https://github.com/padillacm/RUMBO rumbo init   # four questions, then the harness
+make check                                                     # green, offline
+```
+
+Just want the sensors, not the method? Answer `rumbo init` with `--no-llm --rigor prototype`:
+you get `make check`, the anti-cheat sensor, the Claude Code hooks and `AGENTS.md`, and you can
+ignore gates and templates until you want them.
+
 ## Contents
 
 1. [What RUMBO is](#what-rumbo-is)
@@ -79,7 +89,7 @@ Requirements: Python ≥ 3.11, [uv](https://docs.astral.sh/uv/), git and `make` 
 Git Bash or WSL). Claude Code to work with the agent.
 
 ```bash
-mkdir my-project && cd my-project && git init
+mkdir my-project && cd my-project && git init -b main
 uvx --from git+https://github.com/padillacm/RUMBO rumbo init      # asks the four A0 questions
 make check                                                        # must be green (offline)
 git add -A && git commit -m "chore: initial RUMBO harness"
@@ -166,7 +176,9 @@ Conventions `rumbo metrics` understands in `docs/decisions.md`: `F-000N closed` 
 In a generated project, the `Makefile` wraps the harness: `make check` (everything, offline),
 `make check-brief` (only the failing tail reaches the agent; full log in `.rumbo-check.log`),
 `make fmt`, `make sensor`, `make review`, `make evals` / `make evals-live`, `make mutation`,
-`make sbom`, `make hooks`, `make rumbo ARGS="..."`.
+`make sbom`, `make hooks`, `make rumbo ARGS="..."`. The Makefile uses a locally installed `rumbo`
+when there is one and `uvx` otherwise (`RUMBO=... make review` overrides it); `BASE` is
+`origin/main` when it exists, else `main` (`make review BASE=develop` overrides it).
 
 ## What `rumbo init` generates
 
