@@ -2,7 +2,7 @@
 
 You need Python ≥ 3.11, `uv`, `git`, `make` and Claude Code. The example is a small LLM product
 with the `claude-code` provider (no API key); drop `--llm --provider claude-code` for a plain
-Python project. Times are indicative.
+Python project. Times are approximate.
 
 ## 1. Mount the harness (5 min)
 
@@ -46,7 +46,7 @@ Fill the EARS requirements (keep the ids: `R1`, `R2`…), the acceptance criteri
 spec owns. Delete the template mark. `/rumbo-u` lists the ambiguities the agent sees.
 
 ```bash
-rumbo gate G2                   # EARS present, contracts filled (recommendation at mvp)
+rumbo gate G2                   # EARS present; data contracts are recommended at mvp, required at production
 ```
 
 ## 4. Phase B, ANCLA: one spec, one fresh session (10 min)
@@ -64,8 +64,9 @@ Start a **new** Claude Code session (`/clear`) and type `/rumbo-ancla F-0001`.
 
 ```bash
 rumbo trace                     # every requirement has a test?
-rumbo gate G4                   # sensor, make check, diff size vs main, traceability
-make review BASE=main           # docs/reviews/<date>-<sha>.md: your guided tour (BASE defaults to origin/main)
+rumbo gate G4                   # sensor, make check, diff size, traceability (compares with main)
+make sensor BASE=main           # the anti-cheat sensor; BASE defaults to origin/main, which this repo lacks
+make review BASE=main           # docs/reviews/<date>-<sha>.md: your guided tour
 ```
 
 Read the tour, not the agent's summary: risk hotspots first, tests before code, three

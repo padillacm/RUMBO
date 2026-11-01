@@ -13,8 +13,8 @@ Story: As a <user> I want <capability> so that <benefit>.
      by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
 
 ## Data contracts and ownership
-<!-- What two sessions (or two agents) must agree on BEFORE writing code. Spec studies show that
-     omitting explicit data structures is what breaks parallel work (88.9% vs 24.6% integration). -->
+<!-- What two sessions (or two agents) must agree on BEFORE writing code. Omitting explicit data
+     structures is what breaks parallel work (docs/method.md, section 3.1). -->
 - Types / schemas: <name, fields, invariants>
 - Signatures: <function(args) -> result; errors raised>
 - Shared invariants: <e.g. date blocks cover the range exactly, no overlap>

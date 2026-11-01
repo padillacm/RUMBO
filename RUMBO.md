@@ -8,7 +8,8 @@
 >   and stops at every approval point.
 > - **Project that already has the harness** (`AGENTS.md` exists and `pyproject.toml` has a
 >   `[tool.rumbo]` section): Part A is done. Do **not** ask the A0 questions again — the answers
->   are in `docs/decisions.md`. Go to A8 if `make check` was never green, otherwise to Part C.
+>   are in `docs/decisions.md`. Go to step A8 ("Final verification") if `make check` was never
+>   green, otherwise to Part C ("The RUMBO cycle").
 >
 > RUMBO is an end-to-end framework for building software with AI coding agents:
 > **R**ecognize → **U**nify → **M**odel → **B**uild with ANCLA → **O**perate/Observe/Optimize,
@@ -54,7 +55,7 @@ Ask the human (all at once, in a single message):
 2. Is it an LLM product? (yes/no). If yes: which model provider? (`anthropic`, `openai`,
    `google`, `mistral`, `claude-code` — the Claude Code CLI with the developer's own login, no
    API key — or `other`).
-3. Rigor level: `prototype`, `mvp` or `production` (see Part E).
+3. Rigor level: `prototype`, `mvp` or `production` (see Part E "Scaling the rigor").
 4. Is there a concrete use case? (for example: a conversational agent over the Colombian
    electricity market data published by XM).
 
@@ -80,7 +81,7 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 
 ```
 .
-├── AGENTS.md                 # Part B
+├── AGENTS.md                 # the agent's map; outline in Part B
 ├── CLAUDE.md                 # one line: @AGENTS.md
 ├── RUMBO.md                  # this file
 ├── README.md
@@ -107,7 +108,7 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 │   ├── ops/slos.md
 │   ├── postmortems/0000-template.md
 │   ├── evals/plan.md         # LLM products only
-│   ├── reviews/              # guided review guides (rumbo tour)
+│   ├── reviews/              # guided reviews written by rumbo tour
 │   └── decisions.md          # human decisions log (the compass)
 ├── specs/0000-template.md
 ├── src/<pkg>/
@@ -128,8 +129,8 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 │   ├── calibration/example.jsonl   # human-labeled rows for judge calibration
 │   ├── error_analysis/.gitkeep     # log.md grows with `rumbo eval add`
 │   └── run_evals.py
-├── scripts/check_tests_not_weakened.py   # anti-cheat sensor (A6)
-├── scripts/rumbo_guard.py                # Claude Code hook: hard rules as sensors (A6)
+├── scripts/check_tests_not_weakened.py   # anti-cheat sensor (step A6)
+├── scripts/rumbo_guard.py                # guard hook for Claude Code (step A6)
 ├── spikes/README.md          # "Throwaway code. Never imported from src/."
 └── infra/Dockerfile
 ```
@@ -257,7 +258,7 @@ and a local hook that runs `uv run lint-imports`. Then `pre-commit autoupdate` a
   pyproject, CI, hooks, scripts, specs, decisions). Replace the placeholder handles and enable
   "require review from code owners" in the branch protection to make it binding.
 
-### A6. Anti-cheat sensors: `check_tests_not_weakened.py` and `rumbo_guard.py`
+### A6. Sensors the agent cannot bypass: the anti-cheat sensor and the guard hook
 
 Comparing against `origin/main` (or the PR base commit), the script fails if:
 
@@ -272,7 +273,7 @@ PR. What it does not see (review by hand; mutation testing covers part of it): e
 mocks that empty the behavior, asserts moved into helpers, changes to pytest configuration.
 It ships with its own tests (`tests/unit/test_check_tests_not_weakened.py`).
 
-`scripts/rumbo_guard.py` is the second sensor, wired by `.claude/settings.json` as Claude Code
+`scripts/rumbo_guard.py` is the **guard hook**, wired by `.claude/settings.json` as Claude Code
 hooks. Before every `Edit`/`Write`/`Bash` call it blocks (exit 2, the reason reaches the agent):
 edits to the protected files (Makefile, `pyproject.toml`, CI, `infra/`, pre-commit, both
 sensors, `evals/run_evals.py`, `.env*`), removal of the `<!-- rumbo:template` mark, writing
@@ -401,7 +402,7 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
 ### M — Model (how do we structure it to change it safely?)
 
 - Modular monolith by default. ADRs in `docs/adr/` (`rumbo new adr "<decision>"`, MADR format,
-  Part D); **every ADR with a fitness function** (import-linter contract, architecture test or
+  template in Part D); **every ADR with a fitness function** (import-linter contract, architecture test or
   CI threshold) — required in production, recommended before.
 - The human sketches the irreversible decisions first; you complete options and trade-offs.
 - LLM products: an explicit **workflow vs. agent** ADR (start with the simplest: single call →
@@ -433,12 +434,11 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
   explain the change in 3 sentences without reading your summary.
 
 **Golden rule of the harness:** if the agent makes the same mistake twice, add a sensor (test,
-lint rule, contract) or a guide, besides fixing the code.
+lint rule, contract) or a guide, in addition to fixing the code.
 
 **Context and parallel work.** Model quality degrades with context length from the first few
 thousand tokens (there is no safe threshold; see `docs/method.md`, section 3.1 "Working within
-the agent's effective context"), so the harness keeps
-each unit of work small:
+the agent's effective context"), so the harness keeps each unit of work small:
 
 - One spec per session, started fresh from the spec; `/clear` between unrelated tasks. The
   session that wrote the spec is not the one that implements it.
@@ -455,7 +455,7 @@ each unit of work small:
 
 ### O — Operate, Observe, Optimize
 
-- Deploy on a PaaS (Fly.io, Railway, Render or Cloud Run) with an immutable image
+- Deploy on a managed platform (PaaS: Fly.io, Railway, Render or Cloud Run) with an immutable image
   (`infra/Dockerfile`, tag = SHA) and a **rehearsed rollback**.
 - 2–3 SLOs in `docs/ops/slos.md` (LLM products: cost per request, budget abstentions, online
   accuracy). LLM products are instrumented from day one: every request runs inside
@@ -488,6 +488,9 @@ each unit of work small:
 ---
 
 ## PART D — Templates
+
+Outlines only. The generated files (`rumbo init`, refreshed by `rumbo update`) are canonical and
+carry guidance comments these outlines omit.
 
 `rumbo init` creates these templates; `rumbo new adr|spec|postmortem "<title>"` creates
 numbered documents from them.

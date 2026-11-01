@@ -12,14 +12,14 @@ prompts or "virtual teams" of agents.
 
 The operational instructions for the agent live in [`RUMBO.md`](../RUMBO.md). This document
 explains the **why**. The Spanish source documents this method was distilled from are
-summarized here; the evidence is dated to October 2026.
+summarized here; the evidence is current as of October 2026.
 
 ---
 
 ## 1. Findings that ground it (evidence as of October 2026)
 
 ### 1.1 AI amplifies discipline; it does not substitute for it
-- **DORA 2025** (≈5,000 professionals): AI adoption is associated with more delivery
+- **DORA 2025** (the DevOps Research and Assessment report, ≈5,000 professionals): AI adoption is associated with more delivery
   *throughput* **and** more instability. "AI's primary role in software development is that of
   an amplifier." Without robust controls (automated tests, mature version control, fast
   feedback) more change volume produces instability. *Correlational, not causal.*
@@ -91,7 +91,7 @@ summarized here; the evidence is dated to October 2026.
 | **O: Operate, Observe, Optimize** | Does it work in production, what does it cost, how does it evolve? | CI/CD, SLOs, LLM traces, runbook, postmortems, debt backlog | **G5:** SLOs and alerts active; rollback rehearsed; cost budget with alerts |
 | **Human compass** (transversal) | Do we still understand and decide? | Decisions log, no-AI sessions, diff explanation | If the human cannot explain a module, it is not merged |
 
-ANCLA (Anchor, Navigate, Close, Limit, Learn-and-measure) **is phase B**, but its principles
+ANCLA (Anchor, Navigate, Close the loop, Limit, Learn And measure) **is phase B**, but its principles
 apply recursively to the rest: in R, "anchor" means fixing metrics; in M, fixing contracts.
 
 ### 2.1 R — Recognize
@@ -131,23 +131,40 @@ apply recursively to the rest: in R, "anchor" means fixing metrics; in M, fixing
 
 ### 2.4 B — Build with ANCLA
 
-| Step | Guides (feed-forward) | Sensors (feedback) | Who |
-|---|---|---|---|
-| **A**nchor in verifiers | EARS spec with ids (`F-000N.Rk`); tests that name their requirement, reviewed by the human before the code | pytest in red; Hypothesis; strict pyright in `domain/`; `rumbo trace` (requirement → test) | Human approves; agent drafts the tests |
-| **N**avigate with a plan | AGENTS.md ("a map, not a manual"); linked ADRs | Plan review before coding | Agent proposes; human approves |
-| **C**lose the loop in a sandbox | Documented verification commands | ruff, pyright, pytest, import-linter, bandit, pip-audit, regression evals | Agent iterates until green |
-| **L**imit and review | Diffs <~300 lines; structure separated from behavior; one writing agent; PR template with the checklist | Human review + second model; Beck's alarms; new-dependency verification (slopsquatting); guided review (`rumbo tour`); Claude Code hooks that block edits to the sensors, template-mark removal, approval marks, force pushes and a red `make check` at Stop | Human decides the merge |
-| Learn **A**nd measure | Findings turned into rules | `rumbo metrics` (sessions per spec, gates signed, deploy/incident proxies, requirements traced, eval runs), mutmut on critical modules, reverted PRs, pass^k | Both |
+Each step has guides (feed-forward, what prevents the mistake), sensors (feedback, what
+catches it) and an owner.
+
+**A — Anchor in verifiers.** Guides: the EARS spec with requirement ids (`F-000N.Rk`) and tests
+that name their requirement, reviewed by the human before the code. Sensors: pytest in red,
+Hypothesis, strict pyright in `domain/`, `rumbo trace` (requirement → test). The human
+approves; the agent drafts the tests.
+
+**N — Navigate with a plan.** Guides: AGENTS.md ("a map, not a manual") and the linked ADRs.
+Sensor: the plan is reviewed before any code. The agent proposes; the human approves.
+
+**C — Close the loop in a sandbox.** Guides: documented verification commands. Sensors: ruff,
+pyright, pytest, import-linter, bandit, pip-audit and the regression evals. The agent iterates
+until everything is green.
+
+**L — Limit and review.** Guides: diffs under ~300 lines, structure separated from behavior, one
+writing agent, a PR template with the checklist. Sensors: human review plus a second model,
+Beck's alarms, verification of new dependencies (slopsquatting), the guided review
+(`rumbo tour`), and the guard hook, which blocks edits to the sensors, removal of a template
+mark, approval marks, force pushes and finishing with a red `make check`. The human decides
+the merge.
+
+**A — Learn And measure.** Guides: findings turned into rules. Sensors: `rumbo metrics`
+(sessions per spec, gates signed, deploy and incident proxies, requirements traced, eval runs),
+mutation testing on critical modules, reverted PRs, pass^k. Both.
 
 **Golden rule of the harness:** if the agent makes the same mistake twice, add a sensor (test,
-lint rule, contract) or a guide, besides fixing the code.
+lint rule, contract) or a guide, in addition to fixing the code.
 
 **Rules are prose until a hook enforces them.** AGENTS.md says "never touch the Makefile" and
 "never remove the template mark"; nothing in a prompt guarantees it. RUMBO wires
-`scripts/rumbo_guard.py` as Claude Code `PreToolUse` and `Stop` hooks (`RUMBO.md`, Part A,
-step A6 "Anti-cheat sensors"): a
-blocked call returns the reason to the agent, which has to ask the human. The hook never binds
-the human, who edits by hand or overrides it locally. This is Böckeler's sensor/guide split
+`scripts/rumbo_guard.py` (the guard hook) as Claude Code `PreToolUse` and `Stop` hooks
+(`RUMBO.md`, Part A, step A6): a blocked call returns the reason to the agent, which has to ask
+the human. The hook never binds the human, who edits by hand or overrides it locally. This is Böckeler's sensor/guide split
 applied to the harness itself, and the cheapest place to start when a mistake repeats.
 
 ### 2.5 O — Operate, Observe, Optimize
@@ -254,7 +271,7 @@ A = approves/accountable, R = does the work, C = consulted.
 | NFRs and budgets | **A/R** | C | Realistic numbers | Token and cost estimates |
 | Error analysis and evals | **A/R** (open coding by hand) | R (preliminary axial coding, synthetic data) | Final taxonomy, gold labels | TPR/TNR of the LLM judge |
 | ADRs and architecture | **A** (sketches first) | R (options, fitness functions) | Trade-offs, reversibility | Contracts in CI |
-| Threat model | **A/R** | C (enumerates threats) | Priorities, accepted risks | Adversarial tests, SAST |
+| Threat model | **A/R** | C (enumerates threats) | Priorities, accepted risks | Adversarial tests, static analysis (SAST) |
 | Acceptance tests | **A** | R | That they test the intent | That they fail before the change |
 | Implementation | C | **R** | Diff and explanation test | Full CI |
 | PR review | **A** | R (second model) | Design, security, tests intact | Lint, types, architecture, SAST |
@@ -404,7 +421,7 @@ products).
    problems. The direction is consistent; the magnitudes do not generalize.
 5. **Prompt injection has no known robust solution.** Defenses are mostly architectural;
    detectors are one more layer, not a guarantee.
-6. **OTel GenAI is still in "Development":** isolate the instrumentation and pin versions.
+6. **The OpenTelemetry (OTel) GenAI conventions are still in "Development":** isolate the instrumentation and pin versions.
 7. **Scale:** the framework is calibrated for 1–3 people.
 8. **Not verified in primary sources during the original research:** the details of MADR 4.0
    and the content of Husain and Shankar's book. Confirmed: Meta's "Agents Rule of Two" and

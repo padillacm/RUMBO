@@ -1,7 +1,7 @@
 # RUMBO
 
-An end-to-end framework for building software with AI coding agents (Claude Code first),
-without losing control of the *what* and the *why*. Python projects, teams of one to three
+An end-to-end framework for building software with AI coding agents (Claude Code first, others
+possible), without losing control of the *what* and the *why*. Python projects, teams of one to three
 people, from prototype to production.
 
 **R**ecognize → **U**nify → **M**odel → **B**uild with ANCLA → **O**perate/Observe/Optimize,
@@ -41,7 +41,8 @@ and section numbers refer to is explained in the [glossary](#glossary)):
 | **The `rumbo` CLI** | Mounts and updates the *harness* in any Python project, creates documents from templates, evaluates gates, runs the anti-cheat sensor, verifies dependencies, builds guided reviews, traces requirements to tests, turns failures into eval cases and reports process metrics. Standard library only. |
 | **The generated harness** | Everything that surrounds the agent so it can self-correct and cannot cheat: `AGENTS.md` (a map, ≤100 lines), one offline `make check`, CI with pinned actions, Claude Code hooks, hexagonal layers with import contracts, tests, evals with deterministic graders, budget and telemetry for LLM products, and the document templates the human fills. |
 
-The cycle, in one paragraph. **Recognize**: the human writes the brief first; the agent
+The cycle, in one paragraph (every term below is defined in the [glossary](#glossary)).
+**Recognize**: the human writes the brief first; the agent
 critiques it (gate G1). **Unify**: EARS specs with requirement ids and explicit data
 contracts, a PRD, a dataset of real questions when there is an LLM (G2). **Model**: ADRs with
 fitness functions, hexagonal layers enforced by import-linter, a threat model with the lethal
@@ -53,7 +54,7 @@ postmortems, production failures turned into eval cases (G5). Across all of it t
 compass**: the human sketches design decisions first, passes the explanation test before a
 merge, and logs decisions in `docs/decisions.md`.
 
-Who it is for: developers and small teams that already use Claude Code (or a similar agent)
+Who it is for. Developers and small teams that already use Claude Code (or a similar agent)
 and want the speed without the instability, the cognitive debt or the security holes that the
 evidence associates with unsupervised agent use. The method is language-agnostic; the CLI and
 the templates are Python (`uv`, ruff, pyright, pytest, Hypothesis, import-linter, bandit,
@@ -102,12 +103,20 @@ rumbo init --yes --name "XM Agent" --package xm_agent \
 
 In an existing project nothing is overwritten by default: the missing `[tool.*]` sections are
 merged into `pyproject.toml`, missing lines into `.gitignore`, and everything skipped is
-reported. Two things only you can do afterwards: replace `@your-handle` in
+reported. Two things only you can do: replace `@your-handle` in
 `.github/CODEOWNERS` and the contact in `SECURITY.md`.
 
-Permanent install: `uv tool install git+https://github.com/padillacm/RUMBO`. Pin a release once
-one is tagged: `…/RUMBO@v0.3.0`. Inside a generated project the CLI is also available as
+Permanent install: `uv tool install git+https://github.com/padillacm/RUMBO`. Pin a release tag:
+`…/RUMBO@v0.3.0`. Inside a generated project the CLI is also available as
 `make rumbo ARGS="gate G4"`.
+
+### What happens right after `rumbo init`
+
+Interactive mode asks the four questions, then writes the files, runs `uv add` for the dev
+tools (and the LLM runtime when applicable), runs `pre-commit autoupdate` and `pre-commit
+install`, logs the answers in `docs/decisions.md` and prints "Next steps": `make check`, the
+first commit, and the sentence to open Claude Code with. Expect `make check` to take a minute
+the first time (pyright downloads its runtime). `rumbo doctor` confirms the harness is complete.
 
 Without the CLI: copy `RUMBO.md` to the repository root and ask Claude Code to *"Read RUMBO.md
 and run Part A"* (Part A of `RUMBO.md` is the step-by-step mounting of the harness).
@@ -117,13 +126,13 @@ and run Part A"* (Part A of `RUMBO.md` is the step-by-step mounting of the harne
 Open Claude Code in the project and say *"Read AGENTS.md and RUMBO.md; let's start phase R"*,
 or use the slash commands. First time? Follow the [tutorial](docs/tutorial.md).
 
-| Phase | You (the human) | The agent | Commands |
-|---|---|---|---|
-| **R** Recognize | Write `docs/product/brief.md` by hand; validate the problem with users or data | Critiques the brief, proposes interview questions | `/rumbo-r`, `rumbo gate G1`, `rumbo decision "G1 signed" --why ...` |
-| **U** Unify | Write the specs (EARS, requirement ids `R1…`, data contracts and owned files); PRD; real questions for the dataset | Lists ambiguities, proposes acceptance tests | `rumbo new spec "..."`, `/rumbo-u`, `rumbo gate G2` |
-| **M** Model | Sketch the irreversible decisions first; one-hour threat model | Completes ADR options, proposes the import-linter contract and adversarial tests | `rumbo new adr "..."`, `/rumbo-m`, `rumbo gate G3` |
-| **B** Build (ANCLA) | Approve the failing tests, then the plan; read the guided tour; pass the explanation test; merge | Writes tests first (each naming its requirement `F-NNNN.Rk`), implements until `make check-brief` is green, keeps diffs small | `/rumbo-ancla F-0001`, `rumbo trace`, `rumbo gate G4`, `make review`, `/rumbo-review` (fresh session), `rumbo decision "F-0001 closed" --why "1 session"` |
-| **O** Operate | Rehearse the rollback; review 20–30 traces weekly; write the runbook entries | Instruments with `app/telemetry.span` and `app/budget.Meter`, proposes failure categories | `/rumbo-o`, `rumbo eval add ...`, `rumbo metrics`, `rumbo new postmortem "..."`, `rumbo gate G5` |
+| Phase | You (the human) | The agent | Slash command | CLI |
+|---|---|---|---|---|
+| **R** Recognize | Write `docs/product/brief.md` by hand; validate the problem with users or data | Critiques the brief, proposes interview questions | `/rumbo-r` | `rumbo gate G1`, `rumbo decision "G1 signed" --why ...` |
+| **U** Unify | Write the specs (EARS, requirement ids `R1…`, data contracts and owned files); PRD; real questions for the dataset | Lists ambiguities, proposes acceptance tests | `/rumbo-u` | `rumbo new spec "..."`, `rumbo gate G2` |
+| **M** Model | Sketch the irreversible decisions first; one-hour threat model | Completes ADR options, proposes the import-linter contract and adversarial tests | `/rumbo-m` | `rumbo new adr "..."`, `rumbo gate G3` |
+| **B** Build (ANCLA) | Approve the failing tests, then the plan; read the guided tour; pass the explanation test; merge | Writes tests first (each naming its requirement `F-NNNN.Rk`), implements until `make check-brief` is green, keeps diffs small | `/rumbo-ancla F-0001`, then `/rumbo-review` in a fresh session | `rumbo trace`, `rumbo gate G4`, `make review`, `rumbo decision "F-0001 closed" --why "1 session"` |
+| **O** Operate | Rehearse the rollback; review 20–30 traces weekly; write the runbook entries | Instruments with `app/telemetry.span` and `app/budget.Meter`, proposes failure categories | `/rumbo-o` | `rumbo eval add ...`, `rumbo metrics`, `rumbo new postmortem "..."`, `rumbo gate G5` |
 
 Every document the harness generates starts with `<!-- rumbo:template … -->`. You delete that
 line when the document is complete; `rumbo gate` checks it and the agent cannot remove it.
@@ -205,8 +214,16 @@ the harness commands (`make check`, pytest, ruff, read-only git) and wires
 - **On `Stop`**, if Python, TOML or JSONL files changed since the last commit, it runs
   `make check-brief` and refuses to finish while it is red.
 
-You are never blocked: edits by hand skip the hook, and `.claude/settings.local.json`
-overrides any rule. `rumbo update` refreshes the guard; `CODEOWNERS` plus branch protection
+You are never blocked: edits by hand skip the hook. To relax a rule for yourself, keep the
+project hooks and add a `.claude/settings.local.json` (git-ignored) that, for example, turns
+them off while you refactor the harness itself:
+
+```json
+{ "disableAllHooks": true }
+```
+
+To skip only the `make check-brief` at Stop, export `RUMBO_GUARD_SKIP_CHECK=1` in the shell
+that runs Claude Code. `rumbo update` refreshes the guard; `CODEOWNERS` plus branch protection
 make the same rules binding on GitHub.
 
 ## Rigor levels
@@ -241,7 +258,8 @@ is in `RUMBO.md`, Part E "Scaling the rigor".
 
 There is no safe token threshold: quality degrades from the first few thousand tokens and bug
 fixing collapses long before the advertised window (`docs/method.md`, section 3.1 "Working
-within the agent's effective context"; full report in `reports/`). The harness keeps units of work small: one spec per fresh session, specs with
+within the agent's effective context"; full report in `reports/`). The harness keeps units of
+work small: one spec per fresh session, specs with
 explicit data contracts and file ownership, `make check-brief` so only failures reach the
 agent's context, `# Compact instructions` in AGENTS.md, decisions in files, and a one-writer
 rule with read-only parallel agents. Parallelize at the level of specs (3–5 worktrees, small
@@ -310,6 +328,26 @@ Release from the CHANGELOG, optional PyPI trusted publishing). See
   mentioning the id.
 - **Explanation test:** before a merge, the human explains the change in three sentences
   without reading the agent's summary.
+- **Anti-cheat sensor / guard hook:** the two scripts every project gets.
+  `scripts/check_tests_not_weakened.py` fails CI when tests are deleted or weakened;
+  `scripts/rumbo_guard.py`, wired as Claude Code hooks, blocks the agent's forbidden actions.
+- **EARS:** a requirement syntax with five sentence patterns ("When …, the system shall …",
+  "If …, then the system shall …") that keeps requirements testable.
+- **PRD, ADR, C4, STRIDE, NFR, SLO, SBOM:** product requirements document; architecture
+  decision record (MADR format, with a fitness function that enforces it); the C4 model's
+  context and container diagrams; the STRIDE threat categories; non-functional requirement
+  (latency, cost, availability, with numbers); service-level objective; software bill of
+  materials.
+- **Lethal trifecta:** an LLM component that has private data, reads untrusted content and can
+  send data out; the threat model asks you to break at least one of the three.
+- **One writer:** only one agent (or person) edits a given set of files at a time; parallel
+  agents are read-only. **Compact instructions:** the AGENTS.md section that tells Claude Code
+  what to keep when it compacts its context.
+
+## Questions and help
+
+Open an issue or a discussion at <https://github.com/padillacm/RUMBO>. Bugs in the templates
+affect every project that uses them: report them even if you fixed them locally.
 
 ## License
 

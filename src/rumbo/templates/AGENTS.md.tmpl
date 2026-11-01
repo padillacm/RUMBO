@@ -1,5 +1,7 @@
 # AGENTS.md — map of {{name}} (read me before every task)
 
+Written for the agent; the human reads it to know what the agent was told.
+
 RUMBO project · package `{{package}}` · rigor **{{rigor}}**{{#llm}} · LLM provider: {{provider}}{{/llm}}.
 The full cycle (phases R·U·M·B·O, gates, templates) is in `RUMBO.md`.
 
@@ -25,7 +27,7 @@ make sensor    # did I weaken any test relative to origin/main?
 make rumbo ARGS="gate G4"        # gate checks for this PR
 make rumbo ARGS="trace"          # which spec requirements (F-NNNN.Rk) still lack a test
 make rumbo ARGS="verify-dep X"   # before proposing a new dependency
-make review    # guided review guide for the human (rumbo tour)
+make review    # guided review for the human (rumbo tour)
 ```
 
 ## Before declaring a task done
@@ -36,10 +38,10 @@ make review    # guided review guide for the human (rumbo tour)
 2. **N**avigate: propose a short plan (files, tests, risks) and wait for approval.
 3. **C**lose the loop: minimal code, then refactor; iterate until `make check` passes.
 4. **L**imit: small diff; separate structural from behavioral commits; summarize in 3 sentences and list new dependencies.
-5. **L**earn: if a mistake repeats, propose a sensor (test, lint rule, contract) or a line here.
+5. Learn **A**nd measure: if a mistake repeats, propose a sensor (test, lint rule, contract) or a line here.
 
 ## Hard rules
-Most of these are enforced by the Claude Code hooks in `.claude/settings.json` (`scripts/rumbo_guard.py`): a blocked action means "ask the human", not "find another way".
+Most of these are enforced by the guard hook (`scripts/rumbo_guard.py`, wired in `.claude/settings.json`): a blocked action means "ask the human", not "find another way".
 - Never delete, skip or weaken tests. If a test looks wrong, stop and ask.
 - Never write `[tests-change-approved]` in a commit or add that label: only the human does.
 - Never remove the `<!-- rumbo:template` mark from a document: the human removes it when the document is complete.
@@ -55,7 +57,7 @@ Most of these are enforced by the Claude Code hooks in `.claude/settings.json` (
 - `make check` stays offline: evals in it use recorded fixtures; the real model runs only in `make evals-live`.
 {{/llm}}
 - No new dependency without approval and PyPI verification (`rumbo verify-dep`).
-- Do not touch infra/, secrets, the Makefile, pyproject.toml (except through `uv add`), CI workflows{{#llm}}, evals/run_evals.py{{/llm}} or the hooks: the human edits them.
+- Do not touch infra/, secrets, the Makefile, pyproject.toml (except through `uv add`), CI workflows{{#llm}}, evals/run_evals.py{{/llm}} or the guard hook: the human edits them.
 - Nothing in spikes/ is imported from src/.
 - If you make the same mistake twice, propose a test, lint rule or contract that catches it.
 
