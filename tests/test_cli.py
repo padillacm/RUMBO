@@ -266,3 +266,43 @@ def test_gate_g2_data_contracts_recommended_then_required(llm_project: Path) -> 
         next(r for r in results if r.description.endswith("data contracts and file ownership")).ok
         is True
     )
+
+
+def test_trace_and_gate_g4_requirements(
+    llm_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["new", "spec", "Spot price", "--dir", str(llm_project)]) == 0
+    spec = llm_project / "specs" / "0001-spot-price.md"
+    spec.write_text(
+        spec.read_text().replace(
+            "- R1 (event): When …, the system shall …\n"
+            "- R2 (unwanted): If …, then the system shall …",
+            "- R1 (event): When a date is given, the system shall return the spot price\n"
+            "- R2 (unwanted): If the date has no data, then the system shall abstain",
+        )
+    )
+    test = llm_project / "tests" / "unit" / "test_spot.py"
+    test.write_text('def test_spot_price() -> None:\n    """F-0001.R1: price for a date."""\n')
+    assert main(["trace", "--dir", str(llm_project)]) == 0
+    out = capsys.readouterr().out
+    assert "| F-0001.R1 |" in out and "tests/unit/test_spot.py:2" in out
+    assert "| F-0001.R2 |" in out and "**missing**" in out and "1/2 requirements" in out
+    assert main(["trace", "--dir", str(llm_project), "--strict"]) == 1
+    capsys.readouterr()
+    # F-0001.R10 must not count as a reference to R1
+    test.write_text('def test_other() -> None:\n    """F-0001.R10 and F-0001.R2."""\n')
+    main(["trace", "--dir", str(llm_project)])
+    out = capsys.readouterr().out
+    assert "| F-0001.R1 | When a date is given, the system shall return the spot price |" in out
+    assert "| F-0001.R2 |" in out and out.count("**missing**") == 1
+
+    row = "every spec requirement is referenced by a test or eval case"
+    _, results = evaluate("G4", Project.load(llm_project), run=False)
+    assert next(r for r in results if r.description == row).ok is None  # mvp: recommendation
+    pyproject = llm_project / "pyproject.toml"
+    pyproject.write_text(pyproject.read_text().replace('rigor = "mvp"', 'rigor = "production"'))
+    _, results = evaluate("G4", Project.load(llm_project), run=False)
+    assert next(r for r in results if r.description == row).ok is False
+    pyproject.write_text(pyproject.read_text().replace('rigor = "production"', 'rigor = "mvp"'))
+    test.unlink()
+    spec.unlink()

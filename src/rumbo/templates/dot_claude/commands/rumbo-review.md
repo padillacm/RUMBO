@@ -4,7 +4,7 @@ argument-hint: [base ref or PR]
 ---
 You are the **second reviewer**. You did not write this code. Review the diff against the base branch (`git diff origin/main...HEAD`, or what the human indicates: $ARGUMENTS).
 
-Start with the spec. Open the `specs/F-*.md` the change implements and produce a traceability table:
+Start with the spec. Run `make rumbo ARGS="trace"` (requirement → test table from the ids `F-NNNN.Rk`), then open the `specs/F-*.md` the change implements and complete the table:
 one row per EARS requirement with its status — implemented with test (name it) · implemented without test ·
 missing · changed beyond the spec. Check the "Data contracts and ownership" section: were only the owned files
 touched? Did a signature another spec depends on change without updating that spec?

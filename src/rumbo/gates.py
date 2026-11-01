@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rumbo.project import Project, is_template, numbered_documents, section
+from rumbo.trace import trace, uncovered
 
 MAX_DIFF_LINES = 300
 MIN_EVAL_CASES = {"prototype": 20, "mvp": 50, "production": 100}
@@ -294,6 +295,17 @@ def _g4(p: Project, run: bool) -> list[Result]:
                 f"small diff (≤{MAX_DIFF_LINES} lines, lockfiles excluded)",
                 size <= MAX_DIFF_LINES,
                 f"{size} lines vs {info}",
+            )
+        )
+    reqs = trace(p.root)
+    if reqs:
+        missing = uncovered(reqs)
+        results.append(
+            Result(
+                "every spec requirement is referenced by a test or eval case",
+                (not missing) if p.at_least("production") else ((not missing) or None),
+                f"{len(missing)} without a test: {', '.join(r.full_id for r in missing[:8])}"
+                " (see 'rumbo trace')",
             )
         )
     if not run:

@@ -9,7 +9,8 @@ Story: As a <user> I want <capability> so that <benefit>.
 - R2 (unwanted): If …, then the system shall …
 
 ## Acceptance criteria
-<!-- pytest tests / Hypothesis properties that verify them (path::test) -->
+<!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
+     by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
 
 ## Data contracts and ownership
 <!-- What two sessions (or two agents) must agree on BEFORE writing code. Spec studies show that

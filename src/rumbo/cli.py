@@ -9,6 +9,7 @@ rumbo doctor                    verify the harness is complete and current
 rumbo check-tests               anti-cheat sensor (tests not weakened)
 rumbo verify-dep NAME           verify a package on PyPI before adding it
 rumbo tour [BASE]               guided, pedagogical review of a git range
+rumbo trace                     requirement → test traceability table
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ from rumbo.scaffold import (
 )
 from rumbo.sensors import check_tests_not_weakened
 from rumbo.tour import load_commits, render_markdown
+from rumbo.trace import render as render_trace
+from rumbo.trace import trace, uncovered
 
 PROVIDER_CHOICES = [*PROVIDERS, OTHER_PROVIDER]
 USAGE_ERROR = 2
@@ -482,6 +485,14 @@ def cmd_tour(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------------ trace
+def cmd_trace(args: argparse.Namespace) -> int:
+    root = Path(args.dir).resolve()
+    reqs = trace(root)
+    print(render_trace(reqs))
+    return 1 if args.strict and (not reqs or uncovered(reqs)) else 0
+
+
 # -------------------------------------------------------------------- argparser
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -584,6 +595,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", help="write the guide to this file instead of stdout")
     add_dir(p)
     p.set_defaults(func=cmd_tour)
+
+    p = sub.add_parser(
+        "trace",
+        help="requirement → test traceability table",
+        description="Lists every requirement of specs/ (F-NNNN.Rk) and the tests or eval cases "
+        "that mention it. Gate G4 recommends full coverage and requires it in production.",
+    )
+    add_dir(p)
+    p.add_argument("--strict", action="store_true", help="exit 1 when a requirement has no test")
+    p.set_defaults(func=cmd_trace)
     return parser
 
 
