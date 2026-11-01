@@ -34,12 +34,16 @@ class Span:
         self.attributes.update(attributes)
 
 
+def _utc(timestamp: float) -> str:
+    return dt.datetime.fromtimestamp(timestamp, dt.UTC).isoformat(timespec="milliseconds")
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per line; `record.span` carries the span attributes."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": dt.datetime.fromtimestamp(record.created, dt.UTC).isoformat(timespec="ms"),
+            "ts": _utc(record.created),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
