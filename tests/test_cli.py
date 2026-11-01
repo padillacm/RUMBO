@@ -245,3 +245,24 @@ def test_helpers() -> None:
     assert section("## Fitness function\n<!-- c -->\n\n## Other\nx", "Fitness function") == ""
     assert section("## Fitness function\ncontract X\n", "Fitness function") == "contract X"
     json.dumps({"ok": True})
+
+
+def test_gate_g2_data_contracts_recommended_then_required(llm_project: Path) -> None:
+    assert main(["new", "spec", "Contracts", "--dir", str(llm_project)]) == 0
+    _, results = evaluate("G2", Project.load(llm_project))
+    contracts = next(
+        r for r in results if r.description.endswith("data contracts and file ownership")
+    )
+    assert contracts.ok is None  # mvp: recommendation
+    spec = llm_project / "specs" / "0001-contracts.md"
+    spec.write_text(
+        spec.read_text().replace(
+            "- Types / schemas: <name, fields, invariants>",
+            "- Types / schemas: Quote(price: Decimal, at: datetime)",
+        )
+    )
+    _, results = evaluate("G2", Project.load(llm_project))
+    assert (
+        next(r for r in results if r.description.endswith("data contracts and file ownership")).ok
+        is True
+    )

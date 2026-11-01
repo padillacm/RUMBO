@@ -106,6 +106,16 @@ away. The design follows the evidence on reviewer attention and on learning with
 `docs/method.md`, section 3. `/rumbo-tour` asks Claude Code to replace the template questions
 with real ones written from the diff.
 
+### Working within the context limit
+
+There is no safe token threshold: quality degrades from the first few thousand tokens and bug
+fixing collapses long before the advertised window (`docs/method.md` §3.1). The harness keeps
+units of work small: one spec per fresh session, specs with explicit data contracts and file
+ownership, `make check-brief` so only failures reach the agent's context, `# Compact
+instructions` in AGENTS.md, decisions in files, and a one-writer rule with read-only parallel
+agents. Parallelize at the level of specs (3–5 worktrees, small PRs merged in series), not
+inside them.
+
 ## What `rumbo init` generates
 
 - `AGENTS.md` (a map, ≤100 lines), `CLAUDE.md` (`@AGENTS.md`), `RUMBO.md`.

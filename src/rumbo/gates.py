@@ -110,6 +110,13 @@ def _has_real_ears(text: str) -> bool:
     return any(EARS.search(line) and not PLACEHOLDER.search(line) for line in body.splitlines())
 
 
+def _has_real_contracts(text: str) -> bool:
+    body = section(text, "Data contracts and ownership")
+    return any(
+        line.strip().startswith("-") and not PLACEHOLDER.search(line) for line in body.splitlines()
+    )
+
+
 def _g2(p: Project, _run: bool) -> list[Result]:
     results = [_doc(p, "docs/product/prd.md", "PRD", required=p.at_least("mvp"))]
     specs = numbered_documents(p.root / "specs")
@@ -133,6 +140,15 @@ def _g2(p: Project, _run: bool) -> list[Result]:
                 f"{rel}: acceptance criteria",
                 bool(section(text, "Acceptance criteria")),
                 "section is empty",
+            )
+        )
+        contracts = _has_real_contracts(text)
+        results.append(
+            Result(
+                f"{rel}: data contracts and file ownership",
+                contracts if p.at_least("production") else (contracts or None),
+                "fill 'Data contracts and ownership' (types, signatures, owned files) before "
+                "splitting the work across sessions",
             )
         )
     if p.llm:

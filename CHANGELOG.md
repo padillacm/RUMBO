@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Context-limit practices, grounded in the research report
+  `reports/Desarrollar con agentes bajo límite de contexto.md` (method §3.1): a "Data
+  contracts and ownership" section in the spec template (checked by gate G2), a one-writer
+  rule and a `# Compact instructions` section in the generated AGENTS.md, `make check-brief`
+  (only the failing tail reaches the agent's context), a requirement-by-requirement
+  traceability table in `/rumbo-review`, and a session-count log when a spec closes.
+
 ## [0.2.0] - 2026-11-01
 
 ### Added

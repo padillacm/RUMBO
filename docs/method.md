@@ -195,6 +195,38 @@ reviewers actually read and learn:
   three explanation-test questions whose hints are folded away; the human answers first.
 - **Re-review with `git range-diff`** instead of re-reading the whole series.
 
+### 3.1 Working within the agent's effective context
+
+The claim that models "degrade past ~200k tokens" has no primary source: 200k is Claude's
+historical window, a pricing boundary and Claude Code's old compaction point. What the
+controlled studies show is a gradient that starts far earlier, and that matters more for
+*acting* on code than for *reading* it (full report with sources:
+`reports/Desarrollar con agentes bajo límite de contexto.md`):
+
+- Effective context (≥85 % of short-context performance) is 2k–8k tokens on associative
+  retrieval (NoLiMa 2025: Claude 3.5 Sonnet 4k of 200k advertised) and 16k–64k on direct
+  retrieval (RULER 2024). Degradation is measurable from 500–3,000 tokens (Levy et al. 2024).
+- In code, comprehension holds up to 1M, but bug fixing collapses: Claude 3.5 Sonnet solves
+  29 % of LongSWE-Bench issues at 32k, 15 % at 128k, 3 % at 256k (LongCodeBench 2025).
+  Multi-turn conversations lose 39 % on average, mostly through inconsistency (Laban 2025).
+- The cheapest context management works best: masking old tool observations halves cost and
+  matches or beats LLM summarization on SWE-bench Verified; summaries lengthen trajectories
+  13–15 % (JetBrains, NeurIPS 2025 workshop). Vendors converge on root instructions of ~100
+  (OpenAI) to <200 (Claude Code) lines.
+- Parallelism helps reading, not writing: native concurrency cost Claude Code 24 points on
+  SWE-bench Verified and helped only on long-horizon tasks (Li et al. 2026); two parallel
+  writers pay a 30–35 point "coordination tax" that only an integrator holding a spec with
+  explicit data structures recovers (88.9 % vs 24.6 %; Specification Gap 2026); merge conflicts
+  go from ≈10 % at 2 changed lines to ≈30 % at 25 (AgenticFlict 2026). For 1–3 people the
+  binding constraint is human review, not tokens.
+
+RUMBO's answers are deliberately boring: one spec per fresh session; a "Data contracts and
+ownership" section in every spec; `make check-brief` and `# Compact instructions` so noise
+never reaches the context; decisions in files; one writer per set of files with read-only
+parallel agents; a fresh-context reviewer (`/rumbo-review`) that traces every requirement
+before the human opens `rumbo tour`; and a self-measurement nobody has published: how many
+sessions each spec takes to close (`rumbo decision "F-000N closed" --why "1 session"`).
+
 ---
 
 ## 4. RACI: human vs. agent

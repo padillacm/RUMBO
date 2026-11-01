@@ -11,6 +11,15 @@ Story: As a <user> I want <capability> so that <benefit>.
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test) -->
 
+## Data contracts and ownership
+<!-- What two sessions (or two agents) must agree on BEFORE writing code. Spec studies show that
+     omitting explicit data structures is what breaks parallel work (88.9% vs 24.6% integration). -->
+- Types / schemas: <name, fields, invariants>
+- Signatures: <function(args) -> result; errors raised>
+- Shared invariants: <e.g. date blocks cover the range exactly, no overlap>
+- Files owned by this spec (one writer): <src/<pkg>/…, tests/…>
+- Interfaces touched that other specs depend on: <none | list; notify their sessions>
+
 ## Evals (LLM products)
 <!-- case IDs, threshold -->
 

@@ -18,4 +18,5 @@ mutants/
 sbom.cdx.json
 evals/reports/
 *.bak
+.rumbo-check.log
 .DS_Store

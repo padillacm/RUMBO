@@ -2,7 +2,7 @@
 # One-line recipes (`target: ; command`) so tabs never bite.
 # Rigor: {{rigor}}{{#llm}} · LLM provider: {{provider}}{{/llm}}
 
-.PHONY: check test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
+.PHONY: check check-brief test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
 
 RUMBO ?= uvx --from git+https://github.com/padillacm/RUMBO rumbo
 BASE ?= origin/main
@@ -24,5 +24,8 @@ sbom:       ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom
 hooks:      ; uv run pre-commit install
 review:     ; $(RUMBO) tour $(BASE) --out docs/reviews/$$(date +%Y-%m-%d)-$$(git rev-parse --short HEAD).md
 rumbo:      ; $(RUMBO) $(ARGS)
+
+# Agent-friendly: only the failing tail reaches the context; the full log stays on disk.
+check-brief: ; @$(MAKE) --no-print-directory check > .rumbo-check.log 2>&1 && echo "make check: green ($$(grep -c . .rumbo-check.log) log lines in .rumbo-check.log)" || (tail -40 .rumbo-check.log; exit 1)
 
 check: lint types test arch{{#mvp_or_more}} security{{/mvp_or_more}}{{#llm}} evals{{/llm}}

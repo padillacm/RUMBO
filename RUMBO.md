@@ -216,6 +216,7 @@ review:     ; $(RUMBO) tour $(BASE) --out docs/reviews/$$(date +%Y-%m-%d)-$$(git
 rumbo:      ; $(RUMBO) $(ARGS)
 
 check: lint types test arch security
+check-brief: ; @$(MAKE) check > .rumbo-check.log 2>&1 && echo "green" || (tail -40 .rumbo-check.log; exit 1)
 ```
 
 LLM products add `evals` to `check`; prototypes drop `security`. **`make check` is offline**:
@@ -386,14 +387,33 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
 - **N**avigate: short plan before coding.
 - **C**lose the loop: iterate in a sandbox until `make check` is green.
 - **L**imit: small diff; human review + a second review by a clean session or another model
-  (`/rumbo-review`). `make review` writes a guided review for the human: risk hotspots first,
-  reading order (tests first), verification commands and three explanation-test questions.
-- Learn **A**nd measure: repeated mistakes → a new sensor or a line in AGENTS.md.
+  (`/rumbo-review`, which starts with a requirement-by-requirement traceability table against
+  the spec). `make review` writes a guided review for the human: risk hotspots first, reading
+  order (tests first), verification commands and three explanation-test questions.
+- Learn **A**nd measure: repeated mistakes → a new sensor or a line in AGENTS.md. When a spec
+  closes, log how many sessions it took (`rumbo decision "F-000N closed" --why "1 session"`).
 - 🛑 **Gate G4 (per PR):** CI green, no test weakened, dependencies verified, and the human can
   explain the change in 3 sentences without reading your summary.
 
 **Golden rule of the harness:** if the agent makes the same mistake twice, add a sensor (test,
 lint rule, contract) or a guide, besides fixing the code.
+
+**Context and parallel work.** Model quality degrades with context length from the first few
+thousand tokens (there is no safe threshold; see `docs/method.md` §3.1), so the harness keeps
+each unit of work small:
+
+- One spec per session, started fresh from the spec; `/clear` between unrelated tasks. The
+  session that wrote the spec is not the one that implements it.
+- Drop old tool output instead of summarizing it: `make check-brief` prints only the failing
+  tail; the `# Compact instructions` section of AGENTS.md tells the agent what to keep.
+- Decisions that must outlive the session go to an ADR or `docs/decisions.md`.
+- **One writer per set of files.** The spec lists the files it owns. Agents that run in
+  parallel are read-only (exploration, alternative hypotheses, review against the spec, noisy
+  test runs). For long features, parallel drafts are assembled by one integrator holding the
+  full spec; writers never coordinate ad hoc.
+- Parallelize at the level of specs, not inside them: at most 3–5 worktrees, each with its own
+  session, `make check` and small PR, merged in series. If a change touches an interface another
+  spec depends on, write the new signature in that spec's "Data contracts" section.
 
 ### O — Operate, Observe, Optimize
 
@@ -468,6 +488,9 @@ Story: As a <user> I want <capability> so that <benefit>.
 - R2 (unwanted): If …, then the system shall …
 ## Acceptance criteria
 <pytest tests / Hypothesis properties that verify them>
+## Data contracts and ownership
+Types/schemas · signatures · shared invariants · files owned by this spec (one writer) ·
+interfaces other specs depend on
 ## Evals (LLM products): <case IDs, threshold>
 ## NFR: p95 < X s · cost < Y USD
 ## Out of scope

@@ -18,7 +18,8 @@ The full cycle (phases R·U·M·B·O, gates, templates) is in `RUMBO.md`.
 
 ## Commands
 ```
-make check     # the WHOLE harness, offline: lint, types, tests, architecture{{#mvp_or_more}}, security{{/mvp_or_more}}{{#llm}}, smoke evals{{/llm}}
+make check       # the WHOLE harness, offline: lint, types, tests, architecture{{#mvp_or_more}}, security{{/mvp_or_more}}{{#llm}}, smoke evals{{/llm}}
+make check-brief # same, but prints only the failing tail (keeps your context small); full log in .rumbo-check.log
 make fmt       # autoformat
 make sensor    # did I weaken any test relative to origin/main?
 make rumbo ARGS="gate G4"        # gate checks for this PR
@@ -55,6 +56,20 @@ make review    # guided review guide for the human (rumbo tour)
 - Do not touch infra/, secrets, the Makefile, CI workflows{{#llm}} or evals/run_evals.py{{/llm}} unless asked.
 - Nothing in spikes/ is imported from src/.
 - If you make the same mistake twice, propose a test, lint rule or contract that catches it.
+
+## Context and parallel work (one writer)
+- One spec per session. Start each task in a fresh session from its spec; do not carry a previous task's context.
+- Prefer `make check-brief` and tail/grep over pasting long outputs; old tool output is noise, drop it before summarizing.
+- Decisions that must outlive the session go to an ADR or docs/decisions.md before the session ends, never only in chat.
+- **One writer per set of files.** The files a spec owns are listed in it; a second agent on the same files is forbidden.
+  Parallel agents are read-only: exploration, alternative hypotheses, review against the spec, noisy test runs.
+- Long features: parallel drafts are fine, but ONE integrator with the full spec assembles them; writers never coordinate ad hoc.
+- If you touch an interface another spec depends on, write the new signature in that spec's "Data contracts" section.
+- When a spec closes, log `rumbo decision "F-000N closed" --why "<1 or 2 sessions>"` so the team measures session size.
+
+## Compact instructions
+When compacting, keep: the active spec id and its data contracts, open bugs and failing tests, architecture
+decisions taken in this session, the list of files changed, and the next step. Drop raw tool output and logs.
 
 ## Human compass
 - For design decisions, ask for the human's version first.
