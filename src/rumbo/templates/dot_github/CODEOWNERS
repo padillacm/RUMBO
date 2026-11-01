@@ -1,0 +1,15 @@
+# Code owners: GitHub asks these humans to review before merging (enable "Require review from
+# Code Owners" in the branch protection rules). Replace @your-handle with the real accounts.
+# The harness itself (sensors, CI, Makefile, hooks) and the human documents must never be
+# changed by an agent alone: owning them here makes that rule binding.
+*                               @your-handle
+/Makefile                       @your-handle
+/pyproject.toml                 @your-handle
+/.github/                       @your-handle
+/.claude/settings.json          @your-handle
+/.pre-commit-config.yaml        @your-handle
+/scripts/                       @your-handle
+/infra/                         @your-handle
+/specs/                         @your-handle
+/docs/adr/                      @your-handle
+/docs/decisions.md              @your-handle

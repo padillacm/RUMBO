@@ -1,0 +1,23 @@
+# Security policy
+
+## Reporting a vulnerability
+Write to <security contact: email or private issue form>. Do not open a public issue. We
+acknowledge within 72 hours and share a fix or mitigation plan within 14 days.
+
+## Supported versions
+Only the latest release (and `main`) receives security fixes.
+
+## What this project does by design
+- Threat model in `docs/security/threat-model.md` (STRIDE, lethal trifecta, OWASP LLM/Agentic).
+- Secrets never live in the repository: full-history scan with gitleaks in CI and a pre-commit hook;
+  `.env` is ignored and `.env.example` documents the variables.
+- Dependencies are reviewed before being added (`rumbo verify-dep`), audited in CI (`pip-audit`,
+  `bandit`), pinned by the lockfile and updated by Dependabot with a cooldown.
+- CI never holds a model credential; `make check` is offline.
+{{#llm}}
+- Everything the model returns is validated against a schema; tool output and retrieved content are
+  data, never instructions; tools are typed and least-privilege; rendered output carries no remote
+  links or images.
+{{/llm}}
+- Agents cannot change the sensors (CI, Makefile, hooks, anti-cheat sensor) on their own: see
+  `.claude/settings.json` and `.github/CODEOWNERS`.
