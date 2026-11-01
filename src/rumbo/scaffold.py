@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import json
 import keyword
 import re
@@ -93,6 +94,22 @@ FRAMEWORK_OWNED = (
     "spikes/README.md",
 )
 FRAMEWORK_OWNED_PREFIXES = (".claude/commands/",)
+# Harness files the human adapts: `rumbo update` reports when they drift from the template
+# (and `--diff` shows how). Documents (docs/, specs/, src/, tests/) are the human's: never listed.
+HARNESS_PREFIXES = (
+    "Makefile",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "SECURITY.md",
+    ".github/",
+    ".pre-commit-config.yaml",
+    ".claude/",
+    ".env.example",
+    "infra/",
+    "evals/run_evals.py",
+    "evals/graders/",
+    "tests/architecture/",
+)
 
 _PKG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _RESERVED = {"test", "tests", "src", "evals", "scripts", "spikes", "domain", "app", "api"}
@@ -396,6 +413,10 @@ def is_framework_owned(rel: str) -> bool:
     return rel in FRAMEWORK_OWNED or rel.startswith(FRAMEWORK_OWNED_PREFIXES)
 
 
+def is_harness_file(rel: str) -> bool:
+    return is_framework_owned(rel) or rel.startswith(HARNESS_PREFIXES)
+
+
 def update(project: Project, dest: Path) -> Report:
     """Refreshes the files the framework owns; never touches documents the human edits.
 
@@ -410,7 +431,7 @@ def update(project: Project, dest: Path) -> Report:
             if is_framework_owned(rel) or rel.startswith(".claude/"):
                 _write(target, item, rel)
                 report.created.append(rel)
-            else:
+            elif is_harness_file(rel):
                 report.differs.append(f"{rel} (missing)")
             continue
         if target.read_text(encoding="utf-8") == new_text:
@@ -418,10 +439,40 @@ def update(project: Project, dest: Path) -> Report:
         if is_framework_owned(rel):
             _write(target, item, rel)
             report.updated.append(rel)
-        elif rel not in MERGEABLE:
+        elif rel not in MERGEABLE and is_harness_file(rel):
             report.differs.append(rel)
     _bump_harness_version(dest / "pyproject.toml")
     return report
+
+
+def update_diff(project: Project, dest: Path) -> str:
+    """Unified diff of what `update` would change, plus the diffs of files it only reports.
+
+    Writes nothing. Framework-owned files are marked [update replaces]; the others
+    [merge by hand] so the human can pick lines from the current template.
+    """
+    cfg = Config.from_project(project)
+    chunks: list[str] = []
+    for rel, item in plan_files(cfg).items():
+        target = dest / rel
+        new_text = _content(item)
+        if rel in MERGEABLE or not is_harness_file(rel):
+            continue
+        current = target.read_text(encoding="utf-8") if target.exists() else ""
+        if current == new_text:
+            continue
+        owned = is_framework_owned(rel) or rel.startswith(".claude/")
+        label = "update replaces" if owned else "merge by hand"
+        if not target.exists() and not owned:
+            label = "missing; copy by hand if wanted"
+        diff = difflib.unified_diff(
+            current.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"{rel} (project)",
+            tofile=f"{rel} (template {__version__})",
+        )
+        chunks.append(f"### {rel} [{label}]\n" + "".join(diff))
+    return "\n".join(chunks) if chunks else "Everything matches the current templates."
 
 
 def _bump_harness_version(pyproject: Path) -> None:

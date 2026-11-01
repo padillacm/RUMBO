@@ -10,6 +10,8 @@ rumbo check-tests               anti-cheat sensor (tests not weakened)
 rumbo verify-dep NAME           verify a package on PyPI before adding it
 rumbo tour [BASE]               guided, pedagogical review of a git range
 rumbo trace                     requirement → test traceability table
+rumbo eval add SUITE ...        turn a failure into an eval case
+rumbo metrics                   process metrics from git, decisions, specs and evals
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from typing import Any
 
 from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
+from rumbo.metrics import collect
+from rumbo.metrics import render as render_metrics
 from rumbo.project import RIGOR_LEVELS, Project, slug
 from rumbo.scaffold import (
     OTHER_PROVIDER,
@@ -38,6 +42,7 @@ from rumbo.scaffold import (
     scaffold,
     to_package,
     update,
+    update_diff,
     valid_name,
     valid_package,
 )
@@ -173,6 +178,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         project = Project.load(root)
     except (FileNotFoundError, ValueError) as exc:
         return _err(str(exc))
+    if args.diff:
+        print(update_diff(project, root))
+        return 0
     rep = update(project, root)
     print(rep.summary())
     print(f"\nHarness version is now {__version__}. Review the diff with: git diff")
@@ -493,6 +501,87 @@ def cmd_trace(args: argparse.Namespace) -> int:
     return 1 if args.strict and (not reqs or uncovered(reqs)) else 0
 
 
+# ------------------------------------------------------------------------- eval
+GRADER_RE = re.compile(r'^\s*"([a-z_][a-z0-9_]*)"\s*:\s*\w+\s*,?\s*$', re.M)
+
+
+def known_graders(root: Path) -> set[str]:
+    """Grader names registered in evals/graders/__init__.py (the GRADERS dict)."""
+    text = (root / "evals" / "graders" / "__init__.py").read_text(encoding="utf-8")
+    block = text[text.find("GRADERS") :]
+    return set(GRADER_RE.findall(block))
+
+
+def cmd_eval_add(args: argparse.Namespace) -> int:
+    root = Path(args.dir).resolve()
+    datasets = root / "evals" / "datasets"
+    if not (root / "evals" / "graders" / "__init__.py").exists():
+        return _err("no evals/ in this project (LLM products only); did you run 'rumbo init'?")
+    if not re.fullmatch(r"[a-z0-9_-]+", args.suite):
+        return _err("suite must be a plain name (letters, digits, - or _)")
+    try:
+        case_input = json.loads(args.input)
+        expected = json.loads(args.expected)
+    except json.JSONDecodeError as exc:
+        return _err(f"--input and --expected must be JSON objects: {exc}")
+    if not isinstance(case_input, dict) or not isinstance(expected, dict):
+        return _err("--input and --expected must be JSON objects")
+    graders = known_graders(root)
+    if graders and args.grader not in graders:
+        return _err(f"unknown grader {args.grader!r}; registered: {', '.join(sorted(graders))}")
+    path = datasets / f"{args.suite}.jsonl"
+    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    ids = set()
+    for line in existing:
+        try:
+            ids.add(json.loads(line).get("id"))
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    case_id = args.id or f"{args.suite}-{len(existing) + 1:03d}"
+    if case_id in ids:
+        return _err(f"case id {case_id!r} already exists in {path.relative_to(root)}")
+    case: dict[str, Any] = {
+        "id": case_id,
+        "input": case_input,
+        "expected": expected,
+        "grader": args.grader,
+        "tags": list(dict.fromkeys(args.tag or [])),
+    }
+    if args.source:
+        case["source"] = args.source
+    datasets.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(case, ensure_ascii=False) + "\n")
+    log = root / "evals" / "error_analysis" / "log.md"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if not log.exists():
+        log.write_text(
+            "# Error analysis log\n\nOne line per production failure turned into an eval case "
+            "(`rumbo eval add`). Review it in the weekly trace ritual.\n\n"
+            "| Date | Case | Suite | Source | Note |\n|---|---|---|---|---|\n",
+            encoding="utf-8",
+        )
+    with log.open("a", encoding="utf-8") as f:
+        f.write(
+            f"| {dt.date.today().isoformat()} | {case_id} | {args.suite} | {args.source or ''} | "
+            f"{args.note or ''} |\n"
+        )
+    print(f"Added {case_id} to {path.relative_to(root).as_posix()} + evals/error_analysis/log.md")
+    print("Offline with a recorded fixture: make evals  ·  against the model: make evals-live")
+    return 0
+
+
+# ---------------------------------------------------------------------- metrics
+def cmd_metrics(args: argparse.Namespace) -> int:
+    root = Path(args.dir).resolve()
+    metrics = collect(root, days=args.days)
+    if args.json:
+        print(json.dumps(metrics.as_dict(), ensure_ascii=False, indent=2, default=str))
+    else:
+        print(render_metrics(metrics))
+    return 0
+
+
 # -------------------------------------------------------------------- argparser
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -538,6 +627,9 @@ def build_parser() -> argparse.ArgumentParser:
         "the current versions. Never touches documents you edited; lists other files that differ.",
     )
     add_dir(p)
+    p.add_argument(
+        "--diff", action="store_true", help="show what would change (nothing is written)"
+    )
     p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("new", help="create an ADR, spec or postmortem from its template")
@@ -605,6 +697,37 @@ def build_parser() -> argparse.ArgumentParser:
     add_dir(p)
     p.add_argument("--strict", action="store_true", help="exit 1 when a requirement has no test")
     p.set_defaults(func=cmd_trace)
+
+    p = sub.add_parser("eval", help="eval datasets: 'eval add' turns a failure into a case")
+    eval_sub = p.add_subparsers(dest="eval_command", required=True, metavar="ACTION")
+    pa = eval_sub.add_parser(
+        "add",
+        help="append a case to evals/datasets/SUITE.jsonl and log it in error_analysis/",
+        description="Turns a production failure or a trace into a regression case. The case "
+        "runs offline in `make evals` once a fixture answers it, and live in `make evals-live`.",
+    )
+    pa.add_argument("suite", help="dataset name (evals/datasets/<suite>.jsonl)")
+    pa.add_argument("--input", required=True, help='JSON object, e.g. \'{"question": "..."}\'')
+    pa.add_argument("--expected", required=True, help="JSON object the grader compares against")
+    pa.add_argument("--grader", required=True, help="grader name registered in evals/graders")
+    pa.add_argument("--id", help="case id (default: <suite>-NNN)")
+    pa.add_argument("--tag", action="append", help="tag (repeatable), e.g. regression")
+    pa.add_argument("--source", help="where it came from: trace id, issue, user report")
+    pa.add_argument("--note", help="one line for the error-analysis log")
+    add_dir(pa)
+    pa.set_defaults(func=cmd_eval_add)
+
+    p = sub.add_parser(
+        "metrics",
+        help="process metrics: specs, sessions per spec, gates, deploys, commits, evals",
+        description="Reads git, docs/decisions.md, specs/, docs/postmortems/ and evals/ offline. "
+        "Decision titles it understands: 'F-000N closed' (--why 'k sessions'), 'Gk signed', "
+        "'deploy ...', 'incident ...'.",
+    )
+    add_dir(p)
+    p.add_argument("--days", type=int, default=30, help="window for commits and deploys")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_metrics)
     return parser
 
 

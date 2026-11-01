@@ -322,3 +322,75 @@ def test_gate_g5_requires_budget_and_telemetry_for_llm_products(
     _, results = evaluate("G5", Project.load(llm_project))
     assert next(r for r in results if r.description == row).ok is False  # mvp: required
     entry.write_text(original)
+
+
+def test_eval_add_appends_a_case_and_logs_it(
+    llm_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = ["eval", "add", "regressions", "--dir", str(llm_project), "--grader", "abstention"]
+    rc = main([*args, "--input", '{"question": "x"}', "--expected", "{}", "--source", "trace 1"])
+    assert rc == 0
+    dataset = llm_project / "evals" / "datasets" / "regressions.jsonl"
+    case = json.loads(dataset.read_text().splitlines()[0])
+    assert case["id"] == "regressions-001" and case["source"] == "trace 1"
+    assert "regressions-001" in (llm_project / "evals" / "error_analysis" / "log.md").read_text()
+    # unknown grader, invalid JSON and duplicate ids are usage errors
+    assert main([*args[:-2], "--grader", "nope", "--input", "{}", "--expected", "{}"]) == 2
+    assert "registered" in capsys.readouterr().err
+    assert main([*args, "--input", "not json", "--expected", "{}"]) == 2
+    assert main([*args, "--input", "{}", "--expected", "{}", "--id", "regressions-001"]) == 2
+    assert len(dataset.read_text().splitlines()) == 1
+    dataset.unlink()
+
+
+def test_eval_add_needs_an_llm_project(simple_project: Path) -> None:
+    args = ["eval", "add", "s", "--dir", str(simple_project), "--grader", "x"]
+    assert main([*args, "--input", "{}", "--expected", "{}"]) == 2
+
+
+def test_metrics_reads_decisions_specs_and_evals(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rumbo.metrics import collect, parse_decisions
+
+    main(["new", "spec", "Alpha", "--dir", str(simple_project)])
+    main(["decision", "F-0001 closed", "--why", "2 sessions", "--dir", str(simple_project)])
+    main(["decision", "G2 signed", "--dir", str(simple_project)])
+    main(["decision", "deploy v0.1", "--who", "ci", "--dir", str(simple_project)])
+    main(["decision", "incident: wrong figure", "--dir", str(simple_project)])
+    decisions = parse_decisions((simple_project / "docs" / "decisions.md").read_text())
+    assert [d.title for d in decisions][-2:] == ["deploy v0.1", "incident: wrong figure"]
+    assert decisions[-2].who == "ci" and decisions[1].why == "2 sessions"
+
+    m = collect(simple_project)
+    assert m.specs_total == 1 and m.specs_closed == ["F-0001"]
+    assert m.sessions_per_spec == [2] and m.gates_signed == {"G2": 1}
+    assert (m.deploys, m.incidents) == (1, 1)
+    assert m.requirements_total == 2 and m.requirements_uncovered == 2
+    assert m.commits_total == 0  # not a git repository: no crash
+    assert main(["metrics", "--dir", str(simple_project)]) == 0
+    out = capsys.readouterr().out
+    assert "median 2" in out and "change failure rate ≈ 100%" in out and "0/2" in out
+    assert main(["metrics", "--dir", str(simple_project), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["median_sessions_per_spec"] == 2
+    (simple_project / "specs" / "0001-alpha.md").unlink()
+
+
+def test_update_diff_shows_harness_drift_only(
+    llm_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    makefile = llm_project / "Makefile"
+    original = makefile.read_text()
+    makefile.write_text(original + "extra: ; echo hi\n")
+    brief = llm_project / "docs" / "product" / "brief.md"
+    brief_original = brief.read_text()
+    brief.write_text("# mine\n")
+    assert main(["update", "--diff", "--dir", str(llm_project)]) == 0
+    out = capsys.readouterr().out
+    assert "### Makefile [merge by hand]" in out and "-extra: ; echo hi" in out
+    assert "brief.md" not in out  # human documents are never compared
+    assert makefile.read_text().endswith("extra: ; echo hi\n")  # nothing written
+    makefile.write_text(original)
+    brief.write_text(brief_original)
+    assert main(["update", "--diff", "--dir", str(llm_project)]) == 0
+    assert "Everything matches" in capsys.readouterr().out

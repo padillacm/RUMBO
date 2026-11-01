@@ -45,6 +45,7 @@ allowed-confusables = ["–", "−"]
 "src/rumbo/scaffold.py" = ["S603", "S607"]
 "src/rumbo/tour.py" = ["S603", "S607"]
 "src/rumbo/gates.py" = ["S603", "S607"]
+"src/rumbo/metrics.py" = ["S603", "S607"]
 
 [tool.pyright]
 include = ["src", "tests"]
