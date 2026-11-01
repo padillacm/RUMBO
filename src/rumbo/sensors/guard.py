@@ -67,7 +67,13 @@ _ROOTISH = r"(?:/|~/?|\.|\*|\$\{?(?:HOME|PWD)\}?/?)(?=\s|$|[;&|])"
 BASH_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(re.escape(APPROVAL_MARK)), "only the human writes [tests-change-approved]"),
     (
-        re.compile(r"\bgit\b[^|;&]*\s(--no-verify|-n)(?=\s|$)"),
+        re.compile(r"\bgit\b[^|;&]*\s--no-verify(?=\s|$)"),
+        "git hooks are sensors; do not bypass them (--no-verify / -n)",
+    ),
+    (
+        # -n means --no-verify only for `git commit` (combined short flags included, -an);
+        # elsewhere it is --dry-run / --max-count / --no-stat, which are harmless.
+        re.compile(r"\bgit\b[^|;&]*\bcommit\b[^|;&]*\s-(?![umCcFt])[a-zA-Z]*n[a-zA-Z]*(?=\s|$)"),
         "git hooks are sensors; do not bypass them (--no-verify / -n)",
     ),
     (re.compile(r"(^|[\s;&|])SKIP=\S*[^|;&]*\bgit\b"), "SKIP= bypasses the pre-commit hooks"),
