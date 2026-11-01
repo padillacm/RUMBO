@@ -233,8 +233,12 @@ def _g3(p: Project, _run: bool) -> list[Result]:
 
 
 # ------------------------------------------------------------- G4 Build (per PR)
-def _run_cmd(cmd: list[str], root: Path) -> tuple[bool, str]:
-    proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+def _run_cmd(cmd: list[str], root: Path) -> tuple[bool | None, str]:
+    """(ok, last lines of output); ok is None when the program is not installed."""
+    try:
+        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return None, f"'{cmd[0]}' is not installed; could not run {' '.join(cmd)}"
     lines = (proc.stdout + proc.stderr).strip().splitlines()
     return proc.returncode == 0, "\n".join(lines[-15:])
 
@@ -307,7 +311,7 @@ def _g4(p: Project, run: bool) -> list[Result]:
     ok, out = _run_cmd([sys.executable, str(sensor), "--strict"], p.root)
     results.append(Result("no test weakened", ok, out))
     ok, out = _run_cmd(["make", "check"], p.root)
-    results.append(Result("make check green", ok, "" if ok else out))
+    results.append(Result("make check green", ok, "" if ok else out))  # None = unmeasured
     if p.at_least("production"):
         nightly = (p.root / ".github" / "workflows" / "nightly.yml").exists()
         results.append(Result("nightly workflow present (mutation, evals k=3)", nightly))

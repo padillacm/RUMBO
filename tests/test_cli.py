@@ -191,6 +191,24 @@ def test_gate_g4_reports_unmeasured_instead_of_green(
     assert "could not be measured" in out and "NOT SIGNED" in out
 
 
+def test_gate_g4_without_make_is_unmeasured_not_a_traceback(
+    simple_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rumbo import gates
+
+    real_run = subprocess.run
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[0] == "make":
+            raise FileNotFoundError(2, "No such file or directory", "make")
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    _, results = evaluate("G4", Project.load(simple_project), run=True)
+    check = next(r for r in results if r.description == "make check green")
+    assert check.ok is None and "not installed" in check.detail
+
+
 def test_gate_g5_prototype_does_not_require_dependabot(simple_project: Path) -> None:
     _, results = evaluate("G5", Project.load(simple_project))
     assert all(r.ok is not False for r in results if "dependency updates" in r.description)
