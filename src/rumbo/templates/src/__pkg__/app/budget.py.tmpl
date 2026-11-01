@@ -82,15 +82,19 @@ class Meter:
         self.check()
 
     def check(self) -> None:
+        """Raises when a limit is crossed, or before any spend when a limit is 0 (kill switch)."""
         b = self.budget
-        if self.input_tokens > b.max_input_tokens:
-            raise BudgetExceeded(f"input tokens {self.input_tokens} > {b.max_input_tokens}")
-        if self.output_tokens > b.max_output_tokens:
-            raise BudgetExceeded(f"output tokens {self.output_tokens} > {b.max_output_tokens}")
-        if self.cost_usd > b.max_cost_usd:
-            raise BudgetExceeded(f"cost {self.cost_usd:.4f} USD > {b.max_cost_usd} USD")
-        if self.elapsed_seconds > b.max_seconds:
-            raise BudgetExceeded(f"elapsed {self.elapsed_seconds:.1f} s > {b.max_seconds} s")
+        spent: tuple[tuple[str, float, float, str], ...] = (
+            ("input tokens", self.input_tokens, b.max_input_tokens, ""),
+            ("output tokens", self.output_tokens, b.max_output_tokens, ""),
+            ("cost", self.cost_usd, b.max_cost_usd, " USD"),
+            ("elapsed", self.elapsed_seconds, b.max_seconds, " s"),
+        )
+        for what, used, limit, unit in spent:
+            if limit == 0:
+                raise BudgetExceeded(f"{what} budget is 0{unit}: kill switch on")
+            if used > limit:
+                raise BudgetExceeded(f"{what} {used:.4g}{unit} > {limit:.4g}{unit}")
 
     def snapshot(self) -> dict[str, float | int]:
         """Attributes for the request's telemetry span."""
