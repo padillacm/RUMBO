@@ -49,7 +49,8 @@ git add -A && git commit -m "chore: initial RUMBO harness"
 
 Then open Claude Code in the project and say *"Read AGENTS.md and RUMBO.md; let's start
 phase R"*, or use the commands `/rumbo-r`, `/rumbo-u`, `/rumbo-m`, `/rumbo-ancla`,
-`/rumbo-review`, `/rumbo-o`, `/rumbo-gate` and `/rumbo-tour`.
+`/rumbo-review`, `/rumbo-o`, `/rumbo-gate` and `/rumbo-tour`. First time? Follow the
+30-minute [tutorial](docs/tutorial.md): from `rumbo init` to the first spec closed with G4.
 
 Without the CLI: copy `RUMBO.md` to the repository root and ask Claude Code to *"Read RUMBO.md
 and run Part A"*.
@@ -90,6 +91,10 @@ rumbo doctor                         # structure complete, AGENTS.md ≤ 100 lin
 rumbo check-tests                    # anti-cheat sensor (tests not weakened)
 rumbo verify-dep pydataxm            # exists on PyPI, age, repository, typosquatting, OSV
 rumbo tour origin/main               # guided, pedagogical review of the branch
+rumbo trace                          # requirement (F-NNNN.Rk) → test table; gate G4 reads it
+rumbo eval add regressions --input '{"question": "..."}' --expected '{"abstain": true}' --grader abstention
+rumbo metrics                        # sessions per spec, gates signed, deploys/incidents, evals
+rumbo update --diff                  # what update would change, and how the harness files drifted
 ```
 
 Inside a generated project the CLI is available as `make rumbo ARGS="gate G4"` and the guided
@@ -106,6 +111,15 @@ away. The design follows the evidence on reviewer attention and on learning with
 `docs/method.md`, section 3. `/rumbo-tour` asks Claude Code to replace the template questions
 with real ones written from the diff.
 
+### Hard rules as hooks
+
+The generated `.claude/settings.json` pre-approves the harness commands and wires
+`scripts/rumbo_guard.py` as Claude Code hooks: the agent cannot edit the Makefile,
+`pyproject.toml`, CI, infra, the sensors or `.env`, cannot remove a template mark, write
+`[tests-change-approved]`, force-push or bypass git hooks, and cannot declare itself done while
+`make check-brief` is red. A blocked call tells the agent to ask the human. The human is never
+blocked: edits by hand skip the hook, and `.claude/settings.local.json` can override a rule.
+
 ### Working within the context limit
 
 There is no safe token threshold: quality degrades from the first few thousand tokens and bug
@@ -118,7 +132,11 @@ inside them.
 
 ## What `rumbo init` generates
 
-- `AGENTS.md` (a map, ≤100 lines), `CLAUDE.md` (`@AGENTS.md`), `RUMBO.md`.
+- `AGENTS.md` (a map, ≤100 lines), `CLAUDE.md` (`@AGENTS.md`), `RUMBO.md`, `SECURITY.md`.
+- `.claude/settings.json` (permissions and hooks) and `scripts/rumbo_guard.py`: the hard rules
+  of AGENTS.md as sensors (see above).
+- `.github/pull_request_template.md` with the G4 checklist and `.github/CODEOWNERS` with
+  placeholder owners for the harness files.
 - A `Makefile` whose `make check` is the single, **offline** verification command: ruff,
   pyright (strict in `domain/`), pytest + Hypothesis, import-linter, bandit + pip-audit and the
   smoke evals, scaled by rigor.
@@ -127,9 +145,13 @@ inside them.
 - `scripts/check_tests_not_weakened.py`: fails when tests or files are deleted, asserts drop,
   always-true asserts or skip markers appear, or `parametrize` lists shrink — unless a human
   approves it (`[tests-change-approved]` in a human-authored commit, or the PR label).
-- `evals/` (LLM products): JSONL datasets, deterministic graders (numeric with tolerance, field
-  equality, tool arguments, abstention) and `run_evals.py` with pass@1 and pass^k, offline
-  unless `--live`.
+- `evals/` (LLM products): JSONL datasets, deterministic graders (numeric with tolerance,
+  field equality, tool arguments, abstention), an LLM judge that counts only after calibration
+  against human labels (`evals/calibration/`), and `run_evals.py` with pass@1 and pass^k,
+  offline unless `--live`. `rumbo eval add` turns failures into cases.
+- Phase O wiring (LLM products): `app/budget.py` (per-request token, cost and time limits from
+  `RUMBO_BUDGET_*`) and `app/telemetry.py` (spans with OpenTelemetry GenAI attribute names and
+  cost, logged as JSON, no dependency); the runbook and SLO templates have the matching entries.
 - CI with actions pinned by SHA, a full-history gitleaks scan, the sensor, pre-commit on all
   files (mvp+) and an SBOM from `uv.lock` (production); a nightly with mutation testing and
   live evals in a protected environment — the only place a model credential lives.
@@ -146,8 +168,9 @@ rumbo update    # replaces only framework-owned files; lists the others that dif
 ```
 
 `update` never touches the documents you edited (brief, specs, ADRs…). For `Makefile`,
-`pyproject.toml`, CI or `AGENTS.md` it only tells you they differ from the current template:
-compare and merge by hand.
+`pyproject.toml`, CI or `AGENTS.md` it only tells you they differ from the current template;
+`rumbo update --diff` shows the unified diff of everything it would replace or report, and
+writes nothing.
 
 ## Developing the framework
 
@@ -160,7 +183,10 @@ make review  # guided review of your branch
 
 Templates live in `src/rumbo/templates/`: `.tmpl` files are rendered (`{{var}}`,
 `{{#flag}}…{{/flag}}`, `{{^flag}}…{{/flag}}`), `__pkg__` becomes the package name and `dot_`
-becomes `.`. The canonical anti-cheat sensor is in `src/rumbo/sensors/`. See
+becomes `.`. The canonical sensors (anti-cheat and guard hook) are in `src/rumbo/sensors/`.
+The framework's own decisions are ADRs in `docs/adr/`. CI runs on Python 3.11–3.13 (Linux,
+macOS, Windows) plus the e2e matrix; a `vX.Y.Z` tag triggers the release workflow (GitHub
+Release from the CHANGELOG, optional PyPI trusted publishing). See
 [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## License

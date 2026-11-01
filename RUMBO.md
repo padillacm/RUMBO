@@ -38,6 +38,9 @@
   `[tests-change-approved]`: both belong to the human.
 - If something in this file clashes with the environment (a tool does not install, an option
   changed), say so and propose the closest alternative; do not hide it.
+- Several of these rules are enforced by Claude Code hooks (`.claude/settings.json` →
+  `scripts/rumbo_guard.py`). A blocked tool call means "ask the human", never "find another
+  way".
 
 ---
 
@@ -81,6 +84,7 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 ├── CLAUDE.md                 # one line: @AGENTS.md
 ├── RUMBO.md                  # this file
 ├── README.md
+├── SECURITY.md               # reporting policy + what the harness does by design
 ├── Makefile
 ├── pyproject.toml            # includes [tool.rumbo], read by rumbo gate/doctor/update
 ├── .pre-commit-config.yaml
@@ -89,7 +93,10 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 ├── .github/workflows/ci.yml
 ├── .github/workflows/nightly.yml     # rigor mvp or production
 ├── .github/dependabot.yml            # rigor mvp or production
+├── .github/pull_request_template.md  # the G4 checklist, ticked by the human
+├── .github/CODEOWNERS                # humans who review the harness files (placeholder handles)
 ├── .claude/commands/rumbo-*.md       # /rumbo-r, -u, -m, -ancla, -review, -o, -gate, -tour
+├── .claude/settings.json             # permissions + hooks (scripts/rumbo_guard.py)
 ├── docs/
 │   ├── product/brief.md
 │   ├── product/prd.md
@@ -106,7 +113,7 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 ├── src/<pkg>/
 │   ├── __init__.py, __main__.py
 │   ├── domain/__init__.py    # pure logic: no I/O, no LLM SDKs, no HTTP
-│   ├── app/__init__.py       # use cases; depends only on domain (+ ports.py, entrypoint.py with LLM)
+│   ├── app/__init__.py       # use cases; depends only on domain (+ ports.py, entrypoint.py, budget.py, telemetry.py with LLM)
 │   ├── adapters/__init__.py  # external APIs, DB, LLM (+ llm.py, claude_code.py with LLM)
 │   ├── prompts/__init__.py   # versioned prompts (LLM products only)
 │   └── api/__init__.py       # FastAPI / CLI (+ http.py with LLM)
@@ -117,10 +124,12 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 │   └── architecture/
 ├── evals/                    # LLM products only
 │   ├── datasets/smoke.jsonl
-│   ├── graders/__init__.py
-│   ├── error_analysis/.gitkeep
+│   ├── graders/__init__.py   # deterministic graders · judge.py (LLM judge, calibrated first)
+│   ├── calibration/example.jsonl   # human-labeled rows for judge calibration
+│   ├── error_analysis/.gitkeep     # log.md grows with `rumbo eval add`
 │   └── run_evals.py
-├── scripts/check_tests_not_weakened.py
+├── scripts/check_tests_not_weakened.py   # anti-cheat sensor (A6)
+├── scripts/rumbo_guard.py                # Claude Code hook: hard rules as sensors (A6)
 ├── spikes/README.md          # "Throwaway code. Never imported from src/."
 └── infra/Dockerfile
 ```
@@ -241,8 +250,12 @@ and a local hook that runs `uv run lint-imports`. Then `pre-commit autoupdate` a
 - `nightly.yml` (daily cron, mvp+): `make mutation` on `src/<pkg>/domain` and, for LLM
   products, `make evals-live` in a protected `evals` environment. **That is the only workflow
   that holds a model credential**, and it never runs on pull requests.
+- `.github/pull_request_template.md` carries the G4 checklist where the human is already
+  looking; `.github/CODEOWNERS` names the humans who review the harness files (Makefile,
+  pyproject, CI, hooks, scripts, specs, decisions). Replace the placeholder handles and enable
+  "require review from code owners" in the branch protection to make it binding.
 
-### A6. Anti-cheat sensor: `scripts/check_tests_not_weakened.py`
+### A6. Anti-cheat sensors: `check_tests_not_weakened.py` and `rumbo_guard.py`
 
 Comparing against `origin/main` (or the PR base commit), the script fails if:
 
@@ -256,6 +269,18 @@ in its message that was not authored by an agent, or the `tests-change-approved`
 PR. What it does not see (review by hand; mutation testing covers part of it): early `return`,
 mocks that empty the behavior, asserts moved into helpers, changes to pytest configuration.
 It ships with its own tests (`tests/unit/test_check_tests_not_weakened.py`).
+
+`scripts/rumbo_guard.py` is the second sensor, wired by `.claude/settings.json` as Claude Code
+hooks. Before every `Edit`/`Write`/`Bash` call it blocks (exit 2, the reason reaches the agent):
+edits to the protected files (Makefile, `pyproject.toml`, CI, `infra/`, pre-commit, both
+sensors, `evals/run_evals.py`, `.env*`), removal of the `<!-- rumbo:template` mark, writing
+`[tests-change-approved]`, `--no-verify`, force pushes, `git reset --hard`, disabling hooks,
+`rm -rf` on the root and shell redirections into protected files. On `Stop`, if Python, TOML
+or JSONL files changed since the last commit, it runs `make check-brief` and refuses to finish
+while it is red. The human is never blocked: edits by hand do not go through the hook, and a
+rule can be overridden in `.claude/settings.local.json`. `settings.json` also pre-approves the
+harness commands (`make check`, pytest, ruff, read-only git) and denies `curl`/`wget` and
+reading `.env`.
 
 ### A7. Evals skeleton (LLM products only)
 
@@ -274,8 +299,15 @@ It ships with its own tests (`tests/unit/test_check_tests_not_weakened.py`).
   model, so the smoke suite must run from recorded fixtures. Cases tagged `example` do not
   count toward the dataset minimum (20 prototype · 50 mvp · 100 production).
 
-LLM judges are added **after** the first error analysis and only once validated against human
-labels.
+Two tools keep the dataset honest:
+
+- `rumbo eval add <suite> --input '{...}' --expected '{...}' --grader <name> [--source ...]`
+  turns a production failure or a reviewed trace into a case and logs it in
+  `evals/error_analysis/log.md` (the weekly ritual reads that log).
+- LLM judges (`evals/graders/judge.py`) are added **after** the first error analysis and only
+  once calibrated: `calibrate()` over ≥30 human-labeled rows in `evals/calibration/` must give
+  TPR and TNR ≥ 0.8 before the judge is registered in `GRADERS`; the numbers and the date go in
+  `docs/evals/plan.md`.
 
 ### A8. Final verification of Part A 🛑
 
@@ -382,8 +414,9 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
 
 ### B — Build with ANCLA (every PR)
 
-- **A**nchor: acceptance tests first (Hypothesis for domain invariants). The human approves
-  them.
+- **A**nchor: acceptance tests first (Hypothesis for domain invariants), each naming the
+  requirement it covers (`F-000N.Rk` in its docstring; `rumbo trace` builds the table). The
+  human approves them.
 - **N**avigate: short plan before coding.
 - **C**lose the loop: iterate in a sandbox until `make check` is green.
 - **L**imit: small diff; human review + a second review by a clean session or another model
@@ -391,7 +424,9 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
   the spec). `make review` writes a guided review for the human: risk hotspots first, reading
   order (tests first), verification commands and three explanation-test questions.
 - Learn **A**nd measure: repeated mistakes → a new sensor or a line in AGENTS.md. When a spec
-  closes, log how many sessions it took (`rumbo decision "F-000N closed" --why "1 session"`).
+  closes, log how many sessions it took (`rumbo decision "F-000N closed" --why "1 session"`);
+  `rumbo metrics` turns those decisions, git and the evals into the team's numbers (sessions
+  per spec, gates signed, deploys and incidents, requirements with a test, latest eval run).
 - 🛑 **Gate G4 (per PR):** CI green, no test weakened, dependencies verified, and the human can
   explain the change in 3 sentences without reading your summary.
 
@@ -419,17 +454,24 @@ each unit of work small:
 
 - Deploy on a PaaS (Fly.io, Railway, Render or Cloud Run) with an immutable image
   (`infra/Dockerfile`, tag = SHA) and a **rehearsed rollback**.
-- OpenTelemetry + 2–3 SLOs in `docs/ops/slos.md`. LLM products: GenAI traces (model, tokens,
-  cost, tool) to Langfuse or Phoenix, with pinned versions because the conventions are still
-  in development.
-- Cost budget per request, hard limits and alerts.
+- 2–3 SLOs in `docs/ops/slos.md` (LLM products: cost per request, budget abstentions, online
+  accuracy). LLM products are instrumented from day one: every request runs inside
+  `app/telemetry.span` (OTel GenAI attribute names and `cost.usd`, logged as JSON) and an
+  `app/budget.Meter` (tokens, cost, time; `BudgetExceeded` becomes an abstention with the
+  reason). Charge every model call to the meter. Shipping the spans to Langfuse, Phoenix or an
+  OTLP collector is an adapter (`opentelemetry-sdk`, pinned); call sites in `app/` do not change.
+- Cost budget per request: `RUMBO_BUDGET_*` in the environment, alerts on
+  `abstain_reason=budget`; the runbook has an entry for the spike.
 - `docs/ops/runbook.md` with one entry per failure mode; blameless postmortems
   (`rumbo new postmortem "<title>"`) that answer "which sensor was missing?".
 - Weekly ritual: the human reviews 20–30 traces (open coding); you propose categories; new
   failures become eval cases.
 - Maintenance: Dependabot/Renovate weekly with a cooldown; biweekly cleanup with Tidy First
   refactors; documentation updated in the same PR.
-- 🛑 **Gate G5:** rollback rehearsed, SLOs and alerts active, cost limits configured.
+- `rumbo metrics` for the monthly review: deploys and incidents are `rumbo decision "deploy
+  vX"` / `rumbo decision "incident: ..."` entries, the cheapest DORA proxy for a small team.
+- 🛑 **Gate G5:** rollback rehearsed, SLOs and alerts active, cost limits configured (the
+  automatic check verifies budget and telemetry are wired into the entry point).
 
 ### Human compass (always)
 
@@ -487,7 +529,7 @@ Story: As a <user> I want <capability> so that <benefit>.
 - R1 (event): When …, the system shall …
 - R2 (unwanted): If …, then the system shall …
 ## Acceptance criteria
-<pytest tests / Hypothesis properties that verify them>
+<pytest tests / Hypothesis properties that verify them; each mentions its requirement id F-000N.Rk>
 ## Data contracts and ownership
 Types/schemas · signatures · shared invariants · files owned by this spec (one writer) ·
 interfaces other specs depend on
@@ -553,7 +595,8 @@ What `rumbo init` and `rumbo gate` do per rigor:
 | CI | check + sensor + gitleaks | + pre-commit on all files | + SBOM (CycloneDX from uv.lock) |
 | Nightly | — | mutation (+ live evals) | mutation + live evals with k=3 |
 | Dependabot | — | weekly, 7-day cooldown | same |
-| Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases | + fitness function per ADR, nightly, SBOM; 100 cases |
+| Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases; budget + telemetry wired (G5) | + fitness function per ADR, nightly, SBOM, every requirement traced to a test (G4); 100 cases |
+| Hooks | `.claude/settings.json` + `scripts/rumbo_guard.py` | same | same |
 
 What matters is the **worst plausible impact**, not the size of the code. An agent that hands
 out figures used in commercial decisions is, at the very least, an "MVP with production

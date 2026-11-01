@@ -25,6 +25,12 @@ the commands `/rumbo-r`, `/rumbo-u`, `/rumbo-m`, `/rumbo-ancla`, `/rumbo-review`
 `/rumbo-gate` and `/rumbo-tour`. The `rumbo` CLI is available as `make rumbo ARGS="gate G4"`
 (or install it: `uv tool install git+https://github.com/padillacm/RUMBO`).
 
+`.claude/settings.json` pre-approves the harness commands and wires `scripts/rumbo_guard.py`
+as hooks: the agent cannot edit the Makefile, `pyproject.toml`, CI, infra or the sensors,
+cannot remove a template mark or bypass the tests, and cannot finish with `make check` red.
+When it is blocked it asks you; you edit those files by hand. Replace `@your-handle` in
+`.github/CODEOWNERS` and the contact in `SECURITY.md`.
+
 ## Layout
 
 | Folder | What lives there |

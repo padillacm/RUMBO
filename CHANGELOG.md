@@ -7,12 +7,42 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Claude Code hooks: the generated `.claude/settings.json` pre-approves the harness commands
+  and wires `scripts/rumbo_guard.py` (PreToolUse and Stop) so the agent cannot edit the
+  Makefile, pyproject, CI, infra, the sensors or `.env`, remove a template mark, write the
+  approval mark, force-push, bypass git hooks or finish with `make check-brief` red.
+- Requirement → test traceability: requirement ids `F-NNNN.Rk`, `rumbo trace [--strict]`, a
+  G4 row (recommended below production, required in production), `/rumbo-review` starting
+  from the generated table.
+- `.github/pull_request_template.md` (ANCLA checklist), `.github/CODEOWNERS` and `SECURITY.md`
+  in generated projects and in this repository.
+- Phase O skeleton for LLM products: `app/budget.py` (per-request token, cost and time limits
+  from `RUMBO_BUDGET_*`, `BudgetExceeded` → abstention) and `app/telemetry.py` (spans with
+  OpenTelemetry GenAI attribute names and cost, logged as JSON); runbook entries, SLO rows,
+  `.env.example` variables and a G5 check that both are wired into the entry point.
+- `rumbo eval add`: turns a failure into a JSONL case and logs it in
+  `evals/error_analysis/log.md`.
+- `rumbo metrics [--days --json]`: specs closed and sessions per spec, gates signed, commits
+  by type, deploy/incident decisions as DORA proxies, requirements traced, latest eval run.
+- `rumbo update --diff`: preview of what `update` would replace and how harness files drifted.
+- `evals/graders/judge.py`: LLM-as-judge grader with `calibrate()` (TPR, TNR, kappa) against
+  human-labeled rows in `evals/calibration/`; admitted only at TPR/TNR ≥ 0.8 on ≥30 cases.
+- Framework CI on Python 3.11–3.13 (Linux, macOS, Windows), an anti-cheat sensor job and a
+  release workflow (`vX.Y.Z` tag → GitHub Release from the CHANGELOG, optional PyPI trusted
+  publishing); five ADRs with fitness functions in `docs/adr/`; `docs/tutorial.md`.
 - Context-limit practices, grounded in the research report
   `reports/Desarrollar con agentes bajo límite de contexto.md` (method §3.1): a "Data
   contracts and ownership" section in the spec template (checked by gate G2), a one-writer
   rule and a `# Compact instructions` section in the generated AGENTS.md, `make check-brief`
   (only the failing tail reaches the agent's context), a requirement-by-requirement
   traceability table in `/rumbo-review`, and a session-count log when a spec closes.
+
+### Changed
+- `rumbo update` lists only harness files (Makefile, AGENTS.md, CI, hooks…) under "differ",
+  never the human's documents.
+
+### Fixed
+- Generated files are written with LF on every platform (CRLF on Windows before).
 
 ## [0.2.0] - 2026-11-01
 

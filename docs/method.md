@@ -133,14 +133,21 @@ apply recursively to the rest: in R, "anchor" means fixing metrics; in M, fixing
 
 | Step | Guides (feed-forward) | Sensors (feedback) | Who |
 |---|---|---|---|
-| **A**nchor in verifiers | EARS spec; tests reviewed by the human before the code | pytest in red; Hypothesis; strict pyright in `domain/` | Human approves; agent drafts the tests |
+| **A**nchor in verifiers | EARS spec with ids (`F-000N.Rk`); tests that name their requirement, reviewed by the human before the code | pytest in red; Hypothesis; strict pyright in `domain/`; `rumbo trace` (requirement → test) | Human approves; agent drafts the tests |
 | **N**avigate with a plan | AGENTS.md ("a map, not a manual"); linked ADRs | Plan review before coding | Agent proposes; human approves |
 | **C**lose the loop in a sandbox | Documented verification commands | ruff, pyright, pytest, import-linter, bandit, pip-audit, regression evals | Agent iterates until green |
-| **L**imit and review | Diffs <~300 lines; structure separated from behavior; one writing agent | Human review + second model; Beck's alarms; new-dependency verification (slopsquatting); guided review (`rumbo tour`) | Human decides the merge |
-| Learn **A**nd measure | Findings turned into rules | DORA metrics, mutmut on critical modules, reverted PRs, pass^k | Both |
+| **L**imit and review | Diffs <~300 lines; structure separated from behavior; one writing agent; PR template with the checklist | Human review + second model; Beck's alarms; new-dependency verification (slopsquatting); guided review (`rumbo tour`); Claude Code hooks that block edits to the sensors, template-mark removal, approval marks, force pushes and a red `make check` at Stop | Human decides the merge |
+| Learn **A**nd measure | Findings turned into rules | `rumbo metrics` (sessions per spec, gates signed, deploy/incident proxies, requirements traced, eval runs), mutmut on critical modules, reverted PRs, pass^k | Both |
 
 **Golden rule of the harness:** if the agent makes the same mistake twice, add a sensor (test,
 lint rule, contract) or a guide, besides fixing the code.
+
+**Rules are prose until a hook enforces them.** AGENTS.md says "never touch the Makefile" and
+"never remove the template mark"; nothing in a prompt guarantees it. RUMBO wires
+`scripts/rumbo_guard.py` as Claude Code `PreToolUse` and `Stop` hooks (A6 in RUMBO.md): a
+blocked call returns the reason to the agent, which has to ask the human. The hook never binds
+the human, who edits by hand or overrides it locally. This is Böckeler's sensor/guide split
+applied to the harness itself, and the cheapest place to start when a mistake repeats.
 
 ### 2.5 O — Operate, Observe, Optimize
 1. **CI/CD:** trunk-based with short branches; automatic deploy to staging and manual
@@ -149,9 +156,13 @@ lint rule, contract) or a guide, besides fixing the code.
    (tag = SHA) and a one-command rollback, **rehearsed** before launch.
 3. **Classic observability:** OpenTelemetry with 2–3 SLIs/SLOs and an error budget. When the
    budget is exhausted, features freeze.
-4. **LLM observability:** `gen_ai.*` spans with model, tokens, tool and cost sent to Langfuse
-   or Phoenix. Prompts are versioned in the repo and their hash lands in the trace.
-   Production traces become eval cases.
+4. **LLM observability:** `gen_ai.*` spans with model, tokens, tool and cost. The skeleton
+   emits them from day one as JSON log records (`app/telemetry.py`, no dependency) inside a
+   per-request budget (`app/budget.py`: tokens, cost, time; the overrun becomes an abstention);
+   shipping them to Langfuse, Phoenix or an OTLP collector is an adapter added later. Prompts
+   are versioned in the repo and their hash lands in the trace. Production traces become eval
+   cases (`rumbo eval add`); open-ended ones get an LLM judge only after calibration against
+   ≥30 human labels (TPR/TNR ≥ 0.8).
 5. **Incidents:** a runbook per failure mode and blameless postmortems that answer "which
    sensor was missing?".
 6. **Maintenance:** Dependabot/Renovate weekly with a cooldown; biweekly cleanup with Tidy
