@@ -20,6 +20,7 @@ from rumbo.render import render
 PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
 SENSOR_FILE = PACKAGE_DIR / "sensors" / "check_tests_not_weakened.py"
+GUARD_FILE = PACKAGE_DIR / "sensors" / "guard.py"
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ CONDITIONS: dict[str, Callable[[Config], bool]] = {
 FRAMEWORK_OWNED = (
     "RUMBO.md",
     "scripts/check_tests_not_weakened.py",
+    "scripts/rumbo_guard.py",
     "docs/adr/0000-template.md",
     "specs/0000-template.md",
     "docs/postmortems/0000-template.md",
@@ -269,6 +271,7 @@ def plan_files(cfg: Config) -> dict[str, str | Path]:
         else:
             plan[target] = src
     plan["scripts/check_tests_not_weakened.py"] = SENSOR_FILE
+    plan["scripts/rumbo_guard.py"] = GUARD_FILE
     plan["RUMBO.md"] = rumbo_md()
     return plan
 
