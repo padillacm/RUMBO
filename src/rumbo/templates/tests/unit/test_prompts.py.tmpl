@@ -1,8 +1,8 @@
-"""Los prompts llevan identificador de versión que queda en la traza."""
+"""Prompts carry a version identifier that ends up in the trace."""
 
-from {{pkg}}.prompts import Prompt
+from {{package}}.prompts import Prompt
 
 
-def test_ref_incluye_version() -> None:
-    prompt = Prompt(id="extraer_intencion", version="2026-01-01.1", texto="...")
-    assert prompt.ref == "extraer_intencion@2026-01-01.1"
+def test_ref_includes_version() -> None:
+    prompt = Prompt(id="extract_intent", version="2026-01-01.1", text="...")
+    assert prompt.ref == "extract_intent@2026-01-01.1"

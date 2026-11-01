@@ -1,12 +1,14 @@
 ---
-description: Fase B — una tarea con el bucle ANCLA (Acotar, Navegar, Cerrar, Limitar, Aprender)
+description: Phase B — one task with the ANCLA loop (Anchor, Navigate, Close, Limit, Learn)
+argument-hint: <task>
 ---
-Implementa esta tarea con **ANCLA** (`RUMBO.md`, Parte C, fase B): $ARGUMENTS
+Implement this task with **ANCLA** (`RUMBO.md`, Part C, phase B): $ARGUMENTS
+If no task was given, ask for one before doing anything.
 
-1. **Acotar:** lee la spec y los ADRs relevantes. Escribe primero los tests de aceptación (Hypothesis para invariantes del dominio). Ejecútalos y muestra que **fallan**. 🛑 Detente: el humano aprueba los tests.
-2. **Navegar:** propone un plan corto (archivos, tests, riesgos, dependencias nuevas). 🛑 Espera aprobación.
-3. **Cerrar:** código mínimo para pasar, luego refactor. Itera hasta que `make check` esté verde.
-4. **Limitar:** diff ≤ ~300 líneas; commits estructurales separados de los de comportamiento. Verifica dependencias nuevas con `rumbo verify-dep`. Ejecuta `make sensor`.
-5. **Aprender:** si un error se repitió, propone un sensor o una línea en AGENTS.md.
+1. **Anchor:** read the spec and the relevant ADRs. Write the acceptance tests first (Hypothesis for domain invariants). Run them and show that they **fail**. 🛑 Stop: the human approves the tests.
+2. **Navigate:** propose a short plan (files, tests, risks, new dependencies). 🛑 Wait for approval.
+3. **Close the loop:** minimal code to pass, then refactor. Iterate until `make check` is green.
+4. **Limit:** diff ≤ ~300 lines; structural commits separated from behavioral ones. Verify new dependencies with `make rumbo ARGS="verify-dep <pkg>"`. Run `make sensor`.
+5. **Learn:** if a mistake repeated, propose a sensor or a line in AGENTS.md.
 
-Cierra con: resumen en 3 frases, dependencias nuevas, salida resumida de `make check` y el checklist de `rumbo gate G4`. Recuerda al humano pedir una segunda revisión (`/rumbo-revisar` en una sesión limpia u otro modelo) y hacer la prueba de explicación.
+Close with: a 3-sentence summary, new dependencies, the summarized `make check` output, the checklist of `make rumbo ARGS="gate G4"`, and `make review` so the human gets a guided review. Remind the human to run `/rumbo-review` in a clean session or another model and to do the explanation test.

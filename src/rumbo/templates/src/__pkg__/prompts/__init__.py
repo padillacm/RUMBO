@@ -1,7 +1,7 @@
-"""Prompts versionados. Cada prompt lleva un identificador de versión que queda en la traza.
+"""Versioned prompts. Each prompt carries a version identifier that ends up in the trace.
 
-Ejemplo:
-    PROMPT_EXTRAER_INTENCION = Prompt(id="extraer_intencion", version="2026-01-01.1", texto="...")
+Example:
+    EXTRACT_INTENT = Prompt(id="extract_intent", version="2026-01-01.1", text="...")
 """
 
 from dataclasses import dataclass
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 class Prompt:
     id: str
     version: str
-    texto: str
+    text: str
 
     @property
     def ref(self) -> str:

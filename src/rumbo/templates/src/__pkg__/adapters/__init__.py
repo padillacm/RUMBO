@@ -1,1 +1,1 @@
-"""Adaptadores: APIs externas, base de datos, LLM. Implementan puertos definidos en app/domain."""
+"""Adapters: external APIs, databases, LLM. They implement ports defined in app/domain."""

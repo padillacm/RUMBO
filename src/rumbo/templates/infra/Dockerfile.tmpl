@@ -1,5 +1,5 @@
-# Imagen inmutable (fase O). Etiqueta las imágenes con el SHA del commit.
-# Fija la imagen base y la de uv por digest antes de producción.
+# Immutable image (phase O). Tag images with the commit SHA.
+# Pin the base and uv images by digest before production (Dependabot's docker ecosystem helps).
 ARG PYTHON_VERSION=3.12
 FROM python:${PYTHON_VERSION}-slim AS build
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
@@ -18,8 +18,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 USER app
 {{#llm}}
 EXPOSE 8000
-CMD ["uvicorn", "{{pkg}}.api.http:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "{{package}}.api.http:app", "--host", "0.0.0.0", "--port", "8000"]
 {{/llm}}
 {{^llm}}
-CMD ["python", "-m", "{{pkg}}"]
+CMD ["python", "-m", "{{package}}"]
 {{/llm}}

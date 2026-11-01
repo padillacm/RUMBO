@@ -1,11 +1,12 @@
-"""Tests del esqueleto de entrada de evals. Reemplázalos junto con el workflow real."""
+"""Tests of the evals entry-point skeleton. Replace them together with the real workflow."""
 
-from {{pkg}}.app.entrypoint import responder
-
-
-def test_caso_de_ejemplo() -> None:
-    assert responder({"pregunta": "ping"}) == {"respuesta": "pong"}
+from {{package}}.app.entrypoint import answer
 
 
-def test_se_abstiene_si_no_sabe() -> None:
-    assert responder({"pregunta": "otra cosa"})["abstencion"] is True
+def test_example_case() -> None:
+    assert answer({"question": "ping"}) == {"answer": "pong"}
+
+
+def test_abstains_when_offline(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
+    assert answer({"question": "something else"})["abstain"] is True

@@ -1,8 +1,8 @@
 # spikes/
 
-Código desechable. **Nunca se importa desde src/.**
+Throwaway code. **Never imported from src/.**
 
-Aquí viven los prototipos de la fase R (aprender, no ganar). Lo que pasa a la siguiente
-fase es lo aprendido —anotado en docs/product/brief.md o en un ADR—, no el código: se
-reimplementa con ANCLA. Ruff no revisa esta carpeta y un test de arquitectura impide
-importarla desde `src/`.
+Discovery prototypes (phase R) live here: built to learn, not to ship. What moves to the
+next phase is what was learned — written in docs/product/brief.md or an ADR — not the code,
+which is reimplemented with ANCLA. Ruff skips this folder and an architecture test forbids
+importing it from `src/`.

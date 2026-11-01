@@ -1,0 +1,11 @@
+# Human decisions log (the compass)
+
+The human writes down what was decided and why. The agent proposes; the human decides.
+Format: `## YYYY-MM-DD — title` + decision, why, who. (Shortcut: `rumbo decision`.)
+
+## {{date}} — Project start with RUMBO (A0 answers)
+- Project: {{name}} (package `{{package}}`)
+- LLM product: {{#llm}}yes — provider {{provider}}{{/llm}}{{^llm}}no{{/llm}}
+- Rigor level: {{rigor}}
+- Use case: {{case}}
+- Decided by: human (answers given to `rumbo init`)

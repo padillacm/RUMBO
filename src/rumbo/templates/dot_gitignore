@@ -17,4 +17,5 @@ mutants/
 .mutmut-cache
 sbom.cdx.json
 evals/reports/
+*.bak
 .DS_Store

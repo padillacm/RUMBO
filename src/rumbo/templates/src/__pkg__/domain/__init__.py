@@ -1,4 +1,4 @@
-"""Dominio: lógica pura. Sin I/O, sin HTTP, sin SDKs de LLM, sin reloj del sistema.
+"""Domain: pure logic. No I/O, no HTTP, no LLM SDKs.
 
-pyright corre en modo estricto aquí y import-linter prohíbe dependencias de infraestructura.
+pyright runs in strict mode here and import-linter forbids infrastructure imports.
 """

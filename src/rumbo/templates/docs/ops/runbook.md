@@ -1,14 +1,14 @@
-<!-- rumbo:plantilla — borra esta línea cuando el documento esté completo (lo verifica `rumbo gate`) -->
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # Runbook
 
 **Dashboards:**
 
-**Rotación de llaves:**
+**Key rotation:** <where each credential lives, who rotates it, how often>
 
-**Contactos de proveedores:**
+**Vendor contacts:**
 
-## <Alerta / modo de fallo>
-- **Síntoma:**
-- **Diagnóstico** (consulta de trazas):
-- **Mitigación** (flag / rollback a la imagen anterior):
-- **Escalamiento:**
+## <Alert / failure mode>
+- **Symptom:**
+- **Diagnosis** (trace query):
+- **Mitigation** (flag / rollback to the previous image):
+- **Escalation:**

@@ -1,13 +1,14 @@
 ---
-description: Fase M (Modelar) de RUMBO — ADRs con fitness function, C4 y threat model
+description: RUMBO phase M (Model) — ADRs with fitness functions, C4 and the threat model
+argument-hint: <decision or focus>
 ---
-Sigue la fase **M — Modelar** de `RUMBO.md` (Parte C).
+Follow phase **M — Model** of `RUMBO.md` (Part C).
 
-1. Pide primero al humano su versión de la decisión (brújula humana). Luego completa opciones y trade-offs.
-2. ADR con `rumbo new adr "<decisión>"`. **Cada ADR lleva una fitness function** ejecutable (contrato import-linter, test en `tests/architecture/` o umbral en CI) y la implementas en el mismo cambio.
-3. Si hay LLM: ADR explícito **workflow vs. agente** (llamada única → workflow → agente solo si los evals lo exigen). Herramientas pocas, tipadas con Pydantic, de solo lectura.
-4. Actualiza `docs/architecture/c4.md` (niveles 1–2 en Mermaid).
-5. Threat model de 1 hora en `docs/security/threat-model.md`: STRIDE por frontera, OWASP LLM 2025 / Agentic 2026, trifecta letal (¿qué pata se elimina?).
-6. Termina con `rumbo gate G3` y detente.
+1. Ask the human for their version of the decision first (human compass). Then complete options and trade-offs.
+2. Create the ADR with `make rumbo ARGS='new adr "<decision>"'`. **Every ADR carries an executable fitness function** (import-linter contract, test in `tests/architecture/` or CI threshold); implement it in the same change.
+3. LLM products: an explicit **workflow vs. agent** ADR (single call → workflow → agent only if the evals demand it). Few tools, typed with Pydantic, read-only.
+4. Update `docs/architecture/c4.md` (levels 1–2 in Mermaid).
+5. One-hour threat model in `docs/security/threat-model.md`: STRIDE per boundary, the OWASP LLM 2025 / Agentic 2026 checklist, lethal trifecta (which leg is removed, and which sensor proves it).
+6. Finish with `make rumbo ARGS="gate G3"` and stop.
 
-Decisión o foco: $ARGUMENTS
+Decision or focus: $ARGUMENTS

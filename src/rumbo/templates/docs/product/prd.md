@@ -1,28 +1,28 @@
-<!-- rumbo:plantilla — borra esta línea cuando el documento esté completo (lo verifica `rumbo gate`) -->
-# PRD — <producto>
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
+# PRD — <product>
 
-## Contexto
+## Context
 
-## Objetivos y métricas
+## Goals and metrics
 
-## No-objetivos
+## Non-goals
 
-## Usuarios
+## Users
 
-## Flujos
+## Flows
 
-## Requisitos
-<!-- IDs que enlazan a specs/: F-0001, F-0002… -->
+## Requirements
+<!-- IDs linking to specs/: F-0001, F-0002… -->
 
-## Requisitos no funcionales (con números)
-| RNF | Objetivo | Cómo se mide |
+## Non-functional requirements (with numbers)
+| NFR | Target | How it is measured |
 |---|---|---|
-| Latencia p95 | < X s | |
-| Costo por solicitud | < Y USD | |
-| Disponibilidad | ≥ Z % | |
+| Latency p95 | < X s | |
+| Cost per request | < Y USD | |
+| Availability | ≥ Z % | |
 
-## Riesgos
+## Risks
 
-## Lanzamiento (flags)
+## Launch (flags)
 
-## Preguntas abiertas
+## Open questions

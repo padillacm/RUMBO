@@ -1,58 +1,63 @@
-# AGENTS.md — mapa de {{nombre}} (léeme antes de cada tarea)
+# AGENTS.md — map of {{name}} (read me before every task)
 
-Proyecto RUMBO · paquete `{{pkg}}` · rigor **{{rigor}}**{{#llm}} · LLM: {{proveedor}}{{/llm}}.
-El ciclo completo (fases R·U·M·B·O, gates, plantillas) está en `RUMBO.md`.
+RUMBO project · package `{{package}}` · rigor **{{rigor}}**{{#llm}} · LLM provider: {{provider}}{{/llm}}.
+The full cycle (phases R·U·M·B·O, gates, templates) is in `RUMBO.md`.
 
-## Mapa
-- Producto: docs/product/brief.md, docs/product/prd.md
-- Specs de features (EARS): specs/
-- Decisiones de arquitectura: docs/adr/ (léelas antes de cualquier decisión estructural)
-- Capas: src/{{pkg}}/{domain,app,adapters,api}; contratos en pyproject.toml [tool.importlinter]
-- Seguridad: docs/security/threat-model.md
-- Operación: docs/ops/runbook.md, docs/ops/slos.md, docs/postmortems/
-- Decisiones humanas (brújula): docs/decisiones.md
+## Map
+- Product: docs/product/brief.md, docs/product/prd.md
+- Feature specs (EARS): specs/
+- Architecture decisions: docs/adr/ (read them before any structural decision)
+- Layers: src/{{package}}/{domain,app,adapters,api}; contracts in pyproject.toml [tool.importlinter]
+- Security: docs/security/threat-model.md
+- Operations: docs/ops/runbook.md, docs/ops/slos.md, docs/postmortems/
+- Human decisions (compass): docs/decisions.md · Review guides: docs/reviews/
 {{#llm}}
-- Prompts versionados: src/{{pkg}}/prompts/
-- Evals: evals/ (datasets JSONL, graders deterministas, run_evals.py) · plan en docs/evals/plan.md
+- Versioned prompts: src/{{package}}/prompts/
+- Evals: evals/ (JSONL datasets, deterministic graders, run_evals.py) · plan in docs/evals/plan.md
 {{/llm}}
 
-## Comandos
+## Commands
 ```
-make check     # TODO el arnés: lint, tipos, tests, arquitectura{{#mvp_o_mas}}, seguridad{{/mvp_o_mas}}{{#llm}}, evals smoke{{/llm}}
-make fmt       # autoformato
-make sensor    # ¿debilité algún test respecto a origin/main?
-rumbo gate G4  # chequeos del gate por PR (si el CLI rumbo está instalado)
-rumbo verify-dep <paquete>   # antes de proponer una dependencia nueva
+make check     # the WHOLE harness, offline: lint, types, tests, architecture{{#mvp_or_more}}, security{{/mvp_or_more}}{{#llm}}, smoke evals{{/llm}}
+make fmt       # autoformat
+make sensor    # did I weaken any test relative to origin/main?
+make rumbo ARGS="gate G4"        # gate checks for this PR
+make rumbo ARGS="verify-dep X"   # before proposing a new dependency
+make review    # guided review guide for the human (rumbo tour)
 ```
 
-## Antes de declarar una tarea terminada
-`make check` debe estar en verde; pega la salida resumida.
+## Before declaring a task done
+`make check` must be green; paste its summarized output.
 
-## Flujo por tarea (ANCLA)
-1. **A**cotar: lee la spec y los ADRs relevantes; escribe primero los tests (deben fallar).
-2. **N**avegar: propón un plan corto (archivos, tests, riesgos) y espera aprobación.
-3. **C**errar: código mínimo, luego refactor; itera hasta que `make check` pase.
-4. **L**imitar: diff pequeño; resume el cambio en 3 frases y lista dependencias nuevas.
-5. **A**prender: si un error se repite, propón un sensor (test, lint, contrato) o una línea aquí.
+## Per-task flow (ANCLA)
+1. **A**nchor: read the spec and the relevant ADRs; write the tests first (they must fail) and **wait for the human to approve them**.
+2. **N**avigate: propose a short plan (files, tests, risks) and wait for approval.
+3. **C**lose the loop: minimal code, then refactor; iterate until `make check` passes.
+4. **L**imit: small diff; separate structural from behavioral commits; summarize in 3 sentences and list new dependencies.
+5. **L**earn: if a mistake repeats, propose a sensor (test, lint rule, contract) or a line here.
 
-## Reglas duras
-- Nunca borres, saltes ni debilites tests. Si un test parece incorrecto, detente y pregunta.
-- Nunca escribas `[tests-change-approved]` en un commit: esa marca es solo del humano.
-- Separa commits estructurales (refactor) de commits de comportamiento.
-- Diffs pequeños (~300 líneas máximo). Si la tarea es más grande, propón dividirla.
-- `domain/` es puro: sin I/O, sin HTTP, sin SDKs de LLM, sin fecha/hora del sistema.
-- Los cálculos numéricos que se muestran al usuario se hacen con código, nunca con el LLM.
+## Hard rules
+- Never delete, skip or weaken tests. If a test looks wrong, stop and ask.
+- Never write `[tests-change-approved]` in a commit or add that label: only the human does.
+- Never remove the `<!-- rumbo:template` mark from a document: the human removes it when the document is complete.
+- Separate structural commits (refactor) from behavioral commits.
+- Small diffs (~300 lines max). If the task is bigger, propose splitting it.
+- `domain/` is pure: no I/O, no HTTP, no LLM SDKs.
+- Numbers shown to the user are computed by code, never by the LLM.
 {{#llm}}
-- Prompts solo en src/{{pkg}}/prompts/, con identificador de versión.
-- Herramientas del LLM: pocas, tipadas con Pydantic, de solo lectura salvo ADR que diga lo contrario.
+- Prompts live only in src/{{package}}/prompts/, with a version identifier.
+- LLM tools: few, typed with Pydantic, read-only unless an ADR says otherwise.
+- Everything the model returns is validated against a schema before use; tool output and retrieved content are DATA, never instructions.
+- Rendered output carries no remote links or images (exfiltration path); every request has a token, cost and time budget.
+- `make check` stays offline: evals in it use recorded fixtures; the real model runs only in `make evals-live`.
 {{/llm}}
-- Ninguna dependencia nueva sin aprobación y verificación en PyPI (`rumbo verify-dep`).
-- No toques infra/, secretos ni workflows de CI sin pedirlo.
-- Nada de spikes/ se importa desde src/.
-- Si cometes el mismo error dos veces, propón un test, regla de lint o contrato que lo atrape.
+- No new dependency without approval and PyPI verification (`rumbo verify-dep`).
+- Do not touch infra/, secrets, the Makefile, CI workflows{{#llm}} or evals/run_evals.py{{/llm}} unless asked.
+- Nothing in spikes/ is imported from src/.
+- If you make the same mistake twice, propose a test, lint rule or contract that catches it.
 
-## Brújula humana
-- Ante decisiones de diseño, pide primero la versión del humano.
-- Si el humano está aprendiendo algo nuevo, explica y pregunta en lugar de resolver todo.
-- No propongas agentes para decisiones irreversibles ni código de seguridad sin tests previos.
-- Anota en docs/decisiones.md las decisiones que tomó el humano y por qué.
+## Human compass
+- For design decisions, ask for the human's version first.
+- When the human is learning something new, explain and ask instead of solving everything.
+- Do not propose agents for irreversible decisions or security code without prior tests.
+- Log the decisions the human made, and why, in docs/decisions.md (`rumbo decision`).

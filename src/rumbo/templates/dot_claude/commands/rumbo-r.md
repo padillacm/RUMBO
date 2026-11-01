@@ -1,12 +1,14 @@
 ---
-description: Fase R (Reconocer) de RUMBO — ¿vale la pena construirlo?
+description: RUMBO phase R (Recognize) — is it worth building?
+argument-hint: [context or focus]
 ---
-Sigue la fase **R — Reconocer** de `RUMBO.md` (Parte C).
+Follow phase **R — Recognize** of `RUMBO.md` (Part C).
 
-1. Lee `docs/product/brief.md`. Si aún tiene la marca de plantilla, pide al humano que lo escriba él primero; no lo redactes tú.
-2. Critica el brief: supuestos débiles, métrica ausente o no medible, alternativas actuales, criterio de abandono.
-3. Propón un guion de entrevista (5–8 preguntas abiertas). Las entrevistas las hace el humano.
-4. Si se necesita un prototipo, va **solo** en `spikes/`. Lo que pasa a la fase U es lo aprendido, no el código.
-5. Termina con el checklist de `rumbo gate G1` (o la sección 🛑 Gate G1 de RUMBO.md) y detente.
+1. Read `docs/product/brief.md`. If it still has the template mark, ask the human to write it first; do not draft it yourself and never remove the mark.
+2. Critique the brief: weak assumptions, missing or unmeasurable metric, current alternatives, abandonment criterion.
+3. Propose an interview script with open questions. The human runs the interviews.
+4. LLM products: propose the feasibility test (20–30 real questions run by hand with the model and the data).
+5. If a prototype is needed, it goes **only** in `spikes/`. What moves to phase U is what was learned, not the code.
+6. Finish with the checklist of `make rumbo ARGS="gate G1"` (or the 🛑 Gate G1 section of RUMBO.md) and stop.
 
-Contexto adicional del humano: $ARGUMENTS
+Additional context from the human: $ARGUMENTS

@@ -1,0 +1,18 @@
+"""Entry function the evals call (evals/run_evals.py --entry).
+
+SKELETON: replace it in the first ANCLA task with the real workflow. For now it answers only
+the example case of evals/datasets/smoke.jsonl so the harness is green, and it never calls
+the model unless the evals are live (see adapters/llm.py).
+"""
+
+from typing import Any
+
+from {{package}}.app.ports import live
+
+
+def answer(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("question") == "ping":
+        return {"answer": "pong"}
+    if not live():
+        return {"abstain": True, "reason": "offline: no fixture for this question"}
+    return {"abstain": True, "reason": "not implemented"}

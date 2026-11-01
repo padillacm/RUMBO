@@ -1,22 +1,28 @@
-# Makefile RUMBO — un único comando de verificación: `make check`.
-# Recetas en una sola línea (`objetivo: ; comando`) para no depender de tabuladores.
-# Rigor: {{rigor}}{{#llm}} · con LLM ({{proveedor}}){{/llm}}
+# RUMBO Makefile — one verification command: `make check` (offline, no secrets needed).
+# One-line recipes (`target: ; command`) so tabs never bite.
+# Rigor: {{rigor}}{{#llm}} · LLM provider: {{provider}}{{/llm}}
 
-.PHONY: check test lint types arch security evals evals-full mutation sensor sbom hooks fmt
+.PHONY: check test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
+
+RUMBO ?= uvx --from git+https://github.com/padillacm/RUMBO rumbo
+BASE ?= origin/main
 
 lint:       ; uv run ruff check . && uv run ruff format --check .
 fmt:        ; uv run ruff check --fix . && uv run ruff format .
 types:      ; uv run pyright
-test:       ; uv run pytest{{#mvp}} --cov --cov-report=term-missing:skip-covered{{/mvp}}{{#produccion}} --cov --cov-report=term-missing:skip-covered --cov-fail-under=80{{/produccion}}
+test:       ; uv run pytest{{#mvp_or_more}} --cov --cov-report=term-missing:skip-covered{{/mvp_or_more}}
 arch:       ; uv run lint-imports
-security:   ; uv run bandit -q -r src && uv run pip-audit --skip-editable
+security:   ; uv run bandit -q -r src{{#llm}} evals{{/llm}} && uv run bandit -q -r scripts -s B404,B603,B607 && uv run pip-audit --skip-editable
 {{#llm}}
+# Smoke evals run OFFLINE (recorded fixtures); the model is only called with `make evals-live`.
 evals:      ; uv run python evals/run_evals.py --suite smoke
-evals-full: ; uv run python evals/run_evals.py --suite all --k {{#produccion}}3{{/produccion}}{{^produccion}}1{{/produccion}}
+evals-live: ; uv run python evals/run_evals.py --suite all --live --k {{#production}}3{{/production}}{{^production}}1{{/production}}
 {{/llm}}
-mutation:   ; @if find src/{{pkg}}/domain -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo 'domain/ aún vacío: nada que mutar'; fi
-sensor:     ; uv run python scripts/check_tests_not_weakened.py
-sbom:       ; uv run pip-audit --skip-editable --format cyclonedx-json --output sbom.cdx.json
+mutation:   ; @if find src/{{package}}/domain -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo 'domain/ is still empty: nothing to mutate'; fi
+sensor:     ; uv run python scripts/check_tests_not_weakened.py --base $(BASE)
+sbom:       ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
 hooks:      ; uv run pre-commit install
+review:     ; $(RUMBO) tour $(BASE) --out docs/reviews/$$(date +%Y-%m-%d)-$$(git rev-parse --short HEAD).md
+rumbo:      ; $(RUMBO) $(ARGS)
 
-check: lint types test arch{{#mvp_o_mas}} security{{/mvp_o_mas}}{{#llm}} evals{{/llm}}
+check: lint types test arch{{#mvp_or_more}} security{{/mvp_or_more}}{{#llm}} evals{{/llm}}

@@ -1,9 +1,9 @@
-<!-- rumbo:plantilla — borra esta línea cuando el documento esté completo (lo verifica `rumbo gate`) -->
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # SLOs
 
-| SLI | SLO | Ventana | Presupuesto de error | Alerta |
+| SLI | SLO | Window | Error budget | Alert |
 |---|---|---|---|---|
-| Disponibilidad | ≥ 99 % | 30 días | | |
-| Latencia p95 | < X s | 30 días | | |
+| Availability | ≥ 99 % | 30 days | | |
+| Latency p95 | < X s | 30 days | | |
 
-Si el presupuesto de error se agota, se congelan las features.
+When the error budget is exhausted, features freeze.

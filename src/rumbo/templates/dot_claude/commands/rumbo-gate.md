@@ -1,8 +1,9 @@
 ---
-description: Evalúa un gate de RUMBO (G1..G5) y resume qué falta
+description: Evaluate a RUMBO gate (G1..G5) and summarize what is missing
+argument-hint: G1 | G2 | G3 | G4 | G5
 ---
-Evalúa el gate **$ARGUMENTS** de RUMBO.
+Evaluate RUMBO gate **$ARGUMENTS**. If no gate was given, ask which one.
 
-1. Si el CLI está disponible, ejecuta `rumbo gate $ARGUMENTS` (o `uvx --from git+https://github.com/padillacm/RUMBO rumbo gate $ARGUMENTS`). Si no, usa la checklist de `RUMBO.md`.
-2. Resume en ≤5 líneas: chequeos automáticos en rojo y qué falta para ponerlos en verde.
-3. Lista los ítems del checklist humano. **No los marques tú**: los firma el humano.
+1. Run `make rumbo ARGS="gate $ARGUMENTS"`. If the CLI is unavailable, use the checklist in `RUMBO.md`.
+2. Summarize in ≤5 lines: automatic checks in red and what it takes to turn them green.
+3. List the human checklist items. **Do not tick them**: the human signs the gate (`rumbo decision "$ARGUMENTS signed"`).

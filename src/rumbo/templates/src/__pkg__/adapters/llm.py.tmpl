@@ -1,0 +1,26 @@
+"""LLM adapter factory. Implements the `Completion` port from app/ports.py."""
+
+from __future__ import annotations
+
+{{#claude_code}}
+from {{package}}.app.ports import Completion
+
+
+def default_completion() -> Completion:
+    from {{package}}.adapters.claude_code import complete
+
+    return complete
+{{/claude_code}}
+{{^claude_code}}
+from {{package}}.app.ports import Completion, require_live
+
+
+def default_completion() -> Completion:
+    """Wire the {{provider}} SDK here (the SDK is forbidden inside domain/)."""
+
+    def complete(prompt: str, *, max_tokens: int = 1024) -> str:
+        require_live("{{provider}}")
+        raise NotImplementedError("wire the {{provider}} SDK in adapters/llm.py")
+
+    return complete
+{{/claude_code}}

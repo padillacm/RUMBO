@@ -1,2 +1,2 @@
-{"id": "ejemplo-001", "input": {"pregunta": "ping"}, "expected": {"respuesta": "pong"}, "grader": "igualdad_campos", "tags": ["ejemplo"]}
-{"id": "ejemplo-002", "input": {"pregunta": "dato que no existe"}, "expected": {}, "grader": "abstencion", "tags": ["ejemplo"]}
+{"id": "example-001", "input": {"question": "ping"}, "expected": {"answer": "pong"}, "grader": "field_equality", "tags": ["example"]}
+{"id": "example-002", "input": {"question": "data that does not exist"}, "expected": {}, "grader": "abstention", "tags": ["example"]}

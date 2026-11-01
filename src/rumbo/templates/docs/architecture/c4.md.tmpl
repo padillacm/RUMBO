@@ -1,21 +1,21 @@
-<!-- rumbo:plantilla — borra esta línea cuando el documento esté completo (lo verifica `rumbo gate`) -->
-# Arquitectura (C4 niveles 1–2)
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
+# Architecture (C4 levels 1–2)
 
-## Nivel 1 — Contexto
-
-```mermaid
-flowchart LR
-  usuario([Usuario]) --> sistema[{{nombre}}]
-  sistema --> externo[(Sistema externo)]
-```
-
-## Nivel 2 — Contenedores
+## Level 1 — Context
 
 ```mermaid
 flowchart LR
-  api[api/: FastAPI o CLI] --> app[app/: casos de uso]
-  app --> domain[domain/: lógica pura]
-  app --> adapters[adapters/: APIs, BD, LLM]
+  user([User]) --> system[{{name}}]
+  system --> external[(External system)]
 ```
 
-## Notas
+## Level 2 — Containers
+
+```mermaid
+flowchart LR
+  api[api/: FastAPI or CLI] --> app[app/: use cases]
+  app --> domain[domain/: pure logic]
+  app --> adapters[adapters/: APIs, DB, LLM]
+```
+
+## Notes

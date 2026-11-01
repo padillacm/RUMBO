@@ -1,20 +1,21 @@
-<!-- rumbo:plantilla — borra esta línea cuando el documento esté completo (lo verifica `rumbo gate`) -->
-# Plan de evals
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
+# Eval plan
 
-## Comportamientos objetivo
+## Target behaviors
 
-## Taxonomía de fallos (con conteos del análisis de errores)
-| Fallo | Conteo | Evaluador (código / juez LLM con TPR/TNR) |
+## Failure taxonomy (with counts from the error analysis)
+| Failure | Count | Evaluator (code / LLM judge with TPR/TNR) |
 |---|---|---|
 
 ## Dataset
-Fuentes, cómo se actualiza (las trazas de producción se vuelven casos).
+Sources, how it grows (production traces become cases). Minimum real cases by rigor:
+20 (prototype), 50 (mvp), 100 (production); cases tagged `example` do not count.
 
-## Umbrales de CI
-- smoke por PR: pass^1 ≥ …
-- completa nightly: pass^k ≥ … (k = 3 para consistencia)
+## CI thresholds
+- smoke per PR (offline, recorded fixtures): pass^1 ≥ …
+- full suite nightly against the real model: pass^k ≥ … (k = 3 for consistency)
 
-## Métricas online
+## Online metrics
 
-## Cadencia del análisis de errores
-Ritual semanal: el humano revisa 20–30 trazas (open coding); el agente propone categorías.
+## Error-analysis cadence
+Weekly ritual: the human reviews 20–30 traces (open coding); the agent proposes categories.

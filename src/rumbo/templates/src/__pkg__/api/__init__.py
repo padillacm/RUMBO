@@ -1,1 +1,1 @@
-"""Frontera de entrada: FastAPI / CLI. Valida en la frontera (Pydantic) y delega en app/."""
+"""Entry boundary: FastAPI / CLI. Validate at the boundary (Pydantic) and delegate to app/."""

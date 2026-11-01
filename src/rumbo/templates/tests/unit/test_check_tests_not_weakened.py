@@ -1,83 +1,121 @@
-"""Tests del sensor anti-trampa (scripts/check_tests_not_weakened.py)."""
+"""Tests of the anti-cheat sensor (scripts/check_tests_not_weakened.py)."""
 
 import importlib.util
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
-RAIZ = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
-    "check_tests_not_weakened", RAIZ / "scripts" / "check_tests_not_weakened.py"
+    "check_tests_not_weakened", ROOT / "scripts" / "check_tests_not_weakened.py"
 )
 assert _spec and _spec.loader
 sensor = importlib.util.module_from_spec(_spec)
 sys.modules["check_tests_not_weakened"] = sensor
 _spec.loader.exec_module(sensor)
 
-BASE = {
-    "tests/test_a.py": "def test_uno():\n    assert 1\n    assert 2\n\nclass TestX:\n"
-    "    def test_dos(self):\n        assert True\n",
-    "tests/datos.json": None,
-}
+TEST_A = (
+    "import pytest\n\n"
+    "def test_one():\n    assert 1 + 1 == 2\n    assert len('ab') == 2\n\n"
+    "class TestX:\n    def test_two(self):\n        assert True\n\n"
+    "@pytest.mark.parametrize('x', [1, 2, 3])\n"
+    "def test_three(x):\n    assert x\n"
+)
+BASE: dict[str, str | None] = {"tests/test_a.py": TEST_A, "tests/data.json": None}
 
 
-def test_sin_cambios_no_hay_problemas() -> None:
-    inv = sensor.analizar(BASE)
-    assert sensor.comparar(inv, sensor.analizar(dict(BASE))) == []
-    assert inv.asserts == 3
-    assert "tests/test_a.py::TestX.test_dos" in inv.tests
+def _problems(current: Mapping[str, str | None]) -> list[str]:
+    return sensor.compare(sensor.analyze(BASE), sensor.analyze(current))
 
 
-def test_detecta_test_eliminado() -> None:
-    actual = dict(
-        BASE, **{"tests/test_a.py": "def test_uno():\n    assert 1\n    assert 2\n    assert 3\n"}
+def test_no_change_no_problems() -> None:
+    inv = sensor.analyze(BASE)
+    assert _problems(dict(BASE)) == []
+    assert inv.asserts == 4
+    assert inv.tests["tests/test_a.py::TestX.test_two"].constant_asserts == 1
+    assert inv.tests["tests/test_a.py::test_three"].param_cases == 3
+
+
+def test_detects_deleted_test() -> None:
+    current = dict(
+        BASE,
+        **{
+            "tests/test_a.py": TEST_A.replace(
+                "    def test_two(self):\n        assert True\n", "    pass\n"
+            )
+        },
     )
-    problemas = sensor.comparar(sensor.analizar(BASE), sensor.analizar(actual))
-    assert any("TestX.test_dos" in p for p in problemas)
+    assert any("TestX.test_two" in p for p in _problems(current))
 
 
-def test_detecta_menos_asserts() -> None:
-    actual = dict(
-        BASE, **{"tests/test_a.py": BASE["tests/test_a.py"].replace("    assert 2\n", "")}
+def test_detects_fewer_asserts_in_a_test() -> None:
+    current = dict(
+        BASE,
+        **{"tests/test_a.py": TEST_A.replace("    assert len('ab') == 2\n", "")},
     )
-    problemas = sensor.comparar(sensor.analizar(BASE), sensor.analizar(actual))
-    assert any("asserts" in p for p in problemas)
+    assert any("test_one: asserts dropped" in p for p in _problems(current))
 
 
-def test_detecta_archivo_eliminado() -> None:
-    actual = {"tests/test_a.py": BASE["tests/test_a.py"]}
-    problemas = sensor.comparar(sensor.analizar(BASE), sensor.analizar(actual))
-    assert problemas == ["archivo de tests eliminado: tests/datos.json"]
+def test_detects_constant_assert_swap() -> None:
+    swapped = TEST_A.replace(
+        "    assert 1 + 1 == 2\n    assert len('ab') == 2\n", "    assert True\n    assert True\n"
+    )
+    assert any("always-true" in p for p in _problems(dict(BASE, **{"tests/test_a.py": swapped})))
 
 
-def test_agregar_tests_no_es_problema() -> None:
-    actual = dict(BASE, **{"tests/test_b.py": "def test_nuevo():\n    assert 1\n"})
-    assert sensor.comparar(sensor.analizar(BASE), sensor.analizar(actual)) == []
+def test_detects_skip_marker_and_parametrize_cut() -> None:
+    skipped = TEST_A.replace("def test_one():", "@pytest.mark.skip\ndef test_one():")
+    assert any("skip" in p for p in _problems(dict(BASE, **{"tests/test_a.py": skipped})))
+    cut = TEST_A.replace("[1, 2, 3]", "[1]")
+    assert any("parametrize" in p for p in _problems(dict(BASE, **{"tests/test_a.py": cut})))
+
+
+def test_detects_deleted_file() -> None:
+    assert _problems({"tests/test_a.py": TEST_A}) == ["test file deleted: tests/data.json"]
+
+
+def test_adding_tests_is_fine() -> None:
+    current = dict(BASE, **{"tests/test_b.py": "def test_new():\n    assert 1\n"})
+    assert _problems(current) == []
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", *args], cwd=repo, check=True, capture_output=True
+    )
 
 
-def test_extremo_a_extremo_con_git(tmp_path: Path) -> None:
+def test_end_to_end_with_git(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-q", "-b", "main")
-    _git(tmp_path, "config", "user.email", "t@t")
-    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "config", "user.email", "human@example.com")
+    _git(tmp_path, "config", "user.name", "Human")
     (tmp_path / "tests").mkdir()
-    archivo = tmp_path / "tests" / "test_x.py"
-    archivo.write_text("def test_x():\n    assert 1\n    assert 2\n")
+    test_file = tmp_path / "tests" / "test_x.py"
+    test_file.write_text("def test_x():\n    assert 1\n    assert 2\n")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "base")
     _git(tmp_path, "checkout", "-qb", "feature")
 
-    archivo.write_text("def test_x():\n    assert 1\n")
-    _git(tmp_path, "commit", "-qam", "debilita")
+    test_file.write_text("def test_x():\n    assert 1\n")
+    _git(tmp_path, "commit", "-qam", "weaken")
     assert sensor.main(["--root", str(tmp_path), "--base", "main"]) == 1
 
-    _git(tmp_path, "commit", "-q", "--amend", "-m", "debilita [tests-change-approved]")
+    # an agent-authored approval does not count
+    _git(
+        tmp_path,
+        "commit",
+        "-q",
+        "--amend",
+        "-m",
+        "weaken [tests-change-approved]\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+    )
+    assert sensor.main(["--root", str(tmp_path), "--base", "main"]) == 1
+
+    _git(tmp_path, "commit", "-q", "--amend", "-m", "weaken [tests-change-approved]")
     assert sensor.main(["--root", str(tmp_path), "--base", "main"]) == 0
 
 
-def test_sin_base_estricto_falla(tmp_path: Path) -> None:
+def test_strict_without_base_fails(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-q")
-    assert sensor.main(["--root", str(tmp_path), "--strict", "--base", "no-existe"]) == 2
+    assert sensor.main(["--root", str(tmp_path), "--strict", "--base", "does-not-exist"]) == 2

@@ -1,16 +1,16 @@
-<!-- rumbo:plantilla — borra esta línea cuando el documento esté completo (lo verifica `rumbo gate`) -->
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # Brief
 
-**Problema:** <quién> no puede <qué> porque <causa>; hoy usa <alternativa>.
+**Problem:** <who> cannot <what> because <cause>; today they use <alternative>.
 
-**Evidencia:** <entrevistas/datos, n=>
+**Evidence:** <interviews/data, n=>
 
-**Métrica de resultado:**
+**Outcome metric:**
 
-**Supuestos riesgosos** (valor / usabilidad / factibilidad / viabilidad):
+**Risky assumptions** (value / usability / feasibility / viability):
 
-**Experimentos y criterio de éxito/fracaso:**
+**Experiments and success/failure criterion:**
 
-**No-objetivos:**
+**Non-goals:**
 
-**Decisión G1:** construir / iterar / abandonar
+**G1 decision:** build / iterate / abandon
