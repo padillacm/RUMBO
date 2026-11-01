@@ -156,6 +156,17 @@ def test_gate_g3_workflow_adr_by_title(llm_project: Path) -> None:
     assert next(r for r in results if r.description == "import-linter contracts").ok is True
 
 
+def test_gate_g2_skips_malformed_dataset_lines(llm_project: Path) -> None:
+    dataset = llm_project / "evals" / "datasets" / "odd.jsonl"
+    dataset.write_text('["a", "b"]\n"text"\n42\nnot json\n{"id": "odd-1", "input": {}}\n')
+    try:
+        _, results = evaluate("G2", Project.load(llm_project))
+    finally:
+        dataset.unlink()
+    cases = next(r for r in results if "real cases in evals/datasets/" in r.description)
+    assert "found 1 " in cases.detail  # only the object line counts; nothing crashed
+
+
 def test_gate_g3_tolerates_empty_or_comment_only_adrs(llm_project: Path) -> None:
     adrs = llm_project / "docs" / "adr"
     (adrs / "0007-empty.md").write_text("")

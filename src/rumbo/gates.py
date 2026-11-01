@@ -8,7 +8,6 @@ recommendation for the current rigor): it is shown but does not fail the gate.
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import sys
@@ -17,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from rumbo.metrics import eval_cases
 from rumbo.project import Project, is_template, numbered_documents, section
 from rumbo.trace import trace, uncovered
 
@@ -90,22 +90,6 @@ def _g1(p: Project, _run: bool) -> list[Result]:
 
 
 # ---------------------------------------------------------------------- G2 Unify
-def _eval_cases(p: Project) -> int:
-    folder = p.root / "evals" / "datasets"
-    count = 0
-    for file in folder.glob("*.jsonl") if folder.is_dir() else []:
-        for line in file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                case = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if "example" not in case.get("tags", []):
-                count += 1
-    return count
-
-
 def _has_real_ears(text: str) -> bool:
     body = section(text, "Requirements")
     return any(EARS.search(line) and not PLACEHOLDER.search(line) for line in body.splitlines())
@@ -154,7 +138,7 @@ def _g2(p: Project, _run: bool) -> list[Result]:
         )
     if p.llm:
         minimum = MIN_EVAL_CASES[p.rigor]
-        n = _eval_cases(p)
+        n = eval_cases(p.root)
         results.append(
             Result(
                 f"≥{minimum} real cases in evals/datasets/ (rigor {p.rigor})",

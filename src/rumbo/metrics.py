@@ -129,7 +129,8 @@ def _latest_eval(root: Path) -> dict[str, Any] | None:
     return summary
 
 
-def _eval_cases(root: Path) -> int:
+def eval_cases(root: Path) -> int:
+    """Dataset cases that are not tagged 'example'; malformed or non-object lines are skipped."""
     folder = root / "evals" / "datasets"
     count = 0
     for file in folder.glob("*.jsonl") if folder.is_dir() else []:
@@ -187,7 +188,7 @@ def collect(root: Path, days: int = 30, today: dt.date | None = None) -> Metrics
     reqs = trace(root)
     m.requirements_total = len(reqs)
     m.requirements_uncovered = len(uncovered(reqs))
-    m.eval_cases = _eval_cases(root)
+    m.eval_cases = eval_cases(root)
     m.latest_eval = _latest_eval(root)
     return m
 
