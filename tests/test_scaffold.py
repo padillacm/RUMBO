@@ -161,6 +161,46 @@ def test_llm_needs_valid_provider() -> None:
         Config(name="x", package="x", llm=True, provider="other", sdk_package="foo")
 
 
+@pytest.mark.parametrize(
+    ("sdk_package", "sdk_module"),
+    [
+        ('foo"', "foo"),  # breaks the TOML string
+        ("--upgrade", "foo"),  # would be an option for `uv add`
+        ("foo>=1", "foo"),  # versions are resolved by uv add, never written by hand
+        ("foo", 'x"'),
+        ("foo", "x; import os"),
+        ("foo", "1x"),
+    ],
+)
+def test_other_provider_sdk_names_are_validated(sdk_package: str, sdk_module: str) -> None:
+    with pytest.raises(ValueError, match="--sdk-"):
+        Config(
+            name="x",
+            package="x",
+            llm=True,
+            provider="other",
+            sdk_package=sdk_package,
+            sdk_module=sdk_module,
+            sdk_env_key="X_KEY",
+        )
+
+
+def test_other_provider_accepts_extras_and_dotted_modules() -> None:
+    cfg = Config(
+        name="x",
+        package="x",
+        llm=True,
+        provider="other",
+        sdk_package="some-sdk[async]",
+        sdk_module="some_sdk.client",
+        sdk_env_key="X_KEY",
+    )
+    assert (cfg.sdk_package, cfg.sdk_module) == ("some-sdk[async]", "some_sdk")
+    plan = plan_files(cfg)
+    tomllib.loads(str(plan["pyproject.toml"]))
+    ast.parse(str(plan["tests/architecture/test_architecture.py"]))
+
+
 def test_scaffold_skips_existing_and_reports(simple_project: Path) -> None:
     agents = simple_project / "AGENTS.md"
     agents.write_text("mine")

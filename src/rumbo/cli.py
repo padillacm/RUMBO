@@ -46,6 +46,8 @@ from rumbo.scaffold import (
     update_diff,
     valid_name,
     valid_package,
+    valid_sdk_module,
+    valid_sdk_package,
 )
 from rumbo.sensors import check_tests_not_weakened
 from rumbo.tour import load_commits, render_markdown, resolve_base
@@ -101,8 +103,8 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         if llm and not provider:
             provider = _ask("   Model provider", "anthropic", choices=PROVIDER_CHOICES)
         if llm and provider == OTHER_PROVIDER:
-            sdk_package = sdk_package or _ask("   SDK package on PyPI", valid=bool)
-            sdk_module = sdk_module or _ask("   SDK importable module", valid=bool)
+            sdk_package = sdk_package or _ask("   SDK package on PyPI", valid=valid_sdk_package)
+            sdk_module = sdk_module or _ask("   SDK importable module", valid=valid_sdk_module)
             sdk_env_key = sdk_env_key or _ask("   Env var holding the API key", valid=bool)
         if not rigor:
             rigor = _ask("3. Rigor level", "mvp", choices=list(RIGOR_LEVELS))

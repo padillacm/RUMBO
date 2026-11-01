@@ -115,6 +115,12 @@ HARNESS_PREFIXES = (
 _PKG_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _RESERVED = {"test", "tests", "src", "evals", "scripts", "spikes", "domain", "app", "api"}
 _NAME_RE = re.compile(r"^[^\x00-\x1f\\\"]+$")
+# A PyPI distribution name with optional extras (PEP 508), no version specifier: `uv add`
+# resolves the version, and the name is embedded verbatim in pyproject.toml.
+_SDK_PACKAGE_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:\[[A-Za-z0-9._,-]+\])?$"
+)
+_SDK_MODULE_RE = re.compile(r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$")
 
 
 def valid_package(package: str) -> bool:
@@ -126,6 +132,16 @@ def valid_package(package: str) -> bool:
 def valid_name(name: str) -> bool:
     """Project names are embedded in TOML strings and Python code: keep them plain."""
     return bool(_NAME_RE.match(name.strip())) and 1 <= len(name.strip()) <= 80
+
+
+def valid_sdk_package(package: str) -> bool:
+    """PyPI name, optionally with extras (`foo[bar]`); embedded in pyproject.toml and `uv add`."""
+    return bool(_SDK_PACKAGE_RE.match(package)) and len(package) <= 100
+
+
+def valid_sdk_module(module: str) -> bool:
+    """Dotted import path; its root is embedded in pyproject.toml and test_architecture.py."""
+    return bool(_SDK_MODULE_RE.match(module)) and len(module) <= 100
 
 
 def to_package(name: str) -> str:
@@ -183,6 +199,12 @@ class Config:
                 f"unknown provider {self.provider!r}; use one of "
                 f"{', '.join([*PROVIDERS, OTHER_PROVIDER])}"
             )
+        if self.sdk_package and not valid_sdk_package(self.sdk_package):
+            raise ValueError(
+                f"--sdk-package must be a PyPI name (no version), got {self.sdk_package!r}"
+            )
+        if self.sdk_module and not valid_sdk_module(self.sdk_module):
+            raise ValueError(f"--sdk-module must be an importable module, got {self.sdk_module!r}")
         self.sdk_module = self.sdk_module.split(".")[0]
         if self.sdk_env_key and not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.sdk_env_key):
             raise ValueError(f"--sdk-env-key must look like AN_ENV_VAR, got {self.sdk_env_key!r}")
