@@ -16,6 +16,6 @@ def test_abstains_when_offline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_abstains_when_the_budget_is_exceeded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RUMBO_EVALS_LIVE", "1")
-    monkeypatch.setenv("RUMBO_BUDGET_SECONDS", "-1")  # every request is already over time
+    monkeypatch.setenv("RUMBO_BUDGET_SECONDS", "0")  # kill switch: every request is over time
     result = answer({"question": "anything"})
     assert result["abstain"] is True and result["reason"].startswith("budget exceeded")

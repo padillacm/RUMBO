@@ -1,9 +1,14 @@
 """Per-request budget: tokens, cost and wall time (phase O, "cost limits configured").
 
-A hard limit the model cannot talk its way out of. The use case opens a `Meter` per request,
+A limit the model cannot talk its way out of. The use case opens a `Meter` per request,
 charges every model call to it and lets `BudgetExceeded` propagate to the boundary, which
 answers with an abstention and the reason. Defaults come from the environment so operations
-can tighten them without a deploy (see .env.example).
+can tighten them without a deploy (see .env.example); a blank variable means the default, a
+value of 0 makes every request abstain (kill switch), a negative value is a configuration error.
+
+Tokens and cost are enforced on every `charge()`. Time is enforced *between* calls: pass
+`meter.remaining_seconds` as the SDK/HTTP timeout so a single call cannot overrun it. A Meter
+belongs to one request; it is not thread-safe.
 """
 
 from __future__ import annotations
@@ -17,6 +22,16 @@ class BudgetExceeded(RuntimeError):
     """A request went over its token, cost or time budget."""
 
 
+def _env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name}={raw!r} is not a number") from exc
+
+
 @dataclass(frozen=True)
 class Budget:
     max_input_tokens: int = 20_000
@@ -24,14 +39,18 @@ class Budget:
     max_cost_usd: float = 0.05
     max_seconds: float = 30.0
 
+    def __post_init__(self) -> None:
+        for name, value in self.__dict__.items():
+            if value < 0:
+                raise ValueError(f"Budget.{name} must be >= 0, got {value}")
+
     @classmethod
     def from_env(cls) -> Budget:
-        env = os.environ
         return cls(
-            max_input_tokens=int(env.get("RUMBO_BUDGET_INPUT_TOKENS", cls.max_input_tokens)),
-            max_output_tokens=int(env.get("RUMBO_BUDGET_OUTPUT_TOKENS", cls.max_output_tokens)),
-            max_cost_usd=float(env.get("RUMBO_BUDGET_COST_USD", cls.max_cost_usd)),
-            max_seconds=float(env.get("RUMBO_BUDGET_SECONDS", cls.max_seconds)),
+            max_input_tokens=int(_env("RUMBO_BUDGET_INPUT_TOKENS", cls.max_input_tokens)),
+            max_output_tokens=int(_env("RUMBO_BUDGET_OUTPUT_TOKENS", cls.max_output_tokens)),
+            max_cost_usd=_env("RUMBO_BUDGET_COST_USD", cls.max_cost_usd),
+            max_seconds=_env("RUMBO_BUDGET_SECONDS", cls.max_seconds),
         )
 
 
@@ -48,6 +67,11 @@ class Meter:
     @property
     def elapsed_seconds(self) -> float:
         return time.perf_counter() - self.started
+
+    @property
+    def remaining_seconds(self) -> float:
+        """Use it as the timeout of the next model call (0 when the budget is spent)."""
+        return max(0.0, self.budget.max_seconds - self.elapsed_seconds)
 
     def charge(
         self, *, input_tokens: int = 0, output_tokens: int = 0, cost_usd: float = 0.0
@@ -74,5 +98,4 @@ class Meter:
             "gen_ai.usage.input_tokens": self.input_tokens,
             "gen_ai.usage.output_tokens": self.output_tokens,
             "cost.usd": round(self.cost_usd, 6),
-            "duration.seconds": round(self.elapsed_seconds, 3),
         }

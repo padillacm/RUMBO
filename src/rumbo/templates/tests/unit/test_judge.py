@@ -1,5 +1,6 @@
 """The LLM judge is a grader like any other, and its calibration maths is deterministic."""
 
+import math
 import sys
 from pathlib import Path
 
@@ -50,9 +51,17 @@ def test_calibration_metrics() -> None:
     assert "ACCEPTABLE" in perfect.summary()
 
 
+def test_degenerate_labels_give_undefined_kappa() -> None:
+    always_pass = Judge(lambda _p: "PASS")
+    rows = [{"id": str(i), "output": {"answer": "x"}, "human": True} for i in range(40)]
+    cal = calibrate(always_pass, rows)
+    assert cal.tpr == 1.0 and cal.tnr == 0.0 and math.isnan(cal.kappa)
+    assert not cal.acceptable() and "kappa=n/a" in cal.summary()
+
+
 def test_example_calibration_file_loads() -> None:
     path = Path(__file__).resolve().parents[2] / "evals" / "calibration" / "example.jsonl"
     rows = load_labeled(str(path))
     assert {r["human"] for r in rows} == {True, False}
     cal = calibrate(Judge(fake_model), rows)
-    assert cal.cases == 2 and cal.disagreements == ()
+    assert cal.cases == 3 and cal.disagreements == ()

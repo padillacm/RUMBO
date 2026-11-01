@@ -27,11 +27,29 @@ def test_time_limit() -> None:
 
 
 def test_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("INPUT_TOKENS", "OUTPUT_TOKENS", "COST_USD", "SECONDS"):
+        monkeypatch.delenv(f"RUMBO_BUDGET_{name}", raising=False)
     monkeypatch.setenv("RUMBO_BUDGET_COST_USD", "0.5")
     monkeypatch.setenv("RUMBO_BUDGET_SECONDS", "5")
+    monkeypatch.setenv("RUMBO_BUDGET_INPUT_TOKENS", "")  # blank (as in .env.example) = default
     budget = Budget.from_env()
     assert (budget.max_cost_usd, budget.max_seconds) == (0.5, 5.0)
     assert budget.max_input_tokens == Budget.max_input_tokens
+    monkeypatch.setenv("RUMBO_BUDGET_SECONDS", "ten")
+    with pytest.raises(ValueError, match="RUMBO_BUDGET_SECONDS"):
+        Budget.from_env()
+
+
+def test_negative_budget_is_a_configuration_error() -> None:
+    with pytest.raises(ValueError, match="max_cost_usd"):
+        Budget(max_cost_usd=-1)
+
+
+def test_remaining_seconds_feeds_the_next_timeout() -> None:
+    meter = Meter(Budget(max_seconds=10))
+    assert 0 < meter.remaining_seconds <= 10
+    meter.started -= 20
+    assert meter.remaining_seconds == 0
 
 
 def test_snapshot_uses_otel_names() -> None:
@@ -41,3 +59,4 @@ def test_snapshot_uses_otel_names() -> None:
     assert snap["gen_ai.usage.input_tokens"] == 3
     assert snap["gen_ai.usage.output_tokens"] == 2
     assert snap["cost.usd"] == 0.001
+    assert "duration.seconds" not in snap  # the span owns the duration

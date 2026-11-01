@@ -10,6 +10,7 @@
 /.pre-commit-config.yaml        @your-handle
 /scripts/                       @your-handle
 /infra/                         @your-handle
+/evals/run_evals.py             @your-handle
 /specs/                         @your-handle
 /docs/adr/                      @your-handle
 /docs/decisions.md              @your-handle

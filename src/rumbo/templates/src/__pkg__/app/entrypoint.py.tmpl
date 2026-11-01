@@ -14,13 +14,15 @@ from {{package}}.app.telemetry import span
 
 
 def answer(request: dict[str, Any]) -> dict[str, Any]:
-    meter = Meter(Budget.from_env())
-    with span("answer", meter=meter) as current:
+    with span("answer") as current:
+        meter = Meter(Budget.from_env())  # a misconfigured budget fails loudly, inside the span
         try:
             return _answer(request, meter)
         except BudgetExceeded as exc:
             current.set(abstain_reason="budget")
             return {"abstain": True, "reason": f"budget exceeded: {exc}"}
+        finally:
+            current.set(**meter.snapshot())
 
 
 def _answer(request: dict[str, Any], meter: Meter) -> dict[str, Any]:

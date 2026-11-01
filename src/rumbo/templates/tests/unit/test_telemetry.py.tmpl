@@ -6,7 +6,7 @@ import logging
 import pytest
 
 from {{package}}.app.budget import Meter
-from {{package}}.app.telemetry import LOGGER_NAME, JsonFormatter, span
+from {{package}}.app.telemetry import LOGGER_NAME, JsonFormatter, configure_json_logging, span
 
 
 def test_span_logs_attributes_cost_and_status(caplog: pytest.LogCaptureFixture) -> None:
@@ -28,6 +28,19 @@ def test_span_logs_attributes_cost_and_status(caplog: pytest.LogCaptureFixture) 
     assert attrs["status"] == "ok" and attrs["duration.ms"] >= 0
     line = json.loads(JsonFormatter().format(record))
     assert line["message"] == "answer" and line["gen_ai.operation.name"] == "answer"
+    assert line["ts"].endswith("+00:00")
+
+
+def test_configure_json_logging_is_idempotent() -> None:
+    root = logging.getLogger()
+    before = list(root.handlers)
+    try:
+        configure_json_logging()
+        configure_json_logging()
+        json_handlers = [h for h in root.handlers if isinstance(h.formatter, JsonFormatter)]
+        assert len(json_handlers) == 1
+    finally:
+        root.handlers[:] = before
 
 
 def test_span_records_errors_and_reraises(caplog: pytest.LogCaptureFixture) -> None:
@@ -37,6 +50,8 @@ def test_span_records_errors_and_reraises(caplog: pytest.LogCaptureFixture) -> N
         span("answer"),
     ):
         raise ValueError("boom")
-    attrs = caplog.records[-1].__dict__["span"]
+    record = caplog.records[-1]
+    attrs = record.__dict__["span"]
+    assert record.levelno == logging.WARNING
     assert attrs["status"] == "error" and attrs["error.type"] == "ValueError"
     assert len(attrs["request.id"]) == 32  # generated when the caller has none
