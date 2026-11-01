@@ -29,7 +29,7 @@ All notable changes to this project are documented here. The format follows
 - `rumbo update --diff`: preview of what `update` would replace and how harness files drifted.
 - `evals/graders/judge.py`: LLM-as-judge grader with `calibrate()` (TPR, TNR, kappa) against
   human-labeled rows in `evals/calibration/`; admitted only at TPR/TNR ≥ 0.8 on ≥30 cases.
-- Framework CI on Python 3.11–3.13 (Linux, macOS, Windows), an anti-cheat sensor job and a
+- Framework CI on Python 3.11–3.13 (Linux and macOS), an anti-cheat sensor job and a
   release workflow (`vX.Y.Z` tag → GitHub Release from the CHANGELOG, optional PyPI trusted
   publishing); five ADRs with fitness functions in `docs/adr/`; `docs/tutorial.md`.
 - Context-limit practices, grounded in the research report

@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   check:
-    # The CLI is stdlib-only and promises Python >= 3.11 on macOS, Linux and Windows (Git Bash).
+    # The CLI is stdlib-only and promises Python >= 3.11 on Linux and macOS.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -32,20 +32,6 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - run: uv sync --locked
       - run: make check
-
-  check-windows:
-    # No make on the runner: the three commands behind `make check` (pwsh is the default shell
-    # there and supports &&). Users on Windows run the Makefile from Git Bash or WSL.
-    runs-on: windows-latest
-    env:
-      UV_PYTHON: "3.12"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      - run: uv sync --locked
-      - run: uv run ruff check . && uv run ruff format --check .
-      - run: uv run pyright
-      - run: uv run pytest
 
   sensor:
     # Anti-cheat sensor on the framework's own tests (the canonical copy every project gets).

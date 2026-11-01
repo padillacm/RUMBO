@@ -315,7 +315,7 @@ Templates live in `src/rumbo/templates/`: `.tmpl` files are rendered (`{{var}}`,
 `{{#flag}}…{{/flag}}`, `{{^flag}}…{{/flag}}`), `__pkg__` becomes the package name and `dot_`
 becomes `.`. The canonical sensors (anti-cheat and guard hook) are in `src/rumbo/sensors/`.
 The framework's own decisions are ADRs in `docs/adr/`. CI runs on Python 3.11–3.13 (Linux,
-macOS, Windows) plus the e2e matrix; a `vX.Y.Z` tag triggers the release workflow (GitHub
+macOS) plus the e2e matrix; a `vX.Y.Z` tag triggers the release workflow (GitHub
 Release from the CHANGELOG, optional PyPI trusted publishing). See
 [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
