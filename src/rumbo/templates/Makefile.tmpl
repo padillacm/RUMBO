@@ -1,0 +1,22 @@
+# Makefile RUMBO — un único comando de verificación: `make check`.
+# Recetas en una sola línea (`objetivo: ; comando`) para no depender de tabuladores.
+# Rigor: {{rigor}}{{#llm}} · con LLM ({{proveedor}}){{/llm}}
+
+.PHONY: check test lint types arch security evals evals-full mutation sensor sbom hooks fmt
+
+lint:       ; uv run ruff check . && uv run ruff format --check .
+fmt:        ; uv run ruff check --fix . && uv run ruff format .
+types:      ; uv run pyright
+test:       ; uv run pytest{{#mvp}} --cov --cov-report=term-missing:skip-covered{{/mvp}}{{#produccion}} --cov --cov-report=term-missing:skip-covered --cov-fail-under=80{{/produccion}}
+arch:       ; uv run lint-imports
+security:   ; uv run bandit -q -r src && uv run pip-audit --skip-editable
+{{#llm}}
+evals:      ; uv run python evals/run_evals.py --suite smoke
+evals-full: ; uv run python evals/run_evals.py --suite all --k {{#produccion}}3{{/produccion}}{{^produccion}}1{{/produccion}}
+{{/llm}}
+mutation:   ; @if find src/{{pkg}}/domain -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo 'domain/ aún vacío: nada que mutar'; fi
+sensor:     ; uv run python scripts/check_tests_not_weakened.py
+sbom:       ; uv run pip-audit --skip-editable --format cyclonedx-json --output sbom.cdx.json
+hooks:      ; uv run pre-commit install
+
+check: lint types test arch{{#mvp_o_mas}} security{{/mvp_o_mas}}{{#llm}} evals{{/llm}}

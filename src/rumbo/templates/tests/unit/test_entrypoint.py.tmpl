@@ -1,0 +1,11 @@
+"""Tests del esqueleto de entrada de evals. Reemplázalos junto con el workflow real."""
+
+from {{pkg}}.app.entrypoint import responder
+
+
+def test_caso_de_ejemplo() -> None:
+    assert responder({"pregunta": "ping"}) == {"respuesta": "pong"}
+
+
+def test_se_abstiene_si_no_sabe() -> None:
+    assert responder({"pregunta": "otra cosa"})["abstencion"] is True

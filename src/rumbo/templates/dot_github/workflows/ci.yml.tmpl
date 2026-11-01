@@ -1,0 +1,43 @@
+# CI RUMBO (A5): los sensores corren en cada push y PR.
+# Acciones fijadas por SHA (supply chain). Dependabot las actualiza.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Instalar dependencias (lockfile)
+        run: uv sync --locked
+      - name: make check
+        run: make check
+{{#llm}}
+        env:
+          {{sdk_env_key}}: ${{ secrets.{{sdk_env_key}} }}
+{{/llm}}
+      - name: Sensor anti-trampa (tests no debilitados)
+        run: >
+          uv run python scripts/check_tests_not_weakened.py --strict
+          --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+{{#mvp_o_mas}}
+      - name: Higiene y secretos (pre-commit + gitleaks)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+{{/mvp_o_mas}}
+{{#produccion}}
+      - name: SBOM (CycloneDX)
+        run: make sbom
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom.cdx.json
+{{/produccion}}

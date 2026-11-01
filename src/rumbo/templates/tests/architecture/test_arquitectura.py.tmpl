@@ -1,0 +1,41 @@
+"""Fitness functions de arquitectura (complementan los contratos de import-linter).
+
+- domain/ no importa módulos de I/O ni infraestructura (tampoco de la biblioteca estándar).
+- Nada en src/ importa spikes/.
+"""
+
+import ast
+from pathlib import Path
+
+RAIZ = Path(__file__).resolve().parents[2]
+SRC = RAIZ / "src" / "{{pkg}}"
+# Mismos módulos que el contrato "El dominio es puro" de import-linter…
+CONTRATO_IMPORT_LINTER = ({{forbidden_py}})
+# …más la biblioteca estándar con I/O, que import-linter no cubre.
+STDLIB_IO = ("socket", "subprocess", "urllib", "http", "sqlite3", "shutil")
+PROHIBIDOS_EN_DOMINIO = {*CONTRATO_IMPORT_LINTER, *STDLIB_IO}
+
+
+def _imports(archivo: Path) -> set[str]:
+    arbol = ast.parse(archivo.read_text(encoding="utf-8"))
+    nombres: set[str] = set()
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.Import):
+            nombres.update(a.name.split(".")[0] for a in nodo.names)
+        elif isinstance(nodo, ast.ImportFrom) and nodo.module and nodo.level == 0:
+            nombres.add(nodo.module.split(".")[0])
+    return nombres
+
+
+def test_dominio_sin_io() -> None:
+    violaciones = {
+        str(f.relative_to(RAIZ)): sorted(_imports(f) & PROHIBIDOS_EN_DOMINIO)
+        for f in (SRC / "domain").rglob("*.py")
+        if _imports(f) & PROHIBIDOS_EN_DOMINIO
+    }
+    assert violaciones == {}
+
+
+def test_src_no_importa_spikes() -> None:
+    culpables = [str(f.relative_to(RAIZ)) for f in SRC.rglob("*.py") if "spikes" in _imports(f)]
+    assert culpables == []

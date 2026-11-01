@@ -1,0 +1,8 @@
+"""Los prompts llevan identificador de versión que queda en la traza."""
+
+from {{pkg}}.prompts import Prompt
+
+
+def test_ref_incluye_version() -> None:
+    prompt = Prompt(id="extraer_intencion", version="2026-01-01.1", texto="...")
+    assert prompt.ref == "extraer_intencion@2026-01-01.1"

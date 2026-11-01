@@ -1,0 +1,13 @@
+"""API HTTP (FastAPI). Valida en la frontera y delega en app/."""
+
+from importlib.metadata import version
+
+from fastapi import FastAPI
+
+__version__ = version("{{pkg}}")
+app = FastAPI(title="{{nombre}}", version=__version__)
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "version": __version__}

@@ -1,0 +1,58 @@
+# AGENTS.md — mapa de {{nombre}} (léeme antes de cada tarea)
+
+Proyecto RUMBO · paquete `{{pkg}}` · rigor **{{rigor}}**{{#llm}} · LLM: {{proveedor}}{{/llm}}.
+El ciclo completo (fases R·U·M·B·O, gates, plantillas) está en `RUMBO.md`.
+
+## Mapa
+- Producto: docs/product/brief.md, docs/product/prd.md
+- Specs de features (EARS): specs/
+- Decisiones de arquitectura: docs/adr/ (léelas antes de cualquier decisión estructural)
+- Capas: src/{{pkg}}/{domain,app,adapters,api}; contratos en pyproject.toml [tool.importlinter]
+- Seguridad: docs/security/threat-model.md
+- Operación: docs/ops/runbook.md, docs/ops/slos.md, docs/postmortems/
+- Decisiones humanas (brújula): docs/decisiones.md
+{{#llm}}
+- Prompts versionados: src/{{pkg}}/prompts/
+- Evals: evals/ (datasets JSONL, graders deterministas, run_evals.py) · plan en docs/evals/plan.md
+{{/llm}}
+
+## Comandos
+```
+make check     # TODO el arnés: lint, tipos, tests, arquitectura{{#mvp_o_mas}}, seguridad{{/mvp_o_mas}}{{#llm}}, evals smoke{{/llm}}
+make fmt       # autoformato
+make sensor    # ¿debilité algún test respecto a origin/main?
+rumbo gate G4  # chequeos del gate por PR (si el CLI rumbo está instalado)
+rumbo verify-dep <paquete>   # antes de proponer una dependencia nueva
+```
+
+## Antes de declarar una tarea terminada
+`make check` debe estar en verde; pega la salida resumida.
+
+## Flujo por tarea (ANCLA)
+1. **A**cotar: lee la spec y los ADRs relevantes; escribe primero los tests (deben fallar).
+2. **N**avegar: propón un plan corto (archivos, tests, riesgos) y espera aprobación.
+3. **C**errar: código mínimo, luego refactor; itera hasta que `make check` pase.
+4. **L**imitar: diff pequeño; resume el cambio en 3 frases y lista dependencias nuevas.
+5. **A**prender: si un error se repite, propón un sensor (test, lint, contrato) o una línea aquí.
+
+## Reglas duras
+- Nunca borres, saltes ni debilites tests. Si un test parece incorrecto, detente y pregunta.
+- Nunca escribas `[tests-change-approved]` en un commit: esa marca es solo del humano.
+- Separa commits estructurales (refactor) de commits de comportamiento.
+- Diffs pequeños (~300 líneas máximo). Si la tarea es más grande, propón dividirla.
+- `domain/` es puro: sin I/O, sin HTTP, sin SDKs de LLM, sin fecha/hora del sistema.
+- Los cálculos numéricos que se muestran al usuario se hacen con código, nunca con el LLM.
+{{#llm}}
+- Prompts solo en src/{{pkg}}/prompts/, con identificador de versión.
+- Herramientas del LLM: pocas, tipadas con Pydantic, de solo lectura salvo ADR que diga lo contrario.
+{{/llm}}
+- Ninguna dependencia nueva sin aprobación y verificación en PyPI (`rumbo verify-dep`).
+- No toques infra/, secretos ni workflows de CI sin pedirlo.
+- Nada de spikes/ se importa desde src/.
+- Si cometes el mismo error dos veces, propón un test, regla de lint o contrato que lo atrape.
+
+## Brújula humana
+- Ante decisiones de diseño, pide primero la versión del humano.
+- Si el humano está aprendiendo algo nuevo, explica y pregunta en lugar de resolver todo.
+- No propongas agentes para decisiones irreversibles ni código de seguridad sin tests previos.
+- Anota en docs/decisiones.md las decisiones que tomó el humano y por qué.

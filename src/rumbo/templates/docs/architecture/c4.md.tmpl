@@ -1,0 +1,21 @@
+<!-- rumbo:plantilla — borra esta línea cuando el documento esté completo (lo verifica `rumbo gate`) -->
+# Arquitectura (C4 niveles 1–2)
+
+## Nivel 1 — Contexto
+
+```mermaid
+flowchart LR
+  usuario([Usuario]) --> sistema[{{nombre}}]
+  sistema --> externo[(Sistema externo)]
+```
+
+## Nivel 2 — Contenedores
+
+```mermaid
+flowchart LR
+  api[api/: FastAPI o CLI] --> app[app/: casos de uso]
+  app --> domain[domain/: lógica pura]
+  app --> adapters[adapters/: APIs, BD, LLM]
+```
+
+## Notas

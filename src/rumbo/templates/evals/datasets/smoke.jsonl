@@ -1,0 +1,2 @@
+{"id": "ejemplo-001", "input": {"pregunta": "ping"}, "expected": {"respuesta": "pong"}, "grader": "igualdad_campos", "tags": ["ejemplo"]}
+{"id": "ejemplo-002", "input": {"pregunta": "dato que no existe"}, "expected": {}, "grader": "abstencion", "tags": ["ejemplo"]}

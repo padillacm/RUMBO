@@ -1,0 +1,33 @@
+# {{nombre}}
+
+Proyecto construido con el framework **RUMBO** (Reconocer → Unificar → Modelar → Build con
+ANCLA → Operar), rigor **{{rigor}}**.
+
+- Caso: {{caso}}
+- Mapa para agentes y humanos: [AGENTS.md](AGENTS.md) · Método: [RUMBO.md](RUMBO.md)
+
+## Puesta en marcha
+
+```bash
+uv sync            # instala dependencias desde uv.lock
+make hooks         # instala los hooks de pre-commit
+make check         # todo el arnés debe estar en verde
+```
+{{#llm}}
+
+Necesitas la variable `{{sdk_env_key}}` para las evals (`make evals`). En CI se lee del secreto
+del mismo nombre.
+{{/llm}}
+
+## Estructura
+
+| Carpeta | Qué hay |
+|---|---|
+| `src/{{pkg}}/domain` | lógica pura (sin I/O) |
+| `src/{{pkg}}/app` | casos de uso; depende solo de `domain` |
+| `src/{{pkg}}/adapters` | APIs externas, BD, LLM |
+| `src/{{pkg}}/api` | FastAPI / CLI |
+| `tests/{unit,property,integration,architecture}` | sensores |
+| `docs/` | brief, PRD, ADRs, C4, threat model, runbook, SLOs, decisiones |
+| `specs/` | specs EARS por feature |
+| `spikes/` | código desechable; nunca se importa desde `src/` |

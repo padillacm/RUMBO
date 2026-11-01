@@ -1,0 +1,6 @@
+"""Punto de entrada `python -m {{pkg}}`."""
+
+from importlib.metadata import version
+
+if __name__ == "__main__":
+    print(f"{{pkg}} {version('{{pkg}}')}")

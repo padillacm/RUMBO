@@ -1,0 +1,128 @@
+"""Ejecutor de evals RUMBO (A7).
+
+Lee casos JSONL ({"id", "input", "expected", "grader", "tags"}) desde
+evals/datasets/<suite>.jsonl, ejecuta el sistema real k veces por caso, aplica graders
+deterministas y reporta pass@1 y pass^k. Sale con código ≠ 0 si pass^k < --min-pass.
+
+    uv run python evals/run_evals.py --suite smoke
+    uv run python evals/run_evals.py --suite all --k 3 --min-pass 0.9
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from graders import GRADERS
+
+DATASETS = Path(__file__).resolve().parent / "datasets"
+REPORTES = Path(__file__).resolve().parent / "reports"
+
+
+def cargar_casos(suite: str) -> list[dict[str, Any]]:
+    archivos = sorted(DATASETS.glob("*.jsonl")) if suite == "all" else [DATASETS / f"{suite}.jsonl"]
+    casos: list[dict[str, Any]] = []
+    for archivo in archivos:
+        for n, linea in enumerate(archivo.read_text(encoding="utf-8").splitlines(), 1):
+            if not linea.strip():
+                continue
+            caso = json.loads(linea)
+            faltan = {"id", "input", "expected", "grader"} - caso.keys()
+            if faltan:
+                raise ValueError(f"{archivo.name}:{n}: faltan campos {sorted(faltan)}")
+            if caso["grader"] not in GRADERS:
+                raise ValueError(f"{archivo.name}:{n}: grader desconocido {caso['grader']!r}")
+            casos.append(caso)
+    ids = [c["id"] for c in casos]
+    if len(ids) != len(set(ids)):
+        raise ValueError("hay ids de caso duplicados")
+    return casos
+
+
+def cargar_entrada(ref: str) -> Any:
+    modulo, _, funcion = ref.partition(":")
+    return getattr(importlib.import_module(modulo), funcion)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Ejecuta evals deterministas")
+    parser.add_argument("--suite", default="smoke", help="nombre del dataset o 'all'")
+    parser.add_argument("--k", type=int, default=1, help="ejecuciones por caso (3 = consistencia)")
+    parser.add_argument("--min-pass", type=float, default=1.0, help="umbral mínimo de pass^k")
+    parser.add_argument("--entry", default="{{pkg}}.app.entrypoint:responder")
+    parser.add_argument("--tag", help="solo casos con este tag")
+    args = parser.parse_args(argv)
+
+    casos = cargar_casos(args.suite)
+    if args.tag:
+        casos = [c for c in casos if args.tag in c.get("tags", [])]
+    if not casos:
+        print("No hay casos que ejecutar.")
+        return 1
+    entrada = cargar_entrada(args.entry)
+
+    filas = []
+    exitos_totales = 0
+    for caso in casos:
+        resultados = []
+        for _ in range(args.k):
+            inicio = time.perf_counter()
+            try:
+                salida = entrada(caso["input"])
+                veredicto = GRADERS[caso["grader"]](salida, caso["expected"])
+                ok, detalle = veredicto.ok, veredicto.detalle
+            except Exception as exc:  # un caso que explota es un caso fallido
+                ok, detalle = False, f"excepción: {exc!r}"
+            resultados.append(
+                {"ok": ok, "detalle": detalle, "segundos": time.perf_counter() - inicio}
+            )
+        exitos = sum(r["ok"] for r in resultados)
+        exitos_totales += exitos
+        filas.append(
+            {
+                "id": caso["id"],
+                "tags": caso.get("tags", []),
+                "runs": resultados,
+                "pasa_todas": exitos == args.k,
+            }
+        )
+        marca = "✅" if exitos == args.k else "❌"
+        detalle = next((r["detalle"] for r in resultados if not r["ok"]), "")
+        print(f"{marca} {caso['id']} ({exitos}/{args.k}) {detalle}")
+
+    pass_at_1 = exitos_totales / (len(casos) * args.k)
+    pass_hat_k = sum(f["pasa_todas"] for f in filas) / len(filas)
+    print(
+        f"\ncasos={len(casos)} k={args.k}  pass@1={pass_at_1:.3f}  pass^{args.k}={pass_hat_k:.3f}"
+    )
+
+    REPORTES.mkdir(exist_ok=True)
+    reporte = REPORTES / f"{args.suite}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    reporte.write_text(
+        json.dumps(
+            {
+                "suite": args.suite,
+                "k": args.k,
+                "pass@1": pass_at_1,
+                f"pass^{args.k}": pass_hat_k,
+                "casos": filas,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    if pass_hat_k < args.min_pass:
+        print(f"FALLA: pass^{args.k}={pass_hat_k:.3f} < umbral {args.min_pass}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
