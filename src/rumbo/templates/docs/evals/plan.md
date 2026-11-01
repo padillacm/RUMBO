@@ -7,6 +7,9 @@
 | Failure | Count | Evaluator (code / LLM judge with TPR/TNR) |
 |---|---|---|
 
+LLM judges: rubric, calibration file (`evals/calibration/<name>.jsonl`, ≥30 human-labeled rows), TPR/TNR/kappa
+from `graders.judge.calibrate` and the date of the last calibration. Below 0.8 the judge does not count.
+
 ## Dataset
 Sources, how it grows (production traces become cases). Minimum real cases by rigor:
 20 (prototype), 50 (mvp), 100 (production); cases tagged `example` do not count.

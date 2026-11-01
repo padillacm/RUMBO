@@ -1,7 +1,8 @@
 """Deterministic graders (A7). Each grader takes (output, expected) and returns a Verdict.
 
-LLM judges are added AFTER the first error analysis, and only once validated against human
-labels (TPR/TNR). Register new graders in GRADERS.
+LLM judges (graders/judge.py) are added AFTER the first error analysis, and only once
+calibrated against human labels (TPR/TNR ≥ 0.8 on ≥30 cases in evals/calibration/).
+Register new graders in GRADERS.
 """
 
 from __future__ import annotations

@@ -75,6 +75,7 @@ CONDITIONS: dict[str, Callable[[Config], bool]] = {
     "tests/unit/test_telemetry.py": lambda c: c.llm,
     "src/__pkg__/adapters/claude_code.py": lambda c: c.llm and c.provider == "claude-code",
     "tests/unit/test_graders.py": lambda c: c.llm,
+    "tests/unit/test_judge.py": lambda c: c.llm,
     "tests/unit/test_entrypoint.py": lambda c: c.llm,
     "tests/unit/test_prompts.py": lambda c: c.llm,
     "tests/unit/test_claude_code_adapter.py": lambda c: c.llm and c.provider == "claude-code",
