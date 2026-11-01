@@ -19,7 +19,8 @@ git add -A
 git commit -qm "chore: initial RUMBO harness"
 uv run python scripts/check_tests_not_weakened.py --base HEAD
 # the guard hook blocks edits to protected files (exit 2) and lets ordinary ones through
-echo '{"tool_name":"Edit","tool_input":{"file_path":"Makefile","old_string":"a","new_string":"b"}}' | uv run python scripts/rumbo_guard.py pre-tool && exit 1
+rc=0; echo '{"tool_name":"Edit","tool_input":{"file_path":"Makefile","old_string":"a","new_string":"b"}}' | uv run python scripts/rumbo_guard.py pre-tool || rc=$?; test "$rc" -eq 2
+echo "x: ; echo" >> Makefile; rc=0; echo '{"tool_name":"Bash","tool_input":{"command":"true"}}' | uv run python scripts/rumbo_guard.py post-tool || rc=$?; test "$rc" -eq 2; git checkout -- Makefile
 echo '{"tool_name":"Bash","tool_input":{"command":"make check"}}' | uv run python scripts/rumbo_guard.py pre-tool
 echo '{}' | RUMBO_GUARD_SKIP_CHECK=1 uv run python scripts/rumbo_guard.py stop
 # the harness must stay offline: no model credential in the environment

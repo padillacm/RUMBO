@@ -27,11 +27,19 @@ def _edit(path: str, old: str = "a", new: str = "b") -> dict[str, object]:
         ".env",
         ".env.local",
         "evals/run_evals.py",
+        ".claude/settings.local.json",
+        ".claude/settings.json",
     ],
 )
 def test_protected_files_are_blocked(tmp_path: Path, rel: str) -> None:
     reason = guard.check_edit("Edit", _edit(str(tmp_path / rel)), tmp_path)
     assert reason and "protected" in reason
+
+
+def test_relative_paths_are_normalised(tmp_path: Path) -> None:
+    assert guard.check_edit("Edit", _edit("src/../Makefile"), tmp_path)
+    assert guard.check_edit("Edit", _edit("./.github/workflows/ci.yml"), tmp_path)
+    assert guard.check_edit("Edit", _edit("src/demo/x.py"), tmp_path) is None
 
 
 def test_ordinary_files_and_files_outside_the_project_are_allowed(tmp_path: Path) -> None:
@@ -64,20 +72,34 @@ def test_template_mark_cannot_be_removed_by_edit_or_write(tmp_path: Path) -> Non
     [
         'git commit -m "fix [tests-change-approved]"',
         "git commit --no-verify -m x",
+        "git commit -n -m x",
+        "SKIP=gitleaks git commit -m x",
         "git push --force origin main",
         "git push -f",
         "git push origin main --force-with-lease",
+        "git push origin +main",
         "git reset --hard HEAD~1",
         "git config core.hooksPath /dev/null",
+        "git -c core.hooksPath=/dev/null commit -m x",
         "uv run pre-commit uninstall",
+        "rm .git/hooks/pre-commit",
         "rm -rf /",
         "rm -rf ~",
+        "rm -rf ~/",
         "rm -rf .",
         "rm -rf *",
+        "rm -r -f /",
+        "rm --recursive --force /",
+        "rm -rf -- /",
+        "rm -rf $HOME",
         "echo x > Makefile",
+        "echo x >| Makefile",
         "echo x >> ./scripts/check_tests_not_weakened.py",
         "sed -i 's/strict/off/' pyproject.toml",
         "cat x | tee .github/workflows/ci.yml",
+        "cat x | tee -a infra/Dockerfile",
+        "echo k > .env.local",
+        "echo x > .claude/settings.local.json",
     ],
 )
 def test_dangerous_commands_are_blocked(command: str) -> None:
@@ -91,13 +113,56 @@ def test_dangerous_commands_are_blocked(command: str) -> None:
         "git push -u origin feature",
         "git commit -m 'feat: x'",
         "rm -rf build/",
+        "rm -rf ./build",
+        "rm -rf /tmp/scratch",
+        "rm -rf $TMPDIR/x",
         "uv add httpx",
         "echo x > notes.txt",
+        "echo x >> Makefile.md",
+        "echo x > pyproject.toml.bak",
+        "echo x > .environment",
+        "sed -i 's/Makefile/x/' README.md",
+        "cat x | tee out.txt && cat .envrc",
+        "git log | tee log.txt; grep infra/ x",
+        "git commit -m 'docs: explain the no-verify rule'",
+        "git push origin HEAD",
         "grep -n Makefile README.md",
     ],
 )
 def test_ordinary_commands_are_allowed(command: str) -> None:
     assert guard.check_bash(command) is None
+
+
+def test_post_bash_detects_protected_files_changed_since_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status = " M Makefile\n?? .github/workflows/x.yml\n M pyproject.toml\n M src/demo/a.py\n"
+    monkeypatch.setattr(
+        guard.subprocess,
+        "run",
+        lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, status, ""),
+    )
+    reason = guard.check_post_bash(tmp_path) or ""
+    assert "Makefile" in reason and ".github/workflows/x.yml" in reason
+    assert "pyproject.toml" not in reason  # uv add is allowed to change it
+    # Stop refuses first for the protected files, before running make
+    code, message = guard.check_stop({}, tmp_path)
+    assert code == guard.BLOCK and "protected" in message
+    monkeypatch.setattr(
+        guard.subprocess,
+        "run",
+        lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, " M pyproject.toml\n", ""),
+    )
+    assert guard.check_post_bash(tmp_path) is None
+
+
+def test_git_missing_never_crashes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_git(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(guard.subprocess, "run", no_git)
+    assert guard.changed_files(tmp_path) == []
+    assert guard.check_stop({}, tmp_path) == (0, "")
 
 
 def test_stop_runs_make_check_only_when_code_changed(
@@ -138,6 +203,15 @@ def test_main_reads_the_event_from_stdin(
     payload = {"cwd": str(tmp_path), "tool_name": "Bash", "tool_input": {"command": "make check"}}
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     assert guard.main(["pre-tool"]) == 0
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        guard.subprocess,
+        "run",
+        lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, " M infra/Dockerfile\n", ""),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    assert guard.main(["post-tool"]) == guard.BLOCK
+    assert "infra/Dockerfile" in capsys.readouterr().err
 
 
 def test_generated_project_wires_the_guard() -> None:
@@ -151,6 +225,10 @@ def test_generated_project_wires_the_guard() -> None:
         for entry in event
         for h in entry["hooks"]
     ]
-    assert any("rumbo_guard.py pre-tool" in c for c in commands)
-    assert any("rumbo_guard.py stop" in c for c in commands)
+    assert any('rumbo_guard.py" pre-tool' in c for c in commands)
+    assert any('rumbo_guard.py" post-tool' in c for c in commands)
+    assert any('rumbo_guard.py" stop' in c for c in commands)
+    assert all("$CLAUDE_PROJECT_DIR" in c for c in commands)
+    assert settings["hooks"]["PostToolUse"][0]["matcher"] == "Bash"
     assert "Bash(make check)" in settings["permissions"]["allow"]
+    assert "Edit(./.claude/**)" in settings["permissions"]["deny"]

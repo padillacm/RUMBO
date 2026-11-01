@@ -2,8 +2,9 @@
 
 Wired by `.claude/settings.json` (copied by `rumbo init`, refreshed by `rumbo update`):
 
-    PreToolUse  Edit|Write|MultiEdit|NotebookEdit|Bash  ->  python scripts/rumbo_guard.py pre-tool
-    Stop                                                 ->  python scripts/rumbo_guard.py stop
+    PreToolUse   Edit|Write|MultiEdit|NotebookEdit|Bash  ->  rumbo_guard.py pre-tool
+    PostToolUse  Bash                                     ->  rumbo_guard.py post-tool
+    Stop                                                  ->  rumbo_guard.py stop
 
 Claude Code sends the event as JSON on stdin. Exit code 0 lets the action through; exit code 2
 blocks it and the message printed on stderr is shown to the agent, which then has to ask the
@@ -11,14 +12,18 @@ human or take another route. The hook never blocks the human: edits made by hand
 Claude Code, do not go through it. To disable a rule locally, override the hook in
 `.claude/settings.local.json` (not committed).
 
-What it enforces
-- Protected files are not edited by the agent: Makefile, pyproject.toml, CI workflows, infra/,
-  the pre-commit config, the anti-cheat sensor, this guard, the evals runner, `.env*`.
-  (`uv add` still works: it edits pyproject.toml through Bash, which only the Bash rules see.)
-- The `<!-- rumbo:template` mark is never removed by the agent (the human removes it).
-- No `[tests-change-approved]` written by the agent, no `--no-verify`, no force push, no
-  `git reset --hard`, no disabling of git hooks, no `rm -rf` on the tree root or home, and no
-  shell redirections into the protected files.
+What it enforces, and how strongly
+- Edit/Write (deterministic): protected files are not edited by the agent (Makefile,
+  pyproject.toml, CI workflows, infra/, the pre-commit config, .claude/, the anti-cheat sensor,
+  this guard, the evals runner, `.env*`), and the `<!-- rumbo:template` mark is never removed.
+- Bash, before the command (heuristic, friendly early message): `[tests-change-approved]`,
+  `--no-verify`/`-n` on commit, SKIP=, force pushes, `git reset --hard`, disabling git hooks,
+  `rm -rf` on the tree root or home, redirections/sed/tee into protected files. Regexes cannot
+  win against a shell, so:
+- Bash, after the command, and Stop (deterministic): any protected file that differs from HEAD
+  (or is new) blocks with the list of files. `uv add`/`uv lock` are the exception: pyproject.toml
+  and uv.lock may change through Bash. The binding layer outside Claude Code is CODEOWNERS plus
+  the CI sensors.
 - Stop: if Python/TOML/JSONL files changed since the last commit, `make check-brief` must be
   green before the agent declares itself done (skipped when RUMBO_GUARD_SKIP_CHECK is set).
 """
@@ -46,36 +51,57 @@ PROTECTED_FILES = (
     "scripts/rumbo_guard.py",
     "evals/run_evals.py",
 )
-PROTECTED_PREFIXES = (".github/", "infra/", ".env")
+PROTECTED_PREFIXES = (".github/", "infra/", ".claude/", ".env")
+# Bash may change these (uv add / uv lock); Edit/Write may not.
+BASH_MAY_CHANGE = ("pyproject.toml", "uv.lock")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 CODE_SUFFIXES = (".py", ".toml", ".jsonl")
 
-_PROTECTED_RE = "|".join(
-    re.escape(p) for p in (*PROTECTED_FILES, *(f"{p}" for p in PROTECTED_PREFIXES))
+# A protected path as a whole shell token (so Makefile.md or pyproject.toml.bak do not match).
+_TARGET = (
+    r"(?<![\w./-])(?:\./)?(?:"
+    + "|".join(re.escape(f) for f in PROTECTED_FILES)
+    + r"|\.env(?:\.\w+)*|\.github/\S*|infra/\S*|\.claude/\S*)(?![\w.-])"
 )
+_ROOTISH = r"(?:/|~/?|\.|\*|\$\{?(?:HOME|PWD)\}?/?)(?=\s|$|[;&|])"
 BASH_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(re.escape(APPROVAL_MARK)), "only the human writes [tests-change-approved]"),
-    (re.compile(r"\bgit\b.*\s--no-verify\b"), "git hooks are sensors; do not bypass them"),
-    (re.compile(r"\bgit\s+push\b.*\s(--force(-with-lease)?|-f)\b"), "no force pushes"),
-    (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard discards work; ask the human"),
-    (re.compile(r"\bgit\s+config\b.*\bcore\.hooksPath\b"), "do not disable the git hooks"),
-    (re.compile(r"\bpre-commit\s+uninstall\b"), "do not disable the git hooks"),
     (
-        re.compile(r"\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\s+(/|~|\.\s|\.$|\*|\$)"),
-        "rm -rf on the tree root, home or a glob: ask the human",
+        re.compile(r"\bgit\b[^|;&]*\s(--no-verify|-n)(?=\s|$)"),
+        "git hooks are sensors; do not bypass them (--no-verify / -n)",
+    ),
+    (re.compile(r"(^|[\s;&|])SKIP=\S*[^|;&]*\bgit\b"), "SKIP= bypasses the pre-commit hooks"),
+    (
+        re.compile(r"\bgit\s+push\b[^|;&]*\s(--force(-with-lease)?|-f|\+\S+)(?=\s|$)"),
+        "no force pushes (--force, -f, +branch)",
+    ),
+    (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard discards work; ask the human"),
+    (re.compile(r"\bgit\b[^|;&]*\bcore\.hooksPath\b"), "do not disable the git hooks"),
+    (re.compile(r"\bpre-commit\s+uninstall\b"), "do not disable the git hooks"),
+    (re.compile(r"\brm\b[^|;&]*\.git/hooks"), "do not delete the git hooks"),
+    (
+        re.compile(
+            r"\brm\b(?:\s+-{1,2}[\w-]+)*?(?:\s-\w*[rR]\w*|\s--recursive)(?:\s+-{1,2}[\w-]+)*"
+            r"\s+(?:--\s+)?" + _ROOTISH
+        ),
+        "recursive rm on the tree root, home or a glob: ask the human",
     ),
     (
-        re.compile(rf"(>>?|\bsed\s+-i\b.*|\btee\b.*)\s*(\./)?({_PROTECTED_RE})"),
+        re.compile(r"(?:>>?|>\|)\s*" + _TARGET),
+        "that file is protected (AGENTS.md hard rules); ask the human to change it",
+    ),
+    (
+        re.compile(r"\b(?:sed\s+-i\S*|tee(?:\s+-\w+)*)\b[^|;&]*\s" + _TARGET),
         "that file is protected (AGENTS.md hard rules); ask the human to change it",
     ),
 )
 
 
 def _relative(file_path: str, root: Path) -> str | None:
-    """Path relative to the project root, or None when the file is outside the project."""
+    """Path relative to the project root (normalised), or None when it is outside the project."""
     path = Path(file_path)
     if not path.is_absolute():
-        return path.as_posix()
+        path = root / path
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
@@ -136,24 +162,50 @@ def check_bash(command: str) -> str | None:
     return None
 
 
-def changed_code_files(root: Path) -> list[str]:
-    proc = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def changed_files(root: Path) -> list[str]:
+    """Tracked files that differ from HEAD plus untracked files (ignored ones excluded)."""
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return []
     if proc.returncode != 0:
         return []
-    files = [line[3:].split(" -> ")[-1].strip() for line in proc.stdout.splitlines() if line]
-    return [f for f in files if f.endswith(CODE_SUFFIXES)]
+    return [line[3:].split(" -> ")[-1].strip() for line in proc.stdout.splitlines() if line]
+
+
+def changed_code_files(root: Path) -> list[str]:
+    return [f for f in changed_files(root) if f.endswith(CODE_SUFFIXES)]
+
+
+def changed_protected_files(root: Path) -> list[str]:
+    """Protected files changed since HEAD (the deterministic check behind the Bash heuristics)."""
+    return [f for f in changed_files(root) if is_protected(f) and f not in BASH_MAY_CHANGE]
+
+
+def check_post_bash(root: Path) -> str | None:
+    touched = changed_protected_files(root)
+    if not touched:
+        return None
+    return (
+        "protected file(s) changed since the last commit: "
+        + ", ".join(touched)
+        + ". Revert them (git checkout -- <file>, or delete the new file) and ask the human to "
+        "make that change; the agent does not modify the harness."
+    )
 
 
 def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
-    """(exit code, message). Runs `make check-brief` when code changed since the last commit."""
+    """(exit code, message). Protected files intact, then `make check-brief` if code changed."""
     if payload.get("stop_hook_active"):
         return 0, ""  # a previous Stop hook already asked for a fix: do not loop
+    if touched := check_post_bash(root):
+        return BLOCK, touched
     if os.environ.get("RUMBO_GUARD_SKIP_CHECK"):
         return 0, ""
     changed = changed_code_files(root)
@@ -164,7 +216,7 @@ def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
             ["make", "check-brief"], cwd=root, capture_output=True, text=True, check=False
         )
     except FileNotFoundError:
-        return 0, "rumbo_guard: 'make' not found; run make check by hand"
+        return 0, ""  # no make on this machine: nothing the agent can do about it
     if proc.returncode == 0:
         return 0, ""
     tail = "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-40:])
@@ -181,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         payload: dict[str, Any] = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     except (json.JSONDecodeError, OSError):
         payload = {}
-    root = Path(str(payload.get("cwd") or Path.cwd()))
+    root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or str(payload.get("cwd") or Path.cwd()))
     if event == "stop":
         code, message = check_stop(payload, root)
         if message:
@@ -190,7 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     tool_name = str(payload.get("tool_name", ""))
     tool_input: dict[str, Any] = dict(payload.get("tool_input") or {})
     reason: str | None = None
-    if tool_name in EDIT_TOOLS:
+    if event == "post-tool":
+        reason = check_post_bash(root) if tool_name == "Bash" else None
+    elif tool_name in EDIT_TOOLS:
         reason = check_edit(tool_name, tool_input, root)
     elif tool_name == "Bash":
         reason = check_bash(str(tool_input.get("command", "")))

@@ -20,3 +20,4 @@ evals/reports/
 *.bak
 .rumbo-check.log
 .DS_Store
+.claude/settings.local.json
