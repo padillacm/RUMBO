@@ -436,7 +436,8 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
 lint rule, contract) or a guide, besides fixing the code.
 
 **Context and parallel work.** Model quality degrades with context length from the first few
-thousand tokens (there is no safe threshold; see `docs/method.md` §3.1), so the harness keeps
+thousand tokens (there is no safe threshold; see `docs/method.md`, section 3.1 "Working within
+the agent's effective context"), so the harness keeps
 each unit of work small:
 
 - One spec per session, started fresh from the spec; `/clear` between unrelated tasks. The

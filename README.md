@@ -32,7 +32,8 @@ Learn **A**nd measure.
 
 ## What RUMBO is
 
-Three pieces that work together:
+Three pieces that work together (how the documents are organised and what Parts, A-steps, gates
+and section numbers refer to is explained in the [glossary](#glossary)):
 
 | Piece | What it does |
 |---|---|
@@ -109,7 +110,7 @@ one is tagged: `…/RUMBO@v0.3.0`. Inside a generated project the CLI is also av
 `make rumbo ARGS="gate G4"`.
 
 Without the CLI: copy `RUMBO.md` to the repository root and ask Claude Code to *"Read RUMBO.md
-and run Part A"*.
+and run Part A"* (Part A of `RUMBO.md` is the step-by-step mounting of the harness).
 
 ## Day-to-day workflow
 
@@ -135,7 +136,7 @@ Slash commands installed in `.claude/commands/`: `/rumbo-r`, `/rumbo-u`, `/rumbo
 ## CLI reference
 
 ```bash
-rumbo init [--yes ...]               # mount the harness (Part A); see the table above
+rumbo init [--yes ...]               # mount the harness (RUMBO.md Part A); see the table above
 rumbo update [--diff]                # refresh framework-owned files; --diff previews and writes nothing
 rumbo doctor                         # structure complete, AGENTS.md ≤ 100 lines, harness up to date
 rumbo new adr|spec|postmortem "T"    # docs/adr/0001-t.md · specs/0001-t.md · docs/postmortems/<date>-t.md
@@ -188,7 +189,7 @@ In a generated project, the `Makefile` wraps the harness: `make check` (everythi
   threat model (STRIDE, lethal trifecta, OWASP LLM/Agentic checklist), runbook, SLOs,
   postmortem, eval plan, decisions log.
 
-The full tree is in `RUMBO.md`, Part A1.
+The full tree is in `RUMBO.md`, Part A, step A1 "Repository structure".
 
 ## Hard rules as hooks
 
@@ -219,7 +220,7 @@ make the same rules binding on GitHub.
 | Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases; budget + telemetry wired | + fitness function per ADR, nightly, SBOM, every requirement traced to a test; 100 cases |
 
 What matters is the worst plausible impact, not the size of the code. The full practice table
-is in `RUMBO.md`, Part E.
+is in `RUMBO.md`, Part E "Scaling the rigor".
 
 ## Security by design
 
@@ -239,8 +240,8 @@ is in `RUMBO.md`, Part E.
 ## Working within the context limit
 
 There is no safe token threshold: quality degrades from the first few thousand tokens and bug
-fixing collapses long before the advertised window (`docs/method.md` §3.1, full report in
-`reports/`). The harness keeps units of work small: one spec per fresh session, specs with
+fixing collapses long before the advertised window (`docs/method.md`, section 3.1 "Working
+within the agent's effective context"; full report in `reports/`). The harness keeps units of work small: one spec per fresh session, specs with
 explicit data contracts and file ownership, `make check-brief` so only failures reach the
 agent's context, `# Compact instructions` in AGENTS.md, decisions in files, and a one-writer
 rule with read-only parallel agents. Parallelize at the level of specs (3–5 worktrees, small
@@ -256,7 +257,8 @@ a **reading order** (tests first, never alphabetical), a budget of ~300 lines pe
 commands that verify the change and **three explanation-test questions** with the hints folded
 away. `/rumbo-tour` asks Claude Code to replace the template questions with real ones written
 from the diff; `/rumbo-review` is the independent second review by a fresh session, starting
-from the `rumbo trace` table. Design rationale in `docs/method.md`, section 3.
+from the `rumbo trace` table. Design rationale in `docs/method.md`, section 3 "Reviewing
+agent-written changes without drowning the human".
 
 ## Updating a project's harness
 
@@ -295,8 +297,11 @@ Release from the CHANGELOG, optional PyPI trusted publishing). See
 - **ANCLA:** the per-change loop (Anchor, Navigate, Close the loop, Limit, Learn And measure).
 - **Gate (G1–G5):** the exit criterion of each phase; automatic checks plus a checklist the
   human signs.
-- **Part A / A0:** the one-time setup of the harness (`RUMBO.md`), starting with four questions
-  (name, LLM or not, rigor, use case).
+- **Parts A–F, A0–A8, G1–G5:** how `RUMBO.md` is organised. Part A mounts the harness in steps
+  A0 (the four questions: name, LLM or not, rigor, use case) to A8 (final check); Part B is the
+  content of AGENTS.md; Part C the cycle R·U·M·B·O; Part D the templates; Part E the rigor
+  levels; Part F case profiles. G1–G5 are the gates at the end of each phase. `docs/method.md`
+  is numbered by sections (for example 3.1 is the context limit).
 - **Template mark:** the first line `<!-- rumbo:template … -->` of every generated document;
   the human deletes it when the document is complete, and `rumbo gate` checks it.
 - **Rigor:** `prototype`, `mvp` or `production`; it scales what `make check`, CI and the gates

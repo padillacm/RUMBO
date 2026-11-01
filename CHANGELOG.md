@@ -33,7 +33,7 @@ All notable changes to this project are documented here. The format follows
   release workflow (`vX.Y.Z` tag → GitHub Release from the CHANGELOG, optional PyPI trusted
   publishing); five ADRs with fitness functions in `docs/adr/`; `docs/tutorial.md`.
 - Context-limit practices, grounded in the research report
-  `reports/Desarrollar con agentes bajo límite de contexto.md` (method §3.1): a "Data
+  `reports/Desarrollar con agentes bajo límite de contexto.md` (`docs/method.md`, section 3.1): a "Data
   contracts and ownership" section in the spec template (checked by gate G2), a one-writer
   rule and a `# Compact instructions` section in the generated AGENTS.md, `make check-brief`
   (only the failing tail reaches the agent's context), a requirement-by-requirement

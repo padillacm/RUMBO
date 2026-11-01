@@ -2,7 +2,7 @@
 description: RUMBO phase U (Unify) — EARS specs, NFRs with numbers and the eval plan
 argument-hint: <feature or focus>
 ---
-Follow phase **U — Unify** of `RUMBO.md` (Part C).
+Follow phase **U — Unify** of `RUMBO.md` (Part C, "The RUMBO cycle").
 
 1. Review `docs/product/prd.md`: explicit non-goals and NFRs **with numbers** (p95, cost per request, availability).
 2. For each feature, create the spec with `make rumbo ARGS='new spec "<name>"'` (or copy `specs/0000-template.md`) using EARS patterns.

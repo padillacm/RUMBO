@@ -2,7 +2,7 @@
 description: RUMBO phase R (Recognize) — is it worth building?
 argument-hint: [context or focus]
 ---
-Follow phase **R — Recognize** of `RUMBO.md` (Part C).
+Follow phase **R — Recognize** of `RUMBO.md` (Part C, "The RUMBO cycle").
 
 1. Read `docs/product/brief.md`. If it still has the template mark, ask the human to write it first; do not draft it yourself and never remove the mark.
 2. Critique the brief: weak assumptions, missing or unmeasurable metric, current alternatives, abandonment criterion.

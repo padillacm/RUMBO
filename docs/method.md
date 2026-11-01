@@ -144,7 +144,8 @@ lint rule, contract) or a guide, besides fixing the code.
 
 **Rules are prose until a hook enforces them.** AGENTS.md says "never touch the Makefile" and
 "never remove the template mark"; nothing in a prompt guarantees it. RUMBO wires
-`scripts/rumbo_guard.py` as Claude Code `PreToolUse` and `Stop` hooks (A6 in RUMBO.md): a
+`scripts/rumbo_guard.py` as Claude Code `PreToolUse` and `Stop` hooks (`RUMBO.md`, Part A,
+step A6 "Anti-cheat sensors"): a
 blocked call returns the reason to the agent, which has to ask the human. The hook never binds
 the human, who edits by hand or overrides it locally. This is Böckeler's sensor/guide split
 applied to the harness itself, and the cheapest place to start when a mistake repeats.

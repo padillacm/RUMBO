@@ -2,7 +2,7 @@
 description: RUMBO phase M (Model) — ADRs with fitness functions, C4 and the threat model
 argument-hint: <decision or focus>
 ---
-Follow phase **M — Model** of `RUMBO.md` (Part C).
+Follow phase **M — Model** of `RUMBO.md` (Part C, "The RUMBO cycle").
 
 1. Ask the human for their version of the decision first (human compass). Then complete options and trade-offs.
 2. Create the ADR with `make rumbo ARGS='new adr "<decision>"'`. **Every ADR carries an executable fitness function** (import-linter contract, test in `tests/architecture/` or CI threshold); implement it in the same change.

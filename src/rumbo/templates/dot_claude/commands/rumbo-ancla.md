@@ -2,7 +2,7 @@
 description: Phase B — one task with the ANCLA loop (Anchor, Navigate, Close, Limit, Learn)
 argument-hint: <task>
 ---
-Implement this task with **ANCLA** (`RUMBO.md`, Part C, phase B): $ARGUMENTS
+Implement this task with **ANCLA** (`RUMBO.md`, Part C "The RUMBO cycle", phase B "Build with ANCLA"): $ARGUMENTS
 If no task was given, ask for one before doing anything.
 
 1. **Anchor:** read the spec and the relevant ADRs. Write the acceptance tests first (Hypothesis for domain invariants). Run them and show that they **fail**. 🛑 Stop: the human approves the tests.
