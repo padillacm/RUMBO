@@ -12,9 +12,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rumbo.project import is_template, numbered_documents, section
+from rumbo.project import numbered_documents, section
 
-REQ_LINE = re.compile(r"^\s*-\s*(R\d+)\b[^:]*:\s*(.*)$")
+# `- R1 (event): text`; nested items such as `R1.1` are not requirements.
+REQ_LINE = re.compile(r"^\s*-\s*(R\d+)(?![\w.])[^:]*:\s*(.*)$")
 SOURCE_GLOBS = ("tests/**/*.py", "evals/datasets/*.jsonl")
 
 
@@ -23,7 +24,6 @@ class Requirement:
     spec_id: str
     rid: str
     text: str
-    spec_complete: bool
     covered_by: list[str] = field(default_factory=list)
 
     @property
@@ -44,8 +44,7 @@ def requirements(spec: Path) -> list[Requirement]:
     for line in body.splitlines():
         match = REQ_LINE.match(line)
         if match:
-            complete = not is_template(text)
-            found.append(Requirement(sid, match.group(1), match.group(2).strip(), complete))
+            found.append(Requirement(sid, match.group(1), match.group(2).strip()))
     return found
 
 
@@ -59,7 +58,7 @@ def trace(root: Path) -> list[Requirement]:
             rel = file.relative_to(root).as_posix()
             sources.append((rel, file.read_text(encoding="utf-8", errors="replace").splitlines()))
     for req in reqs:
-        needle = re.compile(rf"(?<!\w){re.escape(req.full_id)}(?!\d)")
+        needle = re.compile(rf"(?<!\w){re.escape(req.full_id)}(?!\w)")
         for rel, lines in sources:
             hits = [n for n, line in enumerate(lines, 1) if needle.search(line)]
             req.covered_by += [f"{rel}:{n}" for n in hits[:3]]
@@ -76,10 +75,13 @@ def render(reqs: list[Requirement]) -> str:
             "No requirements found: specs/ has no `- Rk (...): ...` lines under '## Requirements'."
         )
     lines = ["| Requirement | Text | Covered by |", "|---|---|---|"]
+    seen: set[str] = set()
     for r in reqs:
         where = ", ".join(r.covered_by) if r.covered_by else "**missing**"
-        text = r.text if len(r.text) <= 70 else r.text[:67] + "..."
-        lines.append(f"| {r.full_id} | {text} | {where} |")
+        text = (r.text if len(r.text) <= 70 else r.text[:67] + "...").replace("|", "\\|")
+        rid = r.full_id + (" (duplicate id!)" if r.full_id in seen else "")
+        seen.add(r.full_id)
+        lines.append(f"| {rid} | {text} | {where} |")
     missing = uncovered(reqs)
     lines.append("")
     lines.append(

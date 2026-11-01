@@ -349,10 +349,11 @@ def test_eval_add_needs_an_llm_project(simple_project: Path) -> None:
 
 
 def test_metrics_reads_decisions_specs_and_evals(
-    simple_project: Path, capsys: pytest.CaptureFixture[str]
+    simple_project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from rumbo.metrics import collect, parse_decisions
 
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(simple_project.parent))  # hermetic
     main(["new", "spec", "Alpha", "--dir", str(simple_project)])
     main(["decision", "F-0001 closed", "--why", "2 sessions", "--dir", str(simple_project)])
     main(["decision", "G2 signed", "--dir", str(simple_project)])
@@ -394,3 +395,66 @@ def test_update_diff_shows_harness_drift_only(
     brief.write_text(brief_original)
     assert main(["update", "--diff", "--dir", str(llm_project)]) == 0
     assert "Everything matches" in capsys.readouterr().out
+
+
+def test_decisions_parsing_tolerates_hand_written_headings(tmp_path: Path) -> None:
+    from rumbo.metrics import parse_decisions
+
+    text = (
+        "## 2026-10-30 - F-0001 closed\r\n- why: 3 sessions\r\n- Decided by: human\r\n"
+        "##  2026-10-31 – deploy v1\n- Decided by: ci\n"
+        "## 2026-11-01 —incident: wrong figure\n- Why: bad fixture\n"
+    )
+    decisions = parse_decisions(text)
+    assert [d.title for d in decisions] == ["F-0001 closed", "deploy v1", "incident: wrong figure"]
+    assert decisions[0].why == "3 sessions" and decisions[1].who == "ci"
+
+
+def test_known_graders_reads_the_dict_with_the_ast(llm_project: Path) -> None:
+    graders_file = llm_project / "evals" / "graders" / "__init__.py"
+    original = graders_file.read_text()
+    assert cli.known_graders(llm_project) == {
+        "field_equality",
+        "numeric",
+        "tool_arguments",
+        "abstention",
+    }
+    graders_file.write_text('GRADERS: dict[str, object] = {"abstention": object}\n')
+    assert cli.known_graders(llm_project) == {"abstention"}
+    graders_file.write_text("GRADERS = build()\n")
+    assert cli.known_graders(llm_project) is None
+    graders_file.write_text(original)
+
+
+def test_eval_add_escapes_the_log_table(llm_project: Path) -> None:
+    args = ["eval", "add", "pipes", "--dir", str(llm_project), "--grader", "abstention"]
+    rc = main([*args, "--input", "{}", "--expected", "{}", "--note", "a|b\nc", "--source", "x|y"])
+    assert rc == 0
+    log = (llm_project / "evals" / "error_analysis" / "log.md").read_text()
+    assert "| x\\|y | a\\|b c |" in log
+    (llm_project / "evals" / "datasets" / "pipes.jsonl").unlink()
+
+
+def test_trace_ignores_nested_items_and_lookalikes(simple_project: Path) -> None:
+    from rumbo.trace import trace
+
+    main(["new", "spec", "Edge", "--dir", str(simple_project)])
+    spec = simple_project / "specs" / "0001-edge.md"
+    spec.write_text(
+        "# F-0001: Edge\n## Requirements (EARS)\n"
+        "- R1 (event): When a, the system shall b | c\n"
+        "  - R1.1: a nested note\n"
+        "- R10 (state): While x, the system shall y\n"
+        "## Acceptance criteria\n"
+    )
+    (simple_project / "tests" / "unit" / "test_edge.py").write_text(
+        'def test_x() -> None:\n    """F-0001.R10a is not R10; F-0001.R1. ends a sentence"""\n'
+    )
+    reqs = trace(simple_project)
+    assert [r.rid for r in reqs] == ["R1", "R10"]
+    assert reqs[0].covered_by and not reqs[1].covered_by
+    from rumbo.trace import render
+
+    assert "shall b \\| c" in render(reqs)
+    spec.unlink()
+    (simple_project / "tests" / "unit" / "test_edge.py").unlink()

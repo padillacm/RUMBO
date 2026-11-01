@@ -17,6 +17,7 @@ rumbo metrics                   process metrics from git, decisions, specs and e
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import http.client
 import json
@@ -502,14 +503,31 @@ def cmd_trace(args: argparse.Namespace) -> int:
 
 
 # ------------------------------------------------------------------------- eval
-GRADER_RE = re.compile(r'^\s*"([a-z_][a-z0-9_]*)"\s*:\s*\w+\s*,?\s*$', re.M)
-
-
-def known_graders(root: Path) -> set[str]:
-    """Grader names registered in evals/graders/__init__.py (the GRADERS dict)."""
+def known_graders(root: Path) -> set[str] | None:
+    """Grader names in the GRADERS dict of evals/graders/__init__.py; None if unparseable."""
     text = (root / "evals" / "graders" / "__init__.py").read_text(encoding="utf-8")
-    block = text[text.find("GRADERS") :]
-    return set(GRADER_RE.findall(block))
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign | ast.AnnAssign):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == "GRADERS" for t in targets):
+            continue
+        if isinstance(node.value, ast.Dict):
+            return {
+                k.value
+                for k in node.value.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+    return None
+
+
+def _cell(text: str | None) -> str:
+    """One markdown table cell: no newlines, pipes escaped."""
+    return (text or "").replace("\r", " ").replace("\n", " ").replace("|", "\\|").strip()
 
 
 def cmd_eval_add(args: argparse.Namespace) -> int:
@@ -527,7 +545,9 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
     if not isinstance(case_input, dict) or not isinstance(expected, dict):
         return _err("--input and --expected must be JSON objects")
     graders = known_graders(root)
-    if graders and args.grader not in graders:
+    if graders is None:
+        print("WARNING: could not read the GRADERS dict; grader name not validated")
+    elif args.grader not in graders:
         return _err(f"unknown grader {args.grader!r}; registered: {', '.join(sorted(graders))}")
     path = datasets / f"{args.suite}.jsonl"
     existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
@@ -537,7 +557,12 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
             ids.add(json.loads(line).get("id"))
         except (json.JSONDecodeError, AttributeError):
             continue
-    case_id = args.id or f"{args.suite}-{len(existing) + 1:03d}"
+    case_id = args.id
+    if not case_id:
+        n = len(existing) + 1
+        while f"{args.suite}-{n:03d}" in ids:
+            n += 1
+        case_id = f"{args.suite}-{n:03d}"
     if case_id in ids:
         return _err(f"case id {case_id!r} already exists in {path.relative_to(root)}")
     case: dict[str, Any] = {
@@ -563,8 +588,8 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
         )
     with log.open("a", encoding="utf-8") as f:
         f.write(
-            f"| {dt.date.today().isoformat()} | {case_id} | {args.suite} | {args.source or ''} | "
-            f"{args.note or ''} |\n"
+            f"| {dt.date.today().isoformat()} | {_cell(case_id)} | {args.suite} | "
+            f"{_cell(args.source)} | {_cell(args.note)} |\n"
         )
     print(f"Added {case_id} to {path.relative_to(root).as_posix()} + evals/error_analysis/log.md")
     print("Offline with a recorded fixture: make evals  ·  against the model: make evals-live")
@@ -574,7 +599,12 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------- metrics
 def cmd_metrics(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
-    metrics = collect(root, days=args.days)
+    if not (root / "pyproject.toml").exists():
+        return _err(f"no pyproject.toml in {root}; did you run 'rumbo init'?")
+    try:
+        metrics = collect(root, days=args.days)
+    except (OSError, ValueError) as exc:
+        return _err(f"could not read the project: {exc}")
     if args.json:
         print(json.dumps(metrics.as_dict(), ensure_ascii=False, indent=2, default=str))
     else:
@@ -695,7 +725,11 @@ def build_parser() -> argparse.ArgumentParser:
         "that mention it. Gate G4 recommends full coverage and requires it in production.",
     )
     add_dir(p)
-    p.add_argument("--strict", action="store_true", help="exit 1 when a requirement has no test")
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit 1 when a requirement has no test, or when specs/ has no requirements",
+    )
     p.set_defaults(func=cmd_trace)
 
     p = sub.add_parser("eval", help="eval datasets: 'eval add' turns a failure into a case")

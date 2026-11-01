@@ -282,7 +282,8 @@ def human_approval(base: str, root: Path) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="RUMBO anti-cheat sensor: fails when tests get weaker than the base."
+        prog="rumbo check-tests",
+        description="RUMBO anti-cheat sensor: fails when tests get weaker than the base.",
     )
     parser.add_argument("--base", help="base ref or SHA (default: origin/main or the PR base)")
     parser.add_argument("--root", default=".", help="repository root")

@@ -26,7 +26,10 @@ from typing import Any
 from rumbo.project import is_template, numbered_documents
 from rumbo.trace import trace, uncovered
 
-DECISION = re.compile(r"^## (\d{4}-\d{2}-\d{2}) — (.+)$", re.M)
+# Tolerant of hand-written entries: em dash, en dash or hyphen, extra spaces, CRLF.
+DECISION = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s*[—–-]+\s*(.+?)\s*$", re.M)
+WHY = re.compile(r"^-\s*why:\s*(.*?)\s*$", re.M | re.I)
+WHO = re.compile(r"^-\s*decided by:\s*(.*?)\s*$", re.M | re.I)
 CLOSED = re.compile(r"^(F-\d{4}) closed\b", re.I)
 SIGNED = re.compile(r"^(G[1-5]) signed\b", re.I)
 SESSIONS = re.compile(r"(\d+)\s*sessions?", re.I)
@@ -74,8 +77,8 @@ def parse_decisions(text: str) -> list[Decision]:
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[m.end() : end]
-        why = re.search(r"^- Why: (.*)$", body, re.M)
-        who = re.search(r"^- Decided by: (.*)$", body, re.M)
+        why = WHY.search(body)
+        who = WHO.search(body)
         try:
             date = dt.date.fromisoformat(m.group(1))
         except ValueError:
@@ -92,13 +95,16 @@ def parse_decisions(text: str) -> list[Decision]:
 
 
 def _commits(root: Path, since: dt.date) -> list[str]:
-    proc = subprocess.run(
-        ["git", "log", f"--since={since.isoformat()}", "--format=%s%n%b%x00"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "log", f"--since={since.isoformat()}", "--format=%s%n%b%x00"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:  # git not installed
+        return []
     if proc.returncode != 0:
         return []
     return [c.strip() for c in proc.stdout.split("\x00") if c.strip()]
@@ -109,13 +115,17 @@ def _latest_eval(root: Path) -> dict[str, Any] | None:
     reports = sorted(folder.glob("*.json")) if folder.is_dir() else []
     if not reports:
         return None
+    latest = max(reports, key=lambda p: p.stat().st_mtime)
     try:
-        data = json.loads(reports[-1].read_text(encoding="utf-8"))
+        data = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if not isinstance(data, dict):
+        return None
     summary = {k: v for k, v in data.items() if k in ("suite", "k", "live") or k.startswith("pass")}
-    summary["file"] = reports[-1].name
-    summary["cases"] = len(data.get("cases", []))
+    summary["file"] = latest.name
+    cases = data.get("cases")
+    summary["cases"] = len(cases) if isinstance(cases, list) else 0
     return summary
 
 
@@ -128,7 +138,7 @@ def _eval_cases(root: Path) -> int:
                 case = json.loads(line) if line.strip() else None
             except json.JSONDecodeError:
                 case = None
-            if case and "example" not in case.get("tags", []):
+            if isinstance(case, dict) and "example" not in case.get("tags", []):
                 count += 1
     return count
 
@@ -222,7 +232,11 @@ def render(m: Metrics) -> str:
         lines.append(f"- Real eval cases: {m.eval_cases}")
         if m.latest_eval:
             e = m.latest_eval
-            passes = ", ".join(f"{k}={v:.3f}" for k, v in e.items() if k.startswith("pass"))
+            passes = ", ".join(
+                f"{k}={v:.3f}" if isinstance(v, int | float) else f"{k}={v}"
+                for k, v in e.items()
+                if k.startswith("pass")
+            )
             lines.append(
                 f"- Latest eval run: {e.get('file')} suite={e.get('suite')} "
                 f"live={e.get('live')} {passes}"

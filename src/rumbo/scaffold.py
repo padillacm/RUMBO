@@ -370,11 +370,15 @@ def merge_lines(existing: str, template: str) -> tuple[str, list[str]]:
 MERGEABLE = {"pyproject.toml": merge_pyproject, ".gitignore": merge_lines}
 
 
+def _write_text(target: Path, text: str) -> None:
+    with target.open("w", encoding="utf-8", newline="\n") as f:  # LF on every platform
+        f.write(text)
+
+
 def _write(target: Path, item: str | Path, rel: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(item, str):
-        with target.open("w", encoding="utf-8", newline="\n") as f:  # LF on every platform
-            f.write(item)
+        _write_text(target, item)
     else:
         shutil.copyfile(item, target)
     if rel.startswith("scripts/"):
@@ -396,7 +400,7 @@ def scaffold(cfg: Config, dest: Path, force: bool = False) -> Report:
                 current = target.read_text(encoding="utf-8")
                 merged, notes = MERGEABLE[rel](current, _content(item))
                 if merged != current:
-                    target.write_text(merged, encoding="utf-8")
+                    _write_text(target, merged)
                     detail = "; ".join(notes) if rel == "pyproject.toml" else f"+{len(notes)} lines"
                     report.merged.append(f"{rel} ({detail})")
                 else:
@@ -463,7 +467,8 @@ def update_diff(project: Project, dest: Path) -> str:
         current = target.read_text(encoding="utf-8") if target.exists() else ""
         if current == new_text:
             continue
-        owned = is_framework_owned(rel) or rel.startswith(".claude/")
+        # Same rule as update(): owned files are replaced; .claude/ files only when missing.
+        owned = is_framework_owned(rel) or (not target.exists() and rel.startswith(".claude/"))
         label = "update replaces" if owned else "merge by hand"
         if not target.exists() and not owned:
             label = "missing; copy by hand if wanted"
@@ -486,7 +491,7 @@ def _bump_harness_version(pyproject: Path) -> None:
         count=1,
     )
     if new != text:
-        pyproject.write_text(new, encoding="utf-8")
+        _write_text(pyproject, new)
 
 
 def _run(cmd: list[str], cwd: Path, report: Report) -> int:
