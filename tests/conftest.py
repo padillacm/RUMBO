@@ -6,13 +6,15 @@ from rumbo.scaffold import Config, scaffold
 
 
 @pytest.fixture
-def proyecto_llm(tmp_path: Path) -> Path:
-    cfg = Config(nombre="Agente XM", pkg="agente_xm", llm=True, proveedor="anthropic", rigor="mvp")
-    scaffold(cfg, tmp_path)
-    return tmp_path
+def llm_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("llm")
+    cfg = Config(name="XM Agent", package="xm_agent", llm=True, provider="anthropic", rigor="mvp")
+    scaffold(cfg, root)
+    return root
 
 
 @pytest.fixture
-def proyecto_simple(tmp_path: Path) -> Path:
-    scaffold(Config(nombre="Demo", pkg="demo", llm=False, rigor="prototipo"), tmp_path)
-    return tmp_path
+def simple_project(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("simple")
+    scaffold(Config(name="Demo", package="demo", llm=False, rigor="prototype"), root)
+    return root

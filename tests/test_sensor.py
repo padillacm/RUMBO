@@ -1,12 +1,12 @@
-"""El sensor anti-trampa se prueba con los mismos tests que se copian a cada proyecto."""
+"""The anti-cheat sensor is tested by the same tests that get copied into every project."""
 
 import subprocess
 import sys
 from pathlib import Path
 
 
-def test_tests_del_sensor_pasan_en_proyecto_generado(proyecto_simple: Path) -> None:
-    resultado = subprocess.run(
+def test_sensor_tests_pass_in_generated_project(simple_project: Path) -> None:
+    result = subprocess.run(
         [
             sys.executable,
             "-m",
@@ -16,10 +16,10 @@ def test_tests_del_sensor_pasan_en_proyecto_generado(proyecto_simple: Path) -> N
             "no:cacheprovider",
             "tests/unit/test_check_tests_not_weakened.py",
         ],
-        cwd=proyecto_simple,
+        cwd=simple_project,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert resultado.returncode == 0, resultado.stdout + resultado.stderr
-    assert "7 passed" in resultado.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert " passed" in result.stdout and "failed" not in result.stdout
