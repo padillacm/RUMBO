@@ -261,8 +261,10 @@ def diff_size(root: Path) -> tuple[int | None, str]:
         if mb.returncode != 0:
             continue
         merge_base = mb.stdout.strip()
-        if merge_base == head.stdout.strip() and base in ("main", "master"):
-            return None, f"'{base}' is HEAD itself: configure origin/main or branch first"
+        if merge_base == head.stdout.strip():
+            # HEAD is the base (or behind it): there is no branch work to measure, and
+            # counting only the uncommitted changes would pass a huge commit on main.
+            return None, f"HEAD is already on '{base}': commit on a branch to measure the diff"
         excludes = [f":(exclude){lock}" for lock in LOCKFILES]
         diff = subprocess.run(
             ["git", "diff", "--numstat", merge_base, "--", ".", *excludes],

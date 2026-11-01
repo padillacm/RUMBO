@@ -209,6 +209,33 @@ def test_gate_g4_without_make_is_unmeasured_not_a_traceback(
     assert check.ok is None and "not installed" in check.detail
 
 
+def test_diff_size_is_unmeasured_when_head_is_the_base(tmp_path: Path) -> None:
+    from rumbo.gates import diff_size
+
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig")}
+    (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@x\n")
+
+    def git(cwd: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
+
+    origin, clone = tmp_path / "origin", tmp_path / "clone"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    (origin / "a.py").write_text("x = 1\n" * 500)
+    git(origin, "add", ".")
+    git(origin, "commit", "-q", "-m", "big")
+    git(tmp_path, "clone", "-q", str(origin), str(clone))
+    # origin/main is HEAD: a 500-line commit on main must not read as a 0-line diff.
+    size, info = diff_size(clone)
+    assert size is None and "HEAD is already on 'origin/main'" in info
+    # On a branch with one commit the diff is measured against origin/main.
+    git(clone, "checkout", "-q", "-b", "feature")
+    (clone / "b.py").write_text("y = 2\n" * 3)
+    git(clone, "add", ".")
+    git(clone, "commit", "-q", "-m", "small")
+    assert diff_size(clone) == (3, "origin/main")
+
+
 def test_gate_g5_prototype_does_not_require_dependabot(simple_project: Path) -> None:
     _, results = evaluate("G5", Project.load(simple_project))
     assert all(r.ok is not False for r in results if "dependency updates" in r.description)
