@@ -156,6 +156,21 @@ def test_gate_g3_workflow_adr_by_title(llm_project: Path) -> None:
     assert next(r for r in results if r.description == "import-linter contracts").ok is True
 
 
+def test_gate_g3_tolerates_empty_or_comment_only_adrs(llm_project: Path) -> None:
+    adrs = llm_project / "docs" / "adr"
+    (adrs / "0007-empty.md").write_text("")
+    (adrs / "0008-stub.md").write_text("<!-- a one-line comment -->")
+    try:
+        _, results = evaluate("G3", Project.load(llm_project))
+    finally:
+        (adrs / "0007-empty.md").unlink()
+        (adrs / "0008-stub.md").unlink()
+    by_desc = {r.description: r for r in results}
+    assert by_desc["docs/adr/0007-empty.md: complete"].ok is True  # no template mark
+    assert by_desc["docs/adr/0007-empty.md: fitness function"].ok is None  # mvp: recommended
+    assert by_desc["docs/adr/0008-stub.md: complete"].ok is True
+
+
 def test_gate_g4_reports_unmeasured_instead_of_green(
     simple_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

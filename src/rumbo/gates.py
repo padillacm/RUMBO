@@ -195,7 +195,8 @@ def _g3(p: Project, _run: bool) -> list[Result]:
                 "section is empty (required in production; recommended before)",
             )
         )
-        title = text.splitlines()[1] if text.startswith("<!--") else text.splitlines()[0]
+        # First heading; an empty or heading-less file is simply not the workflow ADR.
+        title = next((ln for ln in text.splitlines() if ln.lstrip().startswith("#")), "")
         if re.search(r"workflow", title, re.I) and re.search(r"agent", title, re.I):
             workflow_adr = True
     if p.llm:
