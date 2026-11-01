@@ -1,8 +1,9 @@
-"""Puertas (gates) G1–G5: chequeos automáticos + checklist humano.
+"""Gates G1–G5: automatic checks plus the human checklist, scaled by rigor.
 
-Los chequeos automáticos son sensores baratos sobre los artefactos; no sustituyen la
-firma humana. Un gate solo "pasa" cuando los automáticos están en verde **y** el humano
-marca los manuales.
+The automatic checks are cheap sensors over the artifacts; they never replace the human
+signature. A gate passes only when every automatic check is green **and** the human ticks
+the manual items. ``ok=None`` marks an informational result (could not be measured, or a
+recommendation for the current rigor): it is shown but does not fail the gate.
 """
 
 from __future__ import annotations
@@ -11,293 +12,432 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from rumbo.proyecto import Proyecto, documentos_numerados, es_plantilla, seccion
+from rumbo.project import Project, is_template, numbered_documents, section
 
-MAX_DIFF = 300
-MIN_CASOS_EVAL = 20
-EARS = re.compile(r"\bdeber[áa]\b|\bshall\b", re.I)
+MAX_DIFF_LINES = 300
+MIN_EVAL_CASES = {"prototype": 20, "mvp": 50, "production": 100}
+EARS = re.compile(r"\bshall\b|\bdeber[áa]n?\b", re.I)
+PLACEHOLDER = re.compile(r"…|\.\.\.|<[^>]+>")
+LOCKFILES = ("uv.lock", "poetry.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")
 
 
 @dataclass
-class Resultado:
-    descripcion: str
-    ok: bool
-    detalle: str = ""
+class Result:
+    description: str
+    ok: bool | None
+    detail: str = ""
 
 
-Chequeo = Callable[[Proyecto, bool], list[Resultado]]
+Check = Callable[[Project, bool], list[Result]]
+
+
+@dataclass(frozen=True)
+class Item:
+    text: str
+    min_rigor: str = "prototype"
+    llm_only: bool = False
+    max_rigor: str = "production"
 
 
 @dataclass(frozen=True)
 class Gate:
-    codigo: str
-    fase: str
-    manuales: tuple[str, ...]
-    automaticos: tuple[Chequeo, ...]
+    code: str
+    phase: str
+    manual: tuple[Item, ...]
+    checks: tuple[Check, ...]
 
-
-def _doc(p: Proyecto, rel: str, nombre: str) -> Resultado:
-    texto = p.leer(rel)
-    if texto is None:
-        return Resultado(f"{nombre} existe", False, f"falta {rel}")
-    return Resultado(
-        f"{nombre} completo",
-        not es_plantilla(texto),
-        "" if not es_plantilla(texto) else f"{rel} aún tiene la marca de plantilla",
-    )
-
-
-# ---------------------------------------------------------------- G1 Reconocer
-def _g1(p: Proyecto, _ejecutar: bool) -> list[Resultado]:
-    res = [_doc(p, "docs/product/brief.md", "Brief")]
-    src = p.raiz / "src"
-    culpables = []
-    if src.is_dir():
-        patron = re.compile(r"^\s*(from|import)\s+spikes\b", re.M)
-        culpables = [
-            f.relative_to(p.raiz).as_posix()
-            for f in src.rglob("*.py")
-            if patron.search(f.read_text(encoding="utf-8", errors="replace"))
+    def checklist(self, project: Project) -> list[str]:
+        return [
+            item.text
+            for item in self.manual
+            if project.at_least(item.min_rigor)
+            and not (project.at_least(item.max_rigor) and item.max_rigor != "production")
+            and (project.llm or not item.llm_only)
         ]
-    res.append(
-        Resultado("nada de spikes/ se importa desde src/", not culpables, ", ".join(culpables))
+
+
+def _doc(p: Project, rel: str, label: str, required: bool = True) -> Result:
+    text = p.read(rel)
+    if text is None:
+        return Result(f"{label} exists", False if required else None, f"missing {rel}")
+    complete = not is_template(text)
+    detail = "" if complete else f"{rel} still has the template mark on its first line"
+    return Result(f"{label} complete", complete if required else (complete or None), detail)
+
+
+# ------------------------------------------------------------------ G1 Recognize
+def _g1(p: Project, _run: bool) -> list[Result]:
+    results = [_doc(p, "docs/product/brief.md", "Brief")]
+    src = p.root / "src"
+    offenders: list[str] = []
+    if src.is_dir():
+        pattern = re.compile(r"^\s*(from|import)\s+spikes\b", re.M)
+        offenders = [
+            f.relative_to(p.root).as_posix()
+            for f in src.rglob("*.py")
+            if pattern.search(f.read_text(encoding="utf-8", errors="replace"))
+        ]
+    results.append(
+        Result("nothing in spikes/ is imported from src/", not offenders, ", ".join(offenders))
     )
-    return res
+    return results
 
 
-# ---------------------------------------------------------------- G2 Unificar
-def _casos_eval(p: Proyecto) -> int:
-    carpeta = p.raiz / "evals" / "datasets"
-    n = 0
-    for f in carpeta.glob("*.jsonl") if carpeta.is_dir() else []:
-        for linea in f.read_text(encoding="utf-8").splitlines():
-            if not linea.strip():
+# ---------------------------------------------------------------------- G2 Unify
+def _eval_cases(p: Project) -> int:
+    folder = p.root / "evals" / "datasets"
+    count = 0
+    for file in folder.glob("*.jsonl") if folder.is_dir() else []:
+        for line in file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
                 continue
             try:
-                caso = json.loads(linea)
+                case = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if "ejemplo" not in caso.get("tags", []):
-                n += 1
-    return n
+            if "example" not in case.get("tags", []):
+                count += 1
+    return count
 
 
-def _g2(p: Proyecto, _ejecutar: bool) -> list[Resultado]:
-    res = [_doc(p, "docs/product/prd.md", "PRD")]
-    specs = documentos_numerados(p.raiz / "specs")
-    res.append(Resultado("al menos una spec en specs/", bool(specs), "usa 'rumbo new spec'"))
-    for s in specs:
-        t = s.read_text(encoding="utf-8")
-        rel = s.relative_to(p.raiz).as_posix()
-        res.append(Resultado(f"{rel}: completa", not es_plantilla(t)))
-        res.append(
-            Resultado(f"{rel}: requisitos EARS", bool(EARS.search(seccion(t, "Requisitos"))))
+def _has_real_ears(text: str) -> bool:
+    body = section(text, "Requirements")
+    return any(EARS.search(line) and not PLACEHOLDER.search(line) for line in body.splitlines())
+
+
+def _g2(p: Project, _run: bool) -> list[Result]:
+    results = [_doc(p, "docs/product/prd.md", "PRD", required=p.at_least("mvp"))]
+    specs = numbered_documents(p.root / "specs")
+    results.append(Result("at least one spec in specs/", bool(specs), "use 'rumbo new spec'"))
+    for spec in specs:
+        text = spec.read_text(encoding="utf-8")
+        rel = spec.relative_to(p.root).as_posix()
+        results.append(
+            Result(f"{rel}: complete", not is_template(text), "still has the template mark")
         )
-        res.append(
-            Resultado(
-                f"{rel}: criterios de aceptación", bool(seccion(t, "Criterios de aceptación"))
+        if p.at_least("mvp"):
+            results.append(
+                Result(
+                    f"{rel}: EARS requirements",
+                    _has_real_ears(text),
+                    "no requirement line with 'shall' beyond the template placeholders",
+                )
+            )
+        results.append(
+            Result(
+                f"{rel}: acceptance criteria",
+                bool(section(text, "Acceptance criteria")),
+                "section is empty",
             )
         )
     if p.llm:
-        n = _casos_eval(p)
-        res.append(
-            Resultado(
-                f"≥{MIN_CASOS_EVAL} casos reales en evals/datasets/",
-                n >= MIN_CASOS_EVAL,
-                f"hay {n} (los tagueados 'ejemplo' no cuentan)",
+        minimum = MIN_EVAL_CASES[p.rigor]
+        n = _eval_cases(p)
+        results.append(
+            Result(
+                f"≥{minimum} real cases in evals/datasets/ (rigor {p.rigor})",
+                n >= minimum,
+                f"found {n} (cases tagged 'example' do not count)",
             )
         )
-        res.append(_doc(p, "docs/evals/plan.md", "Plan de evals"))
-    return res
+        results.append(_doc(p, "docs/evals/plan.md", "Eval plan", required=p.at_least("mvp")))
+    return results
 
 
-# ---------------------------------------------------------------- G3 Modelar
-def _g3(p: Proyecto, _ejecutar: bool) -> list[Resultado]:
-    adrs = documentos_numerados(p.raiz / "docs" / "adr")
-    res = [Resultado("al menos un ADR", bool(adrs), "usa 'rumbo new adr'")]
-    hay_workflow = False
-    for a in adrs:
-        t = a.read_text(encoding="utf-8")
-        rel = a.relative_to(p.raiz).as_posix()
-        res.append(Resultado(f"{rel}: completo", not es_plantilla(t)))
-        res.append(
-            Resultado(f"{rel}: tiene fitness function", bool(seccion(t, "Fitness function")))
+# ---------------------------------------------------------------------- G3 Model
+def _contracts(p: Project) -> int:
+    text = p.read("pyproject.toml") or ""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return 0
+    contracts = data.get("tool", {}).get("importlinter", {}).get("contracts", [])
+    return len(contracts) if isinstance(contracts, list) else 0
+
+
+def _g3(p: Project, _run: bool) -> list[Result]:
+    adrs = numbered_documents(p.root / "docs" / "adr")
+    results = [Result("at least one ADR", bool(adrs), "use 'rumbo new adr'")]
+    workflow_adr = False
+    for adr in adrs:
+        text = adr.read_text(encoding="utf-8")
+        rel = adr.relative_to(p.root).as_posix()
+        results.append(
+            Result(f"{rel}: complete", not is_template(text), "still has the template mark")
         )
-        if re.search(r"workflow", t, re.I) and re.search(r"agente", t, re.I):
-            hay_workflow = True
+        has_fitness = bool(section(text, "Fitness function"))
+        results.append(
+            Result(
+                f"{rel}: fitness function",
+                has_fitness if p.at_least("production") else (has_fitness or None),
+                "section is empty (required in production; recommended before)",
+            )
+        )
+        title = text.splitlines()[1] if text.startswith("<!--") else text.splitlines()[0]
+        if re.search(r"workflow", title, re.I) and re.search(r"agent", title, re.I):
+            workflow_adr = True
     if p.llm:
-        res.append(Resultado("ADR 'workflow vs. agente'", hay_workflow))
-    res.append(_doc(p, "docs/security/threat-model.md", "Threat model"))
-    tm = p.leer("docs/security/threat-model.md") or ""
-    res.append(
-        Resultado("threat model evalúa la trifecta letal", bool(seccion(tm, "Trifecta letal")))
+        results.append(
+            Result(
+                "ADR 'workflow vs. agent'",
+                workflow_adr if p.at_least("mvp") else (workflow_adr or None),
+                "no ADR whose title mentions both 'workflow' and 'agent'",
+            )
+        )
+    tm_required = p.at_least("mvp")
+    results.append(_doc(p, "docs/security/threat-model.md", "Threat model", required=tm_required))
+    tm = p.read("docs/security/threat-model.md") or ""
+    trifecta = bool(section(tm, "Lethal trifecta"))
+    owasp = bool(section(tm, "OWASP"))
+    results.append(
+        Result(
+            "threat model: lethal trifecta assessed",
+            trifecta if tm_required else (trifecta or None),
+            "section 'Lethal trifecta' is empty",
+        )
     )
-    res.append(_doc(p, "docs/architecture/c4.md", "C4 niveles 1–2"))
-    c4 = p.leer("docs/architecture/c4.md") or ""
-    res.append(Resultado("C4 con diagramas Mermaid", c4.count("```mermaid") >= 2))
-    py = p.leer("pyproject.toml") or ""
-    res.append(
-        Resultado("contratos import-linter", py.count("[[tool.importlinter.contracts]]") >= 2)
+    results.append(
+        Result(
+            "threat model: OWASP LLM/Agentic checklist filled",
+            owasp if (tm_required and p.llm) else (owasp or None),
+            "section 'OWASP' is empty",
+        )
     )
-    ci = p.leer(".github/workflows/ci.yml") or ""
-    res.append(Resultado("CI ejecuta make check", "make check" in ci))
-    return res
+    results.append(_doc(p, "docs/architecture/c4.md", "C4 levels 1–2", required=tm_required))
+    c4 = p.read("docs/architecture/c4.md") or ""
+    results.append(
+        Result("C4 has Mermaid diagrams", c4.count("```mermaid") >= 2, "need two diagrams")
+    )
+    results.append(
+        Result(
+            "import-linter contracts", _contracts(p) >= 2, "need the layers and purity contracts"
+        )
+    )
+    ci = p.read(".github/workflows/ci.yml") or ""
+    results.append(Result("CI runs make check", "make check" in ci))
+    return results
 
 
-# ---------------------------------------------------------------- G4 Build (por PR)
-def _correr(cmd: list[str], raiz: Path) -> tuple[bool, str]:
-    proc = subprocess.run(cmd, cwd=raiz, capture_output=True, text=True, check=False)
-    salida = (proc.stdout + proc.stderr).strip().splitlines()
-    return proc.returncode == 0, "\n".join(salida[-15:])
+# ------------------------------------------------------------- G4 Build (per PR)
+def _run_cmd(cmd: list[str], root: Path) -> tuple[bool, str]:
+    proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+    lines = (proc.stdout + proc.stderr).strip().splitlines()
+    return proc.returncode == 0, "\n".join(lines[-15:])
 
 
-def _tamano_diff(raiz: Path) -> int | None:
-    for base in ("origin/main", "origin/master", "main", "master"):
+def diff_size(root: Path) -> tuple[int | None, str]:
+    """Lines added+removed since the merge base, excluding lockfiles. (None, reason) if unknown."""
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=False
+    )
+    if head.returncode != 0:
+        return None, "not a git repository or no commits yet"
+    for base in ("origin/main", "origin/master", "origin/HEAD", "@{upstream}", "main", "master"):
         mb = subprocess.run(
             ["git", "merge-base", "HEAD", base],
-            cwd=raiz,
+            cwd=root,
             capture_output=True,
             text=True,
             check=False,
         )
-        if mb.returncode == 0:
-            diff = subprocess.run(
-                ["git", "diff", "--numstat", mb.stdout.strip()],
-                cwd=raiz,
-                capture_output=True,
-                text=True,
-                check=False,
+        if mb.returncode != 0:
+            continue
+        merge_base = mb.stdout.strip()
+        if merge_base == head.stdout.strip() and base in ("main", "master"):
+            return None, f"'{base}' is HEAD itself: configure origin/main or branch first"
+        excludes = [f":(exclude){lock}" for lock in LOCKFILES]
+        diff = subprocess.run(
+            ["git", "diff", "--numstat", merge_base, "--", ".", *excludes],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        total = 0
+        for line in diff.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                total += int(parts[0]) + int(parts[1])
+        return total, base
+    return None, "no base branch found (origin/main, main, @{upstream}...)"
+
+
+def _g4(p: Project, run: bool) -> list[Result]:
+    results: list[Result] = []
+    size, info = diff_size(p.root)
+    if size is None:
+        results.append(Result("diff size measured", None, f"could not measure: {info}"))
+    else:
+        results.append(
+            Result(
+                f"small diff (≤{MAX_DIFF_LINES} lines, lockfiles excluded)",
+                size <= MAX_DIFF_LINES,
+                f"{size} lines vs {info}",
             )
-            total = 0
-            for linea in diff.stdout.splitlines():
-                partes = linea.split("\t")
-                if len(partes) >= 2 and partes[0].isdigit() and partes[1].isdigit():
-                    total += int(partes[0]) + int(partes[1])
-            return total
-    return None
+        )
+    if not run:
+        results.append(Result("sensor and make check", None, "skipped (--no-run)"))
+        return results
+    sensor = p.root / "scripts" / "check_tests_not_weakened.py"
+    ok, out = _run_cmd([sys.executable, str(sensor), "--strict"], p.root)
+    results.append(Result("no test weakened", ok, out))
+    ok, out = _run_cmd(["make", "check"], p.root)
+    results.append(Result("make check green", ok, "" if ok else out))
+    if p.at_least("production"):
+        nightly = (p.root / ".github" / "workflows" / "nightly.yml").exists()
+        results.append(Result("nightly workflow present (mutation, evals k=3)", nightly))
+    return results
 
 
-def _g4(p: Proyecto, ejecutar: bool) -> list[Resultado]:
-    res: list[Resultado] = []
-    n = _tamano_diff(p.raiz)
-    if n is not None:
-        res.append(Resultado(f"diff pequeño (≤{MAX_DIFF} líneas)", n <= MAX_DIFF, f"{n} líneas"))
-    if not ejecutar:
-        return res
-    sensor = p.raiz / "scripts" / "check_tests_not_weakened.py"
-    ok, out = _correr([sys.executable, str(sensor)], p.raiz)
-    res.append(Resultado("ningún test debilitado", ok, out))
-    ok, out = _correr(["make", "check"], p.raiz)
-    res.append(Resultado("make check en verde", ok, "" if ok else out))
-    return res
-
-
-# ---------------------------------------------------------------- G5 Operar
-def _g5(p: Proyecto, _ejecutar: bool) -> list[Resultado]:
-    res = [
-        _doc(p, "docs/ops/runbook.md", "Runbook"),
-        _doc(p, "docs/ops/slos.md", "SLOs"),
-        Resultado("Dockerfile en infra/", (p.raiz / "infra" / "Dockerfile").exists()),
-        Resultado(
-            "actualización automática de dependencias",
-            (p.raiz / ".github" / "dependabot.yml").exists() or (p.raiz / "renovate.json").exists(),
-        ),
+# -------------------------------------------------------------------- G5 Operate
+def _g5(p: Project, _run: bool) -> list[Result]:
+    ops = p.at_least("mvp")
+    results = [
+        _doc(p, "docs/ops/runbook.md", "Runbook", required=ops),
+        _doc(p, "docs/ops/slos.md", "SLOs", required=ops),
+        Result("Dockerfile in infra/", (p.root / "infra" / "Dockerfile").exists()),
     ]
-    return res
+    dependabot = (p.root / ".github" / "dependabot.yml").exists() or (
+        p.root / "renovate.json"
+    ).exists()
+    results.append(
+        Result(
+            "automatic dependency updates",
+            dependabot if ops else (dependabot or None),
+            "no .github/dependabot.yml or renovate.json (not generated for prototype)",
+        )
+    )
+    if p.at_least("production"):
+        ci = p.read(".github/workflows/ci.yml") or ""
+        results.append(Result("SBOM generated in CI", "sbom" in ci.lower()))
+    return results
 
 
 GATES: dict[str, Gate] = {
     "G1": Gate(
         "G1",
-        "R — Reconocer",
+        "R — Recognize",
         (
-            "Brief escrito primero por el humano",
-            "Problema validado con ≥5 usuarios o datos reales",
-            "Métrica de éxito y criterio de abandono escritos",
-            "Prototipos solo en spikes/",
+            Item("Brief written first by the human"),
+            Item("Problem validated with ≥5 users or real data"),
+            Item("Success metric and abandonment criterion written down"),
+            Item("Prototypes only in spikes/"),
+            Item(
+                "LLM products: feasibility test with 20–30 real questions run by hand",
+                llm_only=True,
+            ),
         ),
         (_g1,),
     ),
     "G2": Gate(
         "G2",
-        "U — Unificar",
+        "U — Unify",
         (
-            "PRD con no-objetivos",
-            "Specs EARS con criterios ejecutables, firmadas por el humano",
-            "RNF con números (p95, costo por solicitud, disponibilidad)",
-            "Cada requisito tiene un test o eval planeado",
-            "Plan de evals y dataset de preguntas reales (si hay LLM)",
+            Item("PRD with explicit non-goals", "mvp"),
+            Item(
+                "Specs with EARS patterns and executable acceptance criteria, signed by the human",
+                "mvp",
+            ),
+            Item("Prototype: a criteria list per feature is enough", max_rigor="mvp"),
+            Item(
+                "Non-functional requirements with numbers (p95, cost per request, availability)",
+                "mvp",
+            ),
+            Item("Every requirement has a planned test or eval"),
+            Item("Eval plan and dataset of real questions", "mvp", llm_only=True),
+            Item("Requirement → test traceability for every feature", "production"),
         ),
         (_g2,),
     ),
     "G3": Gate(
         "G3",
-        "M — Modelar",
+        "M — Model",
         (
-            "ADR workflow vs. agente (si hay LLM)",
-            "Contratos de import-linter en CI",
-            "C4 niveles 1–2",
-            "Threat model con trifecta y OWASP LLM/Agentic revisado por el humano",
-            "Herramientas tipadas y de mínimo privilegio",
+            Item("ADR 'workflow vs. agent' decided by the human", "mvp", llm_only=True),
+            Item("Import-linter contracts enforced in CI"),
+            Item("C4 levels 1–2", "mvp"),
+            Item(
+                "Threat model with lethal trifecta and OWASP LLM/Agentic reviewed by the human",
+                "mvp",
+            ),
+            Item("Tools typed and least-privilege", llm_only=True),
+            Item("Every significant ADR has a fitness function", "production"),
         ),
         (_g3,),
     ),
     "G4": Gate(
         "G4",
-        "B — Build con ANCLA (por PR)",
+        "B — Build with ANCLA (per PR)",
         (
-            "Test en rojo previo, revisado por el humano",
-            "Plan aprobado antes de codificar",
-            "CI verde (con evals smoke si hay LLM)",
-            "Ningún test borrado o debilitado",
-            "Diff pequeño; commits estructurales y de comportamiento separados",
-            "Dependencias nuevas verificadas (rumbo verify-dep)",
-            "Segundo modelo o sesión limpia revisó el diff",
-            "Prueba de explicación: el humano explica el cambio en 3 frases sin leer el resumen",
+            Item("Failing test written first and reviewed by the human"),
+            Item("Plan approved before coding"),
+            Item("CI green (with smoke evals when there is an LLM)"),
+            Item("No test deleted or weakened"),
+            Item("Small diff; structural and behavioral commits separated"),
+            Item("New dependencies verified (rumbo verify-dep) and approved"),
+            Item("Second review by a clean session or another model", "mvp"),
+            Item(
+                "Explanation test: the human explains the change in 3 sentences, "
+                "without reading the summary",
+                "mvp",
+            ),
+            Item("Two reviewers on critical areas; mental models documented", "production"),
         ),
         (_g4,),
     ),
     "G5": Gate(
         "G5",
-        "O — Operar, Observar, Optimizar",
+        "O — Operate, Observe, Optimize",
         (
-            "Rollback ensayado",
-            "SLOs y alertas activas",
-            "Trazas GenAI con costo (si hay LLM)",
-            "Límites de costo configurados",
-            "Runbook con una entrada por modo de fallo",
-            "Ritual semanal de revisión de trazas agendado",
-            "Actualización automática de dependencias",
+            Item("Prototype: runs locally, logs are enough", max_rigor="mvp"),
+            Item("Rollback rehearsed", "mvp"),
+            Item("SLOs and alerts active", "mvp"),
+            Item("GenAI traces with cost", "mvp", llm_only=True),
+            Item("Cost limits configured", "mvp", llm_only=True),
+            Item("Runbook with one entry per failure mode", "mvp"),
+            Item("Weekly trace-review ritual scheduled", "mvp", llm_only=True),
+            Item("Automatic dependency updates", "mvp"),
+            Item("Canary or feature flags per cohort; SLOs with error budget", "production"),
         ),
         (_g5,),
     ),
 }
 
 
-def evaluar(codigo: str, proyecto: Proyecto, ejecutar: bool = True) -> tuple[Gate, list[Resultado]]:
-    gate = GATES[codigo.upper()]
-    resultados: list[Resultado] = []
-    for chequeo in gate.automaticos:
-        resultados.extend(chequeo(proyecto, ejecutar))
-    return gate, resultados
+def evaluate(code: str, project: Project, run: bool = True) -> tuple[Gate, list[Result]]:
+    gate = GATES[code.upper()]
+    results: list[Result] = []
+    for check in gate.checks:
+        results.extend(check(project, run))
+    return gate, results
 
 
-def informe(gate: Gate, resultados: list[Resultado]) -> tuple[str, bool]:
-    ok = all(r.ok for r in resultados)
-    lineas = [f"🛑 Gate {gate.codigo} · {gate.fase}", "", "Chequeos automáticos (sensores):"]
-    for r in resultados:
-        marca = "✅" if r.ok else "❌"
-        lineas.append(f"  {marca} {r.descripcion}")
-        if r.detalle and not r.ok:
-            lineas += [f"       {d}" for d in r.detalle.splitlines()]
-    lineas += ["", "Checklist humano (lo firma el humano, no el agente):"]
-    lineas += [f"  [ ] {m}" for m in gate.manuales]
-    lineas += [
-        "",
-        "Automáticos: " + ("en verde." if ok else "HAY FALLOS: el gate no puede pasar."),
-    ]
-    return "\n".join(lineas), ok
+def report(gate: Gate, results: list[Result], project: Project) -> tuple[str, bool]:
+    failed = [r for r in results if r.ok is False]
+    unmeasured = [r for r in results if r.ok is None]
+    lines = [f"🛑 Gate {gate.code} · {gate.phase} · rigor {project.rigor}", ""]
+    lines.append("Automatic checks (sensors):")
+    for r in results:
+        mark = "✅" if r.ok else ("⚠️ " if r.ok is None else "❌")
+        lines.append(f"  {mark} {r.description}")
+        if r.detail and not r.ok:
+            lines += [f"       {d}" for d in r.detail.splitlines()]
+    lines += ["", "Human checklist (signed by the human, never by the agent):"]
+    lines += [f"  [ ] {item}" for item in gate.checklist(project)]
+    lines.append("")
+    if failed:
+        lines.append(f"Automatic checks: {len(failed)} FAILED. The gate cannot pass yet.")
+    elif unmeasured:
+        lines.append(
+            f"Automatic checks: green, but {len(unmeasured)} could not be measured or are "
+            "recommendations. GATE NOT SIGNED: the human ticks the checklist."
+        )
+    else:
+        lines.append("Automatic checks: green. GATE NOT SIGNED: the human ticks the checklist.")
+    lines.append(f'Record the signature with: rumbo decision "{gate.code} signed" --why "..."')
+    return "\n".join(lines), not failed
