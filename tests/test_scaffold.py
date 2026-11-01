@@ -256,3 +256,17 @@ def test_config_round_trips_through_project(llm_project: Path) -> None:
             Config(name="XM Agent", package="xm_agent", llm=True, provider="anthropic", rigor="mvp")
         ).keys()
     )
+
+
+def test_pre_commit_rev_bumps_are_not_drift(llm_project: Path) -> None:
+    from rumbo.scaffold import update, update_diff
+
+    config = llm_project / ".pre-commit-config.yaml"
+    original = config.read_text()
+    bumped = original.replace("rev: v", "rev: v9.", 1)
+    assert bumped != original
+    config.write_text(bumped)
+    assert ".pre-commit-config.yaml" not in update_diff(Project.load(llm_project), llm_project)
+    rep = update(Project.load(llm_project), llm_project)
+    assert ".pre-commit-config.yaml" not in rep.differs
+    config.write_text(original)

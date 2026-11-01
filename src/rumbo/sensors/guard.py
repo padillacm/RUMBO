@@ -144,7 +144,8 @@ def check_edit(tool_name: str, tool_input: dict[str, Any], root: Path) -> str | 
         return (
             f"{rel} is protected by AGENTS.md (hard rules): the agent does not edit the "
             "Makefile, pyproject.toml, CI, infra/, hooks, the sensors or .env files. "
-            "Explain the change you need and ask the human to make it."
+            "Explain the change you need and ask the human to make it (why: README.md, "
+            "section 'Working with the agent')."
         )
     if _removes_mark(tool_name, tool_input, root / rel):
         return (

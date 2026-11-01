@@ -209,8 +209,9 @@ def _g3(p: Project, _run: bool) -> list[Result]:
     tm_required = p.at_least("mvp")
     results.append(_doc(p, "docs/security/threat-model.md", "Threat model", required=tm_required))
     tm = p.read("docs/security/threat-model.md") or ""
-    trifecta = bool(section(tm, "Lethal trifecta"))
-    owasp = bool(section(tm, "OWASP"))
+    # Section content counts only once the human removed the template mark.
+    trifecta = not is_template(tm) and bool(section(tm, "Lethal trifecta"))
+    owasp = not is_template(tm) and bool(section(tm, "OWASP"))
     results.append(
         Result(
             "threat model: lethal trifecta assessed",
@@ -228,7 +229,13 @@ def _g3(p: Project, _run: bool) -> list[Result]:
     results.append(_doc(p, "docs/architecture/c4.md", "C4 levels 1–2", required=tm_required))
     c4 = p.read("docs/architecture/c4.md") or ""
     results.append(
-        Result("C4 has Mermaid diagrams", c4.count("```mermaid") >= 2, "need two diagrams")
+        Result(
+            "C4 has Mermaid diagrams",
+            (not is_template(c4) and c4.count("```mermaid") >= 2)
+            if tm_required
+            else ((not is_template(c4) and c4.count("```mermaid") >= 2) or None),
+            "two diagrams, in a document whose template mark was removed",
+        )
     )
     results.append(
         Result(
@@ -461,7 +468,8 @@ def evaluate(code: str, project: Project, run: bool = True) -> tuple[Gate, list[
 def report(gate: Gate, results: list[Result], project: Project) -> tuple[str, bool]:
     failed = [r for r in results if r.ok is False]
     unmeasured = [r for r in results if r.ok is None]
-    lines = [f"🛑 Gate {gate.code} · {gate.phase} · rigor {project.rigor}", ""]
+    head = "🛑" if failed else "✅"
+    lines = [f"{head} Gate {gate.code} · {gate.phase} · rigor {project.rigor}", ""]
     lines.append("Automatic checks (sensors):")
     for r in results:
         mark = "✅" if r.ok else ("⚠️ " if r.ok is None else "❌")
@@ -476,9 +484,11 @@ def report(gate: Gate, results: list[Result], project: Project) -> tuple[str, bo
     elif unmeasured:
         lines.append(
             f"Automatic checks: green, but {len(unmeasured)} could not be measured or are "
-            "recommendations. GATE NOT SIGNED: the human ticks the checklist."
+            "recommendations. GATE NOT SIGNED yet: the human ticks the checklist above."
         )
     else:
-        lines.append("Automatic checks: green. GATE NOT SIGNED: the human ticks the checklist.")
+        lines.append(
+            "Automatic checks: green. GATE NOT SIGNED yet: the human ticks the checklist above."
+        )
     lines.append(f'Record the signature with: rumbo decision "{gate.code} signed" --why "..."')
     return "\n".join(lines), not failed

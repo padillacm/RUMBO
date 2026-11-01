@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -458,3 +459,85 @@ def test_trace_ignores_nested_items_and_lookalikes(simple_project: Path) -> None
     assert "shall b \\| c" in render(reqs)
     spec.unlink()
     (simple_project / "tests" / "unit" / "test_edge.py").unlink()
+
+
+def test_gate_header_is_green_when_no_check_failed(simple_project: Path) -> None:
+    from rumbo.gates import report
+
+    gate, results = evaluate("G4", Project.load(simple_project), run=False)
+    text, ok = report(gate, results, Project.load(simple_project))
+    assert ok and text.startswith("✅ Gate G4") and "NOT SIGNED" in text
+    gate, results = evaluate("G2", Project.load(simple_project))  # no spec yet: a failure
+    text, ok = report(gate, results, Project.load(simple_project))
+    assert not ok and text.startswith("🛑 Gate G2")
+
+
+def test_gate_g3_ignores_sections_of_untouched_templates(llm_project: Path) -> None:
+    _, results = evaluate("G3", Project.load(llm_project))
+    by_desc = {r.description: r for r in results}
+    assert by_desc["threat model: lethal trifecta assessed"].ok is False  # mark still there (mvp)
+    assert by_desc["threat model: OWASP LLM/Agentic checklist filled"].ok is False
+    assert by_desc["C4 has Mermaid diagrams"].ok is False
+    tm = llm_project / "docs" / "security" / "threat-model.md"
+    original = tm.read_text()
+    tm.write_text("\n".join(original.splitlines()[1:]) + "\n")  # human removes the mark
+    _, results = evaluate("G3", Project.load(llm_project))
+    by_desc = {r.description: r for r in results}
+    assert by_desc["threat model: lethal trifecta assessed"].ok is True
+    tm.write_text(original)
+
+
+def test_no_arguments_prints_help_and_a_hint(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main([]) == 2
+    out = capsys.readouterr().out
+    assert "rumbo init" in out and "rumbo doctor" in out
+
+
+def test_doctor_warns_about_placeholders(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (simple_project / "uv.lock").write_text("")
+    main(["doctor", "--dir", str(simple_project)])
+    out = capsys.readouterr().out
+    assert "@your-handle placeholder" in out and "<security contact> placeholder" in out
+    (simple_project / "uv.lock").unlink()
+
+
+def test_tour_falls_back_to_a_known_base(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rumbo.tour import resolve_base
+
+    identity = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@x",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@x",
+    }
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", *args],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            env={**os.environ, **identity},
+        )
+
+    git("init", "-q", "-b", "main")
+    (tmp_path / "a.txt").write_text("a")
+    git("add", "a.txt")
+    git("commit", "-qm", "chore: a")
+    git("checkout", "-qb", "feature")
+    (tmp_path / "b.txt").write_text("b")
+    git("add", "b.txt")
+    git("commit", "-qm", "feat: b")
+    assert resolve_base("origin/main", tmp_path) == "main"  # no remote: falls back to main
+    assert resolve_base("nope", tmp_path) == "main"
+    assert main(["tour", "--dir", str(tmp_path)]) == 0
+    captured = capsys.readouterr()
+    assert "using 'main'" in captured.err and "feat: b" in captured.out
+    git("branch", "-D", "main")
+    assert resolve_base("origin/main", tmp_path) is None
+    assert main(["tour", "--dir", str(tmp_path)]) == 2
+    assert "Pass one" in capsys.readouterr().err

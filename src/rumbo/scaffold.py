@@ -415,6 +415,20 @@ def scaffold(cfg: Config, dest: Path, force: bool = False) -> Report:
     return report
 
 
+_REV_LINE = re.compile(r"^(\s*rev:\s*).*$", re.M)
+
+
+def _comparable(rel: str, text: str) -> str:
+    """Text used to decide whether a project file drifted from its template.
+
+    `pre-commit autoupdate` (run by `rumbo init`) rewrites the `rev:` lines of
+    .pre-commit-config.yaml on purpose: they are not drift.
+    """
+    if rel == ".pre-commit-config.yaml":
+        return _REV_LINE.sub(r"\1<rev>", text)
+    return text
+
+
 def is_framework_owned(rel: str) -> bool:
     return rel in FRAMEWORK_OWNED or rel.startswith(FRAMEWORK_OWNED_PREFIXES)
 
@@ -440,7 +454,8 @@ def update(project: Project, dest: Path) -> Report:
             elif is_harness_file(rel):
                 report.differs.append(f"{rel} (missing)")
             continue
-        if target.read_text(encoding="utf-8") == new_text:
+        current = target.read_text(encoding="utf-8")
+        if current == new_text or _comparable(rel, current) == _comparable(rel, new_text):
             continue
         if is_framework_owned(rel):
             _write(target, item, rel)
@@ -465,7 +480,7 @@ def update_diff(project: Project, dest: Path) -> str:
         if rel in MERGEABLE or not is_harness_file(rel):
             continue
         current = target.read_text(encoding="utf-8") if target.exists() else ""
-        if current == new_text:
+        if _comparable(rel, current) == _comparable(rel, new_text):
             continue
         # Same rule as update(): owned files are replaced; .claude/ files only when missing.
         owned = is_framework_owned(rel) or (not target.exists() and rel.startswith(".claude/"))

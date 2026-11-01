@@ -146,6 +146,26 @@ def _git(args: list[str], root: Path) -> str:
     return proc.stdout
 
 
+BASE_CANDIDATES = ("origin/main", "origin/master", "origin/HEAD", "main", "master")
+
+
+def resolve_base(base: str | None, root: Path) -> str | None:
+    """The given base if git knows it; otherwise the first known default; None if nothing fits."""
+    candidates = [base] if base else []
+    candidates += [c for c in BASE_CANDIDATES if c != base]
+    for candidate in candidates:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--verify", "-q", f"{candidate}^{{commit}}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return candidate
+    return None
+
+
 def load_commits(base: str, head: str, root: Path) -> list[Commit]:
     log = _git(["log", "--reverse", "--format=%H%x1f%s%x1f%b%x1f%an%x1e", f"{base}..{head}"], root)
     commits: list[Commit] = []

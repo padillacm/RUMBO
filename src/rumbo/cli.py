@@ -48,7 +48,7 @@ from rumbo.scaffold import (
     valid_package,
 )
 from rumbo.sensors import check_tests_not_weakened
-from rumbo.tour import load_commits, render_markdown
+from rumbo.tour import load_commits, render_markdown, resolve_base
 from rumbo.trace import render as render_trace
 from rumbo.trace import trace, uncovered
 
@@ -143,6 +143,19 @@ def cmd_init(args: argparse.Namespace) -> int:
             "--force: existing files are overwritten (a .bak copy is kept); "
             "pyproject.toml and .gitignore are merged, never replaced.\n"
         )
+    interactive = sys.stdin.isatty() and not args.yes
+    existing = [p.name for p in dest.iterdir() if p.name != ".git"] if dest.is_dir() else []
+    if interactive and existing and not args.force:
+        shown = ", ".join(sorted(existing)[:6]) + (", ..." if len(existing) > 6 else "")
+        answer = _ask(
+            f"This directory already has {len(existing)} entries ({shown}). Existing files are "
+            "kept untouched (pyproject.toml and .gitignore are merged). Continue?",
+            "yes",
+            choices=["yes", "no"],
+        )
+        if answer != "yes":
+            print("Nothing written.")
+            return USAGE_ERROR
     rep = scaffold(cfg, dest, force=args.force)
     if not args.no_install:
         install(cfg, dest, rep)
@@ -277,7 +290,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if n_lines > 100:
         problems.append(f"AGENTS.md has {n_lines} lines (>100): it is a map, not a manual")
     if not (root / "uv.lock").exists():
-        problems.append("missing uv.lock (CI runs 'uv sync --locked'): run 'uv lock'")
+        problems.append(
+            "missing uv.lock (CI runs 'uv sync --locked'): run the 'uv add' lines rumbo init "
+            "printed (or 'rumbo init --force' without --no-install), then 'uv lock'"
+        )
+    warnings: list[str] = []
+    codeowners = project.read(".github/CODEOWNERS") or ""
+    if "@your-handle" in codeowners:
+        warnings.append(".github/CODEOWNERS still has the @your-handle placeholder")
+    security = project.read("SECURITY.md") or ""
+    if "<security contact" in security:
+        warnings.append("SECURITY.md still has the <security contact> placeholder")
+    for warning in warnings:
+        print(f"⚠️  {warning}")
     if project.harness_version and project.harness_version != __version__:
         print(
             f"⚠️  harness version {project.harness_version} differs from the CLI ({__version__}): "
@@ -475,13 +500,21 @@ def cmd_verify_dep(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------------- tour
 def cmd_tour(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
+    base = resolve_base(args.base, root)
+    if base is None:
+        return _err(
+            f"base {args.base!r} is not a known ref and none of the defaults (origin/main, main, "
+            "master...) exists. Pass one: rumbo tour <branch-or-commit>"
+        )
+    if base != args.base:
+        print(f"(base {args.base!r} not found; using {base!r})", file=sys.stderr)
     try:
-        commits = load_commits(args.base, args.head, root)
+        commits = load_commits(base, args.head, root)
     except RuntimeError as exc:
         return _err(str(exc))
     if not commits:
-        return _err(f"no commits in {args.base}..{args.head}")
-    text = render_markdown(commits, args.base, args.head, since=args.since)
+        return _err(f"no commits in {base}..{args.head}")
+    text = render_markdown(commits, base, args.head, since=args.since)
     if args.out:
         out = Path(args.out)
         if not out.is_absolute():
@@ -711,7 +744,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Builds a per-commit review guide from the diff: risk hotspots, reading "
         "order, verification commands and explanation-test questions.",
     )
-    p.add_argument("base", nargs="?", default="origin/main", help="base ref (default: origin/main)")
+    p.add_argument(
+        "base",
+        nargs="?",
+        default="origin/main",
+        help="base ref (default: origin/main, falling back to origin/master, main, master)",
+    )
     p.add_argument("--head", default="HEAD", help="head ref (default: HEAD)")
     p.add_argument("--since", help="previous head of the same series, for git range-diff")
     p.add_argument("--out", help="write the guide to this file instead of stdout")
@@ -769,7 +807,12 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "check-tests":
         return check_tests_not_weakened.main(argv[1:])
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    if not argv:
+        parser.print_help()
+        print("\nNew project? Start with: rumbo init    Existing one? Check it with: rumbo doctor")
+        return USAGE_ERROR
+    args = parser.parse_args(argv)
     if args.command == "init" and args.package and not valid_package(args.package):
         return _err(f"invalid package name {args.package!r}; use snake_case")
     return args.func(args)
