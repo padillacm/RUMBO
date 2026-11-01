@@ -1,2 +1,3 @@
-# Changes to the sensors, CI and the method need a human maintainer's review.
+# Every change needs a human maintainer's review (the harness, the templates and the method
+# are all sensors or guides for other people's projects).
 *   @padillacm

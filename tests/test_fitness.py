@@ -32,6 +32,14 @@ def test_cli_has_no_runtime_dependencies() -> None:
     assert foreign == {}
 
 
+def test_version_is_the_same_everywhere() -> None:
+    """Release workflow: tag == pyproject == rumbo.__version__; CONTRIBUTING asks for both bumps."""
+    import rumbo
+
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["version"] == rumbo.__version__
+
+
 def test_every_adr_has_a_fitness_function_section() -> None:
     adrs = sorted((ROOT / "docs" / "adr").glob("0*.md"))
     assert len(adrs) >= 5
