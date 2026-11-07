@@ -164,8 +164,18 @@ lint rule, contract) or a guide, in addition to fixing the code.
 "never remove the template mark"; nothing in a prompt guarantees it. RUMBO wires
 `scripts/rumbo_guard.py` (the guard hook) as Claude Code `PreToolUse` and `Stop` hooks
 (`RUMBO.md`, Part A, step A6): a blocked call returns the reason to the agent, which has to ask
-the human. The hook never binds the human, who edits by hand or overrides it locally. This is Böckeler's sensor/guide split
-applied to the harness itself, and the cheapest place to start when a mistake repeats.
+the human. The hook never binds the human, who edits by hand or overrides it locally. The same
+script runs as git `pre-commit` and `commit-msg` hooks for any other agent (ADR-0008), deciding
+the actor from environment markers and a per-clone `rumbo.human` declaration. This is
+Böckeler's sensor/guide split applied to the harness itself, and the cheapest place to start
+when a mistake repeats.
+
+**A lane for bugs.** The failure mode of spec-driven frameworks is the fixed cost: when a
+five-line fix costs the same ritual as a subsystem, people route around the framework and the
+specs drift. ANCLA keeps a fix lane (ADR-0009): red regression test first, minimal change,
+diff under 150 lines, commits typed `fix:`/`test:`/`refactor:`, no new dependency, one approval
+at the PR. `rumbo gate G4` recognises the lane from the commit types and adds those checks; a
+`feat:` commit or a breaking marker returns the PR to the normal rules.
 
 ### 2.5 O — Operate, Observe, Optimize
 1. **CI/CD:** trunk-based with short branches; automatic deploy to staging and manual

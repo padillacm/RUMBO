@@ -40,8 +40,9 @@
 - If something in this file clashes with the environment (a tool does not install, an option
   changed), say so and propose the closest alternative; do not hide it.
 - Several of these rules are enforced by Claude Code hooks (`.claude/settings.json` →
-  `scripts/rumbo_guard.py`). A blocked tool call means "ask the human", never "find another
-  way".
+  `scripts/rumbo_guard.py`) and, for any other agent, by the same script as git `pre-commit`
+  and `commit-msg` hooks. A blocked tool call or commit means "ask the human", never "find
+  another way".
 
 ---
 
@@ -304,6 +305,17 @@ rule can be overridden in `.claude/settings.local.json`. `settings.json` also pr
 harness commands (the check runner, pytest, ruff, read-only git) and denies `curl`/`wget` and
 reading `.env`.
 
+The same script is also a **git hook** (ADR-0008), installed by `rumbo init` through
+pre-commit (`pre-commit` and `commit-msg`), so an agent running in Cursor, Codex, Gemini CLI
+or Aider meets the same rules when it commits. The actor is an agent when one of the
+environment markers in `[tool.rumbo].agent_env` is set (default: `CLAUDECODE`, `GEMINI_CLI`,
+`CURSOR_AGENT`, `CODEX_SANDBOX_NETWORK_DISABLED`), the human when `git config rumbo.human` is
+`true` in the clone (`rumbo init` sets it; `rumbo doctor` warns when it is missing), and
+unknown otherwise, which counts as an agent. For an agent the hooks refuse a staged protected
+file, a staged document whose template mark is gone, and a commit message carrying
+`[tests-change-approved]`. The block is late (at commit) and an agent that unsets its own
+marker is breaking a rule, not defeating a sensor: CI remains the binding layer.
+
 ### A7. Evals skeleton (LLM products only)
 
 `evals/run_evals.py`:
@@ -449,6 +461,14 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
   closes, log how many sessions it took (`rumbo decision "F-000N closed" --why "1 session"`);
   `rumbo metrics` turns those decisions, git and the evals into the team's numbers (sessions
   per spec, gates signed, deploys and incidents, requirements with a test, latest eval run).
+- **Fix lane** (ADR-0009): a defect in existing behaviour does not need a spec or two pauses.
+  `/rumbo-fix <bug>` writes the failing regression test first (its docstring names the bug and
+  the requirement when one exists), makes the minimal change, keeps the diff under 150 lines
+  and the commits typed `fix:`/`test:`/`refactor:`, adds no dependency, and stops once at the
+  PR. `rumbo gate G4` recognises the lane from the commit types (every commit non-`feat`, no
+  `!`) and adds three checks: regression test added, diff ≤ 150, no new runtime dependency. A
+  change to a data contract, a public signature or a spec requirement is a feature: back to
+  ANCLA with a spec. G4 cannot see semantic drift; the reviewer still reads the spec.
 - 🛑 **Gate G4 (per PR):** CI green, no test weakened, dependencies verified, and the human can
   explain the change in 3 sentences without reading your summary.
 
@@ -621,7 +641,7 @@ What `rumbo init` and `rumbo gate` do per rigor:
 | Nightly | — | mutation (+ live evals) | mutation + live evals with k=3 |
 | Dependabot | — | weekly, 7-day cooldown | same |
 | Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases; budget + telemetry wired (G5) | + fitness function per ADR, nightly, SBOM, every requirement traced to a test (G4); 100 cases |
-| Hooks | `.claude/settings.json` + `scripts/rumbo_guard.py` | same | same |
+| Hooks | `.claude/settings.json` + `scripts/rumbo_guard.py`, also as git hooks via pre-commit | same | same |
 
 What matters is the **worst plausible impact**, not the size of the code. An agent that hands
 out figures used in commercial decisions is, at the very least, an "MVP with production

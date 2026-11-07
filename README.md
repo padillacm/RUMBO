@@ -151,7 +151,8 @@ Gates print the automatic checks and a checklist that **only the human signs**
 (`rumbo decision "G4 signed"`).
 
 Slash commands installed in `.claude/commands/`: `/rumbo-r`, `/rumbo-u`, `/rumbo-m`,
-`/rumbo-ancla`, `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`, `/rumbo-tour`.
+`/rumbo-ancla`, `/rumbo-fix` (the fix lane: red regression test, minimal change, diff ≤ 150,
+one approval), `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`, `/rumbo-tour`.
 
 ## CLI reference
 
@@ -235,7 +236,16 @@ the harness commands (the check runner, pytest, ruff, read-only git) and wires
   `scripts/rumbo_check.py --brief` and refuses to finish while it is red. If the environment is
   broken (exit 3) it tells the agent to report to you instead of repairing it.
 
-You are never blocked: edits by hand skip the hook. To relax a rule for yourself, keep the
+**Any other agent** (Cursor, Codex, Gemini CLI, Aider…) meets the same rules at commit time:
+`rumbo init` installs the guard as git `pre-commit` and `commit-msg` hooks through pre-commit.
+They refuse a staged protected file, a removed template mark and the approval mark when the
+actor is an agent (an environment marker from `[tool.rumbo].agent_env` is set, or nobody has
+declared the clone human). You declare yourself once per clone with
+`git config rumbo.human true`; `rumbo init` does it where it runs and `rumbo doctor` reminds
+you elsewhere.
+
+You are never blocked: edits by hand skip the Claude Code hook, and your commits pass the git
+hooks once the clone is declared. To relax a rule for yourself, keep the
 project hooks and add a `.claude/settings.local.json` (git-ignored) that, for example, turns
 them off while you refactor the harness itself:
 
