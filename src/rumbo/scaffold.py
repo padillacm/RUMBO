@@ -22,6 +22,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
 SENSOR_FILE = PACKAGE_DIR / "sensors" / "check_tests_not_weakened.py"
 GUARD_FILE = PACKAGE_DIR / "sensors" / "guard.py"
+CHECK_FILE = PACKAGE_DIR / "sensors" / "check.py"
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ FRAMEWORK_OWNED = (
     "RUMBO.md",
     "scripts/check_tests_not_weakened.py",
     "scripts/rumbo_guard.py",
+    "scripts/rumbo_check.py",
     "docs/adr/0000-template.md",
     "specs/0000-template.md",
     "docs/postmortems/0000-template.md",
@@ -104,6 +106,7 @@ HARNESS_PREFIXES = (
     "SECURITY.md",
     ".github/",
     ".pre-commit-config.yaml",
+    ".gitattributes",
     ".claude/",
     ".env.example",
     "infra/",
@@ -316,6 +319,7 @@ def plan_files(cfg: Config) -> dict[str, str | Path]:
             plan[target] = src
     plan["scripts/check_tests_not_weakened.py"] = SENSOR_FILE
     plan["scripts/rumbo_guard.py"] = GUARD_FILE
+    plan["scripts/rumbo_check.py"] = CHECK_FILE
     plan["RUMBO.md"] = rumbo_md()
     return plan
 
@@ -484,8 +488,36 @@ def update(project: Project, dest: Path) -> Report:
             report.updated.append(rel)
         elif rel not in MERGEABLE and is_harness_file(rel):
             report.differs.append(rel)
+    _add_checks_table(dest / "pyproject.toml", _content(plan_files(cfg)["pyproject.toml"]), report)
     _bump_harness_version(dest / "pyproject.toml")
     return report
+
+
+_CHECKS_HEADER = "[tool.rumbo.checks]"
+
+
+def _add_checks_table(pyproject: Path, template: str, report: Report) -> None:
+    """Appends the rendered ``[tool.rumbo.checks]`` to a project generated before ADR-0006.
+
+    The runner `rumbo update` copies in needs the table; without it every Stop hook would
+    report a broken environment. The steps are only added, never replaced.
+    """
+    current = pyproject.read_text(encoding="utf-8")
+    try:
+        rumbo = tomllib.loads(current).get("tool", {}).get("rumbo")
+    except tomllib.TOMLDecodeError:
+        return
+    if not isinstance(rumbo, dict) or "checks" in rumbo:
+        return
+    block = next(
+        (text for root, text in _tool_blocks(template) if text.startswith(_CHECKS_HEADER)), None
+    )
+    if block is None:
+        return
+    merged = current.rstrip("\n") + "\n\n# --- Added by rumbo update ---\n" + block
+    tomllib.loads(merged)  # raises if the result is not valid TOML
+    _write_text(pyproject, merged)
+    report.merged.append(f"pyproject.toml (+{_CHECKS_HEADER})")
 
 
 def update_diff(project: Project, dest: Path) -> str:
@@ -558,4 +590,4 @@ def install(cfg: Config, dest: Path, report: Report) -> None:
         _run(["uv", "run", "pre-commit", "autoupdate"], dest, report)
         _run(["uv", "run", "pre-commit", "install"], dest, report)
     else:
-        print("WARNING: not a git repository; run 'git init' and then 'make hooks'.")
+        print("WARNING: not a git repository; run 'git init', then 'uv run pre-commit install'.")

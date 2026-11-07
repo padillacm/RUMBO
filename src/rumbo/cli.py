@@ -174,13 +174,13 @@ def cmd_init(args: argparse.Namespace) -> int:
                 if cfg.llm
                 else ""
             )
-            + "\n  2. uv run pre-commit autoupdate && make hooks\n"
-            "  3. make check            # must be green\n"
+            + "\n  2. uv run pre-commit autoupdate && uv run pre-commit install\n"
+            "  3. uv run python scripts/rumbo_check.py    # must be green\n"
         )
     else:
         print(
             "\nNext steps (A8):\n"
-            "  1. make check            # must be green\n"
+            "  1. uv run python scripts/rumbo_check.py    # must be green\n"
             "  2. git add -A && git commit -m 'chore: initial RUMBO harness'\n"
             '  3. Open Claude Code and say: "Read AGENTS.md and RUMBO.md; let\'s start phase R".'
         )
@@ -736,7 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-run",
         action="store_true",
-        help="G4: skip the sensor and 'make check' (reported as unmeasured)",
+        help="G4: skip the sensor and 'rumbo check' (reported as unmeasured)",
     )
     p.set_defaults(func=cmd_gate)
 

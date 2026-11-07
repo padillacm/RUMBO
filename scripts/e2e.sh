@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end check: mounts a project with `rumbo init` and requires `make check` to be green.
+# End-to-end check: mounts a project with `rumbo init` and requires `scripts/rumbo_check.py`
+# (ADR-0006) to be green, with `make check` kept as its alias.
 # Usage: scripts/e2e.sh "<rumbo init flags>"   (default: LLM + mvp)
 set -euo pipefail
 FLAGS=${1:-"--llm --provider anthropic --rigor mvp"}
@@ -13,18 +14,23 @@ git config user.name "rumbo e2e"
 git config commit.gpgsign false
 # shellcheck disable=SC2086
 uv run --project "$ROOT" rumbo init --yes --name "Demo E2E" --package demo_e2e $FLAGS
-make check
+uv run python scripts/rumbo_check.py
+make check                                        # the Makefile alias still works where make exists
+uv run --project "$ROOT" rumbo check --dir .      # the CLI runs the same module
 uv run --project "$ROOT" rumbo doctor
 git add -A
 git commit -qm "chore: initial RUMBO harness"
 uv run python scripts/check_tests_not_weakened.py --base HEAD
+# an unknown step is a broken environment (exit 3), never exit 2 (block in Claude Code hooks)
+rc=0; uv run python scripts/rumbo_check.py nosuchstep || rc=$?; test "$rc" -eq 3
 # the guard hook blocks edits to protected files (exit 2) and lets ordinary ones through
 rc=0; echo '{"tool_name":"Edit","tool_input":{"file_path":"Makefile","old_string":"a","new_string":"b"}}' | uv run python scripts/rumbo_guard.py pre-tool || rc=$?; test "$rc" -eq 2
+rc=0; echo '{"tool_name":"Edit","tool_input":{"file_path":"scripts/rumbo_check.py","old_string":"a","new_string":"b"}}' | uv run python scripts/rumbo_guard.py pre-tool || rc=$?; test "$rc" -eq 2
 echo "x: ; echo" >> Makefile; rc=0; echo '{"tool_name":"Bash","tool_input":{"command":"true"}}' | uv run python scripts/rumbo_guard.py post-tool || rc=$?; test "$rc" -eq 2; git checkout -- Makefile
-echo '{"tool_name":"Bash","tool_input":{"command":"make check"}}' | uv run python scripts/rumbo_guard.py pre-tool
+echo '{"tool_name":"Bash","tool_input":{"command":"uv run python scripts/rumbo_check.py --brief"}}' | uv run python scripts/rumbo_guard.py pre-tool
 echo '{}' | RUMBO_GUARD_SKIP_CHECK=1 uv run python scripts/rumbo_guard.py stop
 # the harness must stay offline: no model credential in the environment
-env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY -u MISTRAL_API_KEY make check >/dev/null
+env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY -u MISTRAL_API_KEY uv run python scripts/rumbo_check.py --brief
 uv run --project "$ROOT" rumbo gate G4 --no-run >/dev/null
 uv run --project "$ROOT" rumbo update
 if echo "$FLAGS" | grep -q production; then make sbom && test -s sbom.cdx.json; fi
