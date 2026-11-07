@@ -26,6 +26,7 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,7 +42,9 @@ from rumbo.scaffold import (
     OTHER_PROVIDER,
     PROVIDERS,
     Config,
+    Detected,
     add_dev_dependencies,
+    detect_project,
     dev_dependencies,
     install,
     plan_files,
@@ -92,6 +95,21 @@ def _yes(answer: str) -> bool:
     return answer.lower() in ("y", "yes", "s", "si", "sí")
 
 
+def _detect(args: argparse.Namespace) -> Detected | None:
+    """ADR-0013: with --adopt, what the existing project looks like (the flags still win)."""
+    if not getattr(args, "adopt", False):
+        return None
+    root = Path(args.dir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"--adopt needs an existing project directory; {root} does not exist")
+    try:
+        detected = detect_project(root, args.package)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"could not parse pyproject.toml: {exc}") from exc
+    print(f"Detected in {root} (--adopt): {detected.summary()}")
+    return detected
+
+
 def _config_from_args(args: argparse.Namespace) -> Config:
     interactive = sys.stdin.isatty() and not args.yes
     if not interactive and not args.yes:
@@ -102,13 +120,17 @@ def _config_from_args(args: argparse.Namespace) -> Config:
     sdk_package, sdk_module, sdk_env_key = args.sdk_package, args.sdk_module, args.sdk_env_key
     kind, layout = args.kind, args.layout or ""
     layers = tuple(x.strip() for x in (args.layers or "").split(",") if x.strip())
+    detected = _detect(args)
+    default_name = detected.name if detected else Path(args.dir).resolve().name
+    default_kind = detected.kind if detected else "service"
 
     if interactive:
         print("A0 · RUMBO initial questions (Enter accepts the value in brackets)\n")
-        name = name or _ask("1. Project name", Path(args.dir).resolve().name, valid_name)
-        package = package or _ask("   Python package (snake_case)", to_package(name), valid_package)
+        name = name or _ask("1. Project name", default_name, valid_name)
+        default_package = (detected.package if detected else None) or to_package(name)
+        package = package or _ask("   Python package (snake_case)", default_package, valid_package)
         # ADR-0010: the kind is the question; the LLM capability is its sub-question.
-        kind = kind or _ask("2. What are you building?", "service", choices=list(KINDS))
+        kind = kind or _ask("2. What are you building?", default_kind, choices=list(KINDS))
         if llm is None:
             llm = _yes(_ask("   Does it call an LLM?", "no", choices=["yes", "no"]))
         if llm and not provider:
@@ -126,9 +148,11 @@ def _config_from_args(args: argparse.Namespace) -> Config:
             raise ValueError("with --yes you must pass --llm or --no-llm (A0 question 2)")
         if not rigor:
             raise ValueError("with --yes you must pass --rigor (A0 question 3)")
-        name = name or Path(args.dir).resolve().name
-        package = package or to_package(name)
-    kind = kind or "service"  # ADR-0010 default; --layout and --layers are never asked
+        name = name or default_name
+        package = package or (detected.package if detected else None) or to_package(name)
+    kind = kind or default_kind  # ADR-0010 default; --layout and --layers are never asked
+    if detected and not layout and not layers:
+        layout = detected.layout
     if llm and layout and layout != "hexagonal":
         print(f"note: an LLM product is hexagonal (ADR-0010); --layout {layout} is ignored")
     return Config(
@@ -144,6 +168,8 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         kind=kind,
         layout=layout,
         layers=layers,
+        adopted=detected is not None,
+        tests_dir=detected.tests_dir if detected else "tests",
     )
 
 
@@ -156,7 +182,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"\nMounting the RUMBO harness in {dest}")
     print(
         f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
-        f"provider={cfg.provider or '-'} rigor={cfg.rigor}\n"
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor}"
+        + (f" adopted=true tests={cfg.tests_dir}" if cfg.adopted else "")
+        + "\n"
     )
     if args.force:
         print(
@@ -165,7 +193,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
     interactive = sys.stdin.isatty() and not args.yes
     existing = [p.name for p in dest.iterdir() if p.name != ".git"] if dest.is_dir() else []
-    if interactive and existing and not args.force:
+    if interactive and existing and not args.force and not cfg.adopted:
         shown = ", ".join(sorted(existing)[:6]) + (", ..." if len(existing) > 6 else "")
         answer = _ask(
             f"This directory already has {len(existing)} entries ({shown}). Existing files are "
@@ -356,7 +384,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as exc:
         return _err(str(exc))
     problems: list[str] = []
-    expected = list(plan_files(cfg))
+    expected = list(plan_files(cfg, root))  # ADR-0013: an adopted project has no skeleton
     missing = [rel for rel in expected if not (root / rel).exists()]
     problems += [f"missing {rel}" for rel in missing]
     agents = project.read("AGENTS.md") or ""
@@ -524,6 +552,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         argv.append("--keep-going")
     if args.base:
         argv.extend(["--base", args.base])
+    if args.full:
+        argv.append("--full")
     return check.main(argv)
 
 
@@ -788,6 +818,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rigor", choices=RIGOR_LEVELS, help="rigor level (see RUMBO.md Part E)")
     p.add_argument("--case", help="concrete use case (free text)")
     p.add_argument("--yes", "-y", action="store_true", help="do not ask; use flags only")
+    p.add_argument(
+        "--adopt",
+        action="store_true",
+        help="existing project (ADR-0013): detect package, kind, layout and tests directory, "
+        "write the harness without the src/ and tests skeleton, check only changed files",
+    )
     p.add_argument("--no-install", action="store_true", help="write files only; skip uv/pre-commit")
     p.add_argument(
         "--force", action="store_true", help="overwrite existing files (keeps .bak copies)"
@@ -863,6 +899,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--brief", action="store_true", help="log to .rumbo-check.log, print a verdict")
     p.add_argument("--keep-going", action="store_true", help="do not stop at the first failure")
     p.add_argument("--base", help="value of {base} (default: origin/main if it exists, else main)")
+    p.add_argument(
+        "--full", action="store_true", help="replace {changed} with . (whole tree, ADR-0013)"
+    )
     p.add_argument("--dir", default=".", help="project root (default: current directory)")
     p.set_defaults(func=cmd_check)
 

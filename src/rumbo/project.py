@@ -60,6 +60,9 @@ class Project:
     sdk_module: str = ""
     sdk_env_key: str = ""
     harness_version: str = ""
+    # ADR-0013: mounted on an existing project; its tests directory ([tool.rumbo].tests).
+    adopted: bool = False
+    tests_dir: str = "tests"
 
     @classmethod
     def load(cls, root: Path) -> Project:
@@ -106,6 +109,8 @@ class Project:
             sdk_module=str(cfg.get("sdk_module", "")),
             sdk_env_key=str(cfg.get("sdk_env_key", "")),
             harness_version=str(cfg.get("version", "")),
+            adopted=bool(cfg.get("adopted", False)),
+            tests_dir=str(cfg.get("tests", "tests")) or "tests",
         )
 
     def read(self, rel: str) -> str | None:
