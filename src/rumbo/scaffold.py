@@ -176,6 +176,14 @@ def valid_sdk_module(module: str) -> bool:
     return bool(_SDK_MODULE_RE.match(module)) and len(module) <= 100
 
 
+_TESTS_DIR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+
+
+def valid_tests_dir(tests_dir: str) -> bool:
+    """A plain top-level folder name (`tests`, `test`): embedded in pyproject.toml and paths."""
+    return bool(_TESTS_DIR_RE.match(tests_dir)) and len(tests_dir) <= 50
+
+
 def to_package(name: str) -> str:
     """Best-effort snake_case package name derived from a project name."""
     from rumbo.project import slug
@@ -203,6 +211,10 @@ class Config:
     kind: str = "service"
     layout: str = ""
     layers: tuple[str, ...] = ()
+    # ADR-0013: the harness is mounted on an existing project (no skeleton, strict steps on the
+    # changed files); `tests_dir` is the detected tests directory ("tests" unless adopted).
+    adopted: bool = False
+    tests_dir: str = "tests"
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
@@ -212,6 +224,8 @@ class Config:
             )
         if not valid_package(self.package):
             raise ValueError(f"invalid package name (use snake_case): {self.package!r}")
+        if not valid_tests_dir(self.tests_dir):
+            raise ValueError(f"invalid tests directory (a plain folder name): {self.tests_dir!r}")
         if self.rigor not in RIGOR_LEVELS:
             raise ValueError(f"invalid rigor {self.rigor!r}; use one of {RIGOR_LEVELS}")
         if self.kind not in KINDS:
@@ -266,6 +280,8 @@ class Config:
             kind=project.kind,
             layout=project.layout,
             layers=project.layers,
+            adopted=project.adopted,
+            tests_dir=project.tests_dir,
         )
 
     # Same semantics as the Project properties (ADR-0010).
@@ -335,6 +351,10 @@ class Config:
             "layers_toml": ", ".join(f'"{self.package}.{x}"' for x in self.layer_names),
             # `["api", "adapters", ...]` for [tool.rumbo].layers (written only when layered).
             "layers_toml_list": "[" + ", ".join(f'"{x}"' for x in self.layer_names) + "]",
+            # ADR-0013: adoption of an existing project.
+            "adopted": self.adopted,
+            "tests_dir": self.tests_dir,
+            "custom_tests_dir": self.tests_dir != "tests",
             "case": self.case or "(no concrete case yet)",
             "date": dt.date.today().isoformat(),
             "rumbo_version": __version__,
@@ -353,6 +373,8 @@ class Report:
     commands: list[tuple[str, int]] = field(default_factory=list)
     # Commands the human still has to run (ADR-0011: the `uv add --dev` of a raised rigor).
     suggested: list[str] = field(default_factory=list)
+    # What adoption leaves to the human (ADR-0013: the CI steps when a workflow already exists).
+    notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [f"Created: {len(self.created)}"]
@@ -375,15 +397,18 @@ class Report:
         if self.suggested:
             lines.append("Run to complete the update:")
             lines += [f"  {c}" for c in self.suggested]
+        lines += self.notes
         return "\n".join(lines)
 
 
 def target_path(rel: str, cfg: Config) -> str:
     parts = []
-    for part in rel.split("/"):
+    for i, part in enumerate(rel.split("/")):
         part = part.replace("__pkg__", cfg.package)
         if part.startswith("dot_"):
             part = "." + part[4:]
+        if i == 0 and part == "tests" and "/" in rel:
+            part = cfg.tests_dir  # ADR-0013: the project's own tests directory
         parts.append(part)
     return "/".join(parts).removesuffix(".tmpl")
 
@@ -393,8 +418,12 @@ def _included(rel: str, cfg: Config) -> bool:
     return all(cond(cfg) for prefix, cond in CONDITIONS.items() if rel.startswith(prefix))
 
 
-def plan_files(cfg: Config) -> dict[str, str | Path]:
-    """Returns {target path: rendered content, or a path to copy verbatim}."""
+def plan_files(cfg: Config, root: Path | None = None) -> dict[str, str | Path]:
+    """Returns {target path: rendered content, or a path to copy verbatim}.
+
+    For an adopted project (ADR-0013) the skeleton is dropped; `root` lets the plan also respect
+    what the project already has (its `infra/`, its CI workflow).
+    """
     ctx = cfg.context()
     plan: dict[str, str | Path] = {}
     for src in sorted(TEMPLATES_DIR.rglob("*")):
@@ -415,7 +444,53 @@ def plan_files(cfg: Config) -> dict[str, str | Path]:
     plan["scripts/rumbo_guard.py"] = GUARD_FILE
     plan["scripts/rumbo_check.py"] = CHECK_FILE
     plan["RUMBO.md"] = rumbo_md()
+    if cfg.adopted:
+        plan = adoption_plan(plan, cfg, root)
     return plan
+
+
+# ADR-0013: the only test files adoption writes (the spikes/purity rules and the sensor's tests).
+ADOPTED_TESTS = ("architecture/test_architecture.py", "unit/test_check_tests_not_weakened.py")
+CI_WORKFLOW = ".github/workflows/ci.yml"
+CI_STEPS_NOTE = (
+    "Your .github/workflows/ already has a workflow, so ci.yml was not written. Add these two "
+    "steps to it (after `uv sync --locked`; the checkout needs `fetch-depth: 0`):\n"
+    "  - run: uv run python scripts/rumbo_check.py\n"
+    "  - run: uv run python scripts/check_tests_not_weakened.py --strict\n"
+    "    env:\n"
+    "      RUMBO_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}"
+)
+
+
+def existing_workflows(root: Path) -> list[str]:
+    """The workflow files a project already has under .github/workflows/ (sorted names)."""
+    folder = root / ".github" / "workflows"
+    if not folder.is_dir():
+        return []
+    return sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix in (".yml", ".yaml"))
+
+
+def adoption_plan(
+    plan: dict[str, str | Path], cfg: Config, root: Path | None
+) -> dict[str, str | Path]:
+    """The init plan minus the skeleton an existing project already has (ADR-0013).
+
+    Nothing under `src/`; under the tests directory only the two files of `ADOPTED_TESTS`.
+    With `root`: no `infra/` when the directory exists, no `ci.yml` when a workflow exists.
+    """
+    keep_tests = {f"{cfg.tests_dir}/{rel}" for rel in ADOPTED_TESTS}
+    tests_prefix = f"{cfg.tests_dir}/"
+    result = {
+        rel: item
+        for rel, item in plan.items()
+        if not rel.startswith("src/") and (not rel.startswith(tests_prefix) or rel in keep_tests)
+    }
+    if root is not None:
+        if (root / "infra").is_dir():
+            result = {rel: item for rel, item in result.items() if not rel.startswith("infra/")}
+        if existing_workflows(root):
+            result.pop(CI_WORKFLOW, None)
+    return result
 
 
 def _layer_module(cfg: Config, layer: str) -> str:
@@ -519,7 +594,10 @@ def scaffold(cfg: Config, dest: Path, force: bool = False) -> Report:
     """
     report = Report()
     dest.mkdir(parents=True, exist_ok=True)
-    for rel, item in plan_files(cfg).items():
+    plan = plan_files(cfg, dest)
+    if cfg.adopted and CI_WORKFLOW not in plan:
+        report.notes.append(CI_STEPS_NOTE)
+    for rel, item in plan.items():
         target = dest / rel
         if target.exists():
             if rel in MERGEABLE:
@@ -570,7 +648,7 @@ def update(project: Project, dest: Path) -> Report:
     """
     cfg = Config.from_project(project)
     report = Report()
-    plan = plan_files(cfg)
+    plan = plan_files(cfg, dest)
     for rel, item in plan.items():
         target = dest / rel
         new_text = _content(item)
@@ -740,7 +818,7 @@ def update_diff(project: Project, dest: Path) -> str:
     """
     cfg = Config.from_project(project)
     chunks: list[str] = []
-    for rel, item in plan_files(cfg).items():
+    for rel, item in plan_files(cfg, dest).items():
         target = dest / rel
         new_text = _content(item)
         if rel in MERGEABLE or not is_harness_file(rel):
@@ -845,6 +923,117 @@ def add_dev_dependencies(deps: list[str], dest: Path, report: Report) -> int:
         report.commands.append(("uv (not installed)", 127))
         return 127
     return _run(["uv", "add", "--dev", *deps], dest, report)
+
+
+# ------------------------------------------------------ ADR-0013: adoption detection
+# Top-level directories that hold an `__init__.py` without being the project's package.
+NOT_A_PACKAGE = frozenset({"tests", "test", "docs", "scripts", "spikes", "evals", "infra", "src"})
+WEB_FRAMEWORKS = ("fastapi", "flask", "django", "starlette")
+
+
+def read_pyproject(root: Path) -> dict[str, object]:
+    """The parsed `pyproject.toml` of `root`, or an empty table when there is none."""
+    path = root / "pyproject.toml"
+    if not path.is_file():
+        return {}
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _project_table(pyproject: dict[str, object]) -> dict[str, object]:
+    table = pyproject.get("project")
+    return table if isinstance(table, dict) else {}
+
+
+def _package_dirs(folder: Path) -> list[str]:
+    """Names of the importable packages directly under `folder` (not the harness folders)."""
+    if not folder.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in folder.iterdir()
+        if p.is_dir() and (p / "__init__.py").is_file() and p.name not in NOT_A_PACKAGE
+    )
+
+
+def detect_package(root: Path, pyproject: dict[str, object]) -> str | None:
+    """The existing package: `[project].name` when its directory exists, else the single one.
+
+    Candidates are the top-level directories holding an `__init__.py` (and those under `src/`)
+    other than the harness folders. Two or more raise ValueError: `--package` decides.
+    """
+    name = _project_table(pyproject).get("name")
+    if isinstance(name, str) and name.strip():
+        package = re.sub(r"[-.\s]+", "_", name.strip()).lower()
+        if (root / "src" / package / "__init__.py").is_file() or (
+            root / package / "__init__.py"
+        ).is_file():
+            return package
+    candidates = sorted({*_package_dirs(root), *_package_dirs(root / "src")})
+    if len(candidates) > 1:
+        raise ValueError(
+            f"several packages found ({', '.join(candidates)}): pass --package to choose one"
+        )
+    return candidates[0] if candidates else None
+
+
+def detect_kind(pyproject: dict[str, object]) -> str:
+    """`cli` with console scripts, `service` with a web framework dependency, else `library`."""
+    project = _project_table(pyproject)
+    scripts = project.get("scripts")
+    if isinstance(scripts, dict) and scripts:
+        return "cli"
+    deps = project.get("dependencies")
+    listed = deps if isinstance(deps, list) else []
+    names = {dependency_name(d) for d in listed if isinstance(d, str)}
+    if any(framework in names for framework in WEB_FRAMEWORKS):
+        return "service"
+    return "library"
+
+
+def detect_layout(root: Path, package: str) -> str:
+    """`hexagonal` when the package has `domain/` and `app/` under `src/`, else `flat`."""
+    base = root / "src" / package
+    return "hexagonal" if (base / "domain").is_dir() and (base / "app").is_dir() else "flat"
+
+
+def detect_tests_dir(root: Path) -> str:
+    """`tests` when it exists, else `test` when it exists, else `tests`."""
+    for name in ("tests", "test"):
+        if (root / name).is_dir():
+            return name
+    return "tests"
+
+
+@dataclass(frozen=True)
+class Detected:
+    """What `rumbo init --adopt` found in an existing project (ADR-0013); flags override it."""
+
+    name: str
+    package: str | None
+    kind: str
+    layout: str
+    tests_dir: str
+
+    def summary(self) -> str:
+        return (
+            f"package={self.package or '?'} kind={self.kind} layout={self.layout} "
+            f"tests={self.tests_dir}"
+        )
+
+
+def detect_project(root: Path, package: str | None = None) -> Detected:
+    """Detects name, package, kind, layout and tests directory; `package` skips its detection."""
+    pyproject = read_pyproject(root)
+    project_name = _project_table(pyproject).get("name")
+    name = project_name.strip() if isinstance(project_name, str) and project_name.strip() else ""
+    package = package or detect_package(root, pyproject)
+    return Detected(
+        name=name or root.name,
+        package=package,
+        kind=detect_kind(pyproject),
+        layout=detect_layout(root, package) if package else "flat",
+        tests_dir=detect_tests_dir(root),
+    )
 
 
 def install(cfg: Config, dest: Path, report: Report) -> None:
