@@ -54,18 +54,12 @@ PROVIDERS: dict[str, Provider] = {
 }
 OTHER_PROVIDER = "other"
 
-DEV_DEPS = [
-    "ruff",
-    "pyright",
-    "pytest",
-    "pytest-cov",
-    "hypothesis",
-    "import-linter",
-    "pre-commit",
-    "pip-audit",
-    "bandit",
-    "mutmut",
-]
+# ADR-0011: the development tools scale with rigor; `import-linter` with the layout. `uv add`
+# resolves the versions, nothing is pinned here. `pre-commit` carries the guard's git hooks.
+BASE_DEV_DEPS = ["ruff", "pyright", "pytest", "hypothesis", "pre-commit"]
+ARCH_DEV_DEPS = ["import-linter"]
+MVP_DEV_DEPS = ["pytest-cov", "bandit", "pip-audit"]
+PRODUCTION_DEV_DEPS = ["mutmut"]
 # ADR-0010: the HTTP skeleton belongs to the `service` kind; the LLM capability only adds
 # `pydantic` (and the provider SDK) on top of it.
 SERVICE_DEPS = ["fastapi", "uvicorn", "httpx"]
@@ -129,6 +123,9 @@ FRAMEWORK_OWNED = (
     "spikes/README.md",
 )
 FRAMEWORK_OWNED_PREFIXES = (".claude/commands/",)
+# Files a rigor level brings (ADR-0011): `rumbo update` renders them when the level requires
+# them and they do not exist yet; existing copies are the human's.
+RIGOR_FILES = (".github/workflows/nightly.yml", ".github/dependabot.yml")
 # Harness files the human adapts: `rumbo update` reports when they drift from the template
 # (and `--diff` shows how). Documents (docs/, specs/, src/, tests/) are the human's: never listed.
 HARNESS_PREFIXES = (
@@ -354,6 +351,8 @@ class Report:
     updated: list[str] = field(default_factory=list)
     differs: list[str] = field(default_factory=list)
     commands: list[tuple[str, int]] = field(default_factory=list)
+    # Commands the human still has to run (ADR-0011: the `uv add --dev` of a raised rigor).
+    suggested: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [f"Created: {len(self.created)}"]
@@ -373,6 +372,9 @@ class Report:
         if failed:
             lines.append("Commands that failed (see output above):")
             lines += [f"  - {c}" for c in failed]
+        if self.suggested:
+            lines.append("Run to complete the update:")
+            lines += [f"  {c}" for c in self.suggested]
         return "\n".join(lines)
 
 
@@ -568,11 +570,12 @@ def update(project: Project, dest: Path) -> Report:
     """
     cfg = Config.from_project(project)
     report = Report()
-    for rel, item in plan_files(cfg).items():
+    plan = plan_files(cfg)
+    for rel, item in plan.items():
         target = dest / rel
         new_text = _content(item)
         if not target.exists():
-            if is_framework_owned(rel) or rel.startswith(".claude/"):
+            if is_framework_owned(rel) or rel.startswith(".claude/") or rel in RIGOR_FILES:
                 _write(target, item, rel)
                 report.created.append(rel)
             elif is_harness_file(rel):
@@ -586,9 +589,14 @@ def update(project: Project, dest: Path) -> Report:
             report.updated.append(rel)
         elif rel not in MERGEABLE and is_harness_file(rel):
             report.differs.append(rel)
-    _add_checks_table(dest / "pyproject.toml", _content(plan_files(cfg)["pyproject.toml"]), report)
+    template = _content(plan["pyproject.toml"])
+    _add_checks_table(dest / "pyproject.toml", template, report)
+    _add_missing_steps(dest / "pyproject.toml", template, report)
     _add_axes_keys(dest / "pyproject.toml", cfg, report)
     _bump_harness_version(dest / "pyproject.toml")
+    missing = missing_dev_dependencies(cfg, (dest / "pyproject.toml").read_text(encoding="utf-8"))
+    if missing:
+        report.suggested.append(f"uv add --dev {' '.join(missing)}")
     return report
 
 
@@ -619,7 +627,81 @@ def _add_checks_table(pyproject: Path, template: str, report: Report) -> None:
     report.merged.append(f"pyproject.toml (+{_CHECKS_HEADER})")
 
 
+_CHECKS_HEADER_RE = re.compile(r"(?m)^\[tool\.rumbo\.checks\][ \t]*(?:#[^\n]*)?\n")
+
+
+def _table_block(text: str, header: re.Match[str]) -> tuple[str, str, str]:
+    """Splits ``text`` at a table header into (head incl. header, table body, rest of the file)."""
+    next_header = re.compile(r"(?m)^\[").search(text, header.end())
+    end = next_header.start() if next_header else len(text)
+    body = text[header.end() : end].rstrip("\n") + "\n"
+    return text[: header.end()], body, text[end:]
+
+
+def _rendered_checks(template: str) -> dict[str, str]:
+    """The steps of a rendered ``pyproject.toml`` template, in table order."""
+    checks = tomllib.loads(template)["tool"]["rumbo"]["checks"]
+    return {key: str(cmd) for key, cmd in checks.items()}
+
+
+def check_steps(cfg: Config) -> list[str]:
+    """The step names ``[tool.rumbo.checks]`` renders for this rigor, kind and layout (ADR-0011).
+
+    Derived from the rendered template, so the table is the single source of truth.
+    """
+    return list(_rendered_checks(_content(plan_files(cfg)["pyproject.toml"])))
+
+
+def _add_missing_steps(pyproject: Path, template: str, report: Report) -> None:
+    """Appends to ``[tool.rumbo.checks]`` the steps of the current rigor it lacks (ADR-0011).
+
+    A rigor raised by hand (or by `rumbo promote`) brings new steps; they go at the end of the
+    table in template order, with the template's command. Existing steps are never replaced
+    or removed: the table stays in the human's hands.
+    """
+    current = pyproject.read_text(encoding="utf-8")
+    try:
+        rumbo = tomllib.loads(current).get("tool", {}).get("rumbo")
+    except tomllib.TOMLDecodeError:
+        return
+    header = _CHECKS_HEADER_RE.search(current)
+    if not isinstance(rumbo, dict) or not isinstance(rumbo.get("checks"), dict) or header is None:
+        return
+    wanted = _rendered_checks(template)
+    missing = [key for key in wanted if key not in rumbo["checks"]]
+    if not missing:
+        return
+    head, body, tail = _table_block(current, header)
+    added = "".join(f"{key} = {json.dumps(wanted[key])}\n" for key in missing)
+    merged = head + body + added + ("\n" + tail if tail else "")
+    tomllib.loads(merged)  # raises if the result is not valid TOML
+    _write_text(pyproject, merged)
+    report.merged.append(f"pyproject.toml (+checks: {', '.join(missing)})")
+
+
 _RUMBO_HEADER = re.compile(r"(?m)^\[tool\.rumbo\][ \t]*(?:#[^\n]*)?\n")
+
+
+def set_rigor(text: str, rigor: str) -> str:
+    """Returns ``text`` with ``rigor = "…"`` in ``[tool.rumbo]`` set (or added) to ``rigor``.
+
+    A string replace on the existing key: comments, order and the other keys are untouched.
+    """
+    if rigor not in RIGOR_LEVELS:
+        raise ValueError(f"invalid rigor {rigor!r}; use one of {RIGOR_LEVELS}")
+    header = _RUMBO_HEADER.search(text)
+    if header is None:
+        raise ValueError("pyproject.toml has no [tool.rumbo] section; did you run 'rumbo init'?")
+    head, body, tail = _table_block(text, header)
+    line = re.compile(r"(?m)^rigor[ \t]*=[ \t]*\"[^\"\n]*\"")
+    if line.search(body):
+        body = line.sub(f'rigor = "{rigor}"', body, count=1)
+    else:
+        body += f'rigor = "{rigor}"\n'
+    merged = head + body + ("\n" + tail if tail else "")
+    if tomllib.loads(merged)["tool"]["rumbo"].get("rigor") != rigor:
+        raise ValueError("could not rewrite [tool.rumbo].rigor")
+    return merged
 
 
 def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
@@ -642,12 +724,9 @@ def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
     missing = [key for key in wanted if key not in rumbo]
     if not missing:
         return
-    next_header = re.compile(r"(?m)^\[").search(current, header.end())
-    end = next_header.start() if next_header else len(current)
-    block = current[header.end() : end].rstrip("\n") + "\n"
+    head, body, tail = _table_block(current, header)
     added = "".join(f"{key} = {wanted[key]}\n" for key in missing)
-    tail = current[end:]
-    merged = current[: header.end()] + block + added + ("\n" + tail if tail else "")
+    merged = head + body + added + ("\n" + tail if tail else "")
     tomllib.loads(merged)  # raises if the result is not valid TOML
     _write_text(pyproject, merged)
     report.merged.append(f"pyproject.toml (+{', '.join(missing)})")
@@ -708,8 +787,43 @@ def _run(cmd: list[str], cwd: Path, report: Report) -> int:
 
 
 def dev_dependencies(cfg: Config) -> list[str]:
-    """The development tools; import-linter only when the layout has layers to contract."""
-    return [dep for dep in DEV_DEPS if dep != "import-linter" or cfg.arch]
+    """The development tools by rigor and layout (ADR-0011), in a stable order.
+
+    Every project gets the base; `import-linter` when the layout has layers to contract;
+    coverage, bandit and pip-audit from `mvp`; mutation testing at `production`.
+    """
+    deps = [*BASE_DEV_DEPS]
+    if cfg.arch:
+        deps += ARCH_DEV_DEPS
+    if cfg.rigor != "prototype":
+        deps += MVP_DEV_DEPS
+    if cfg.rigor == "production":
+        deps += PRODUCTION_DEV_DEPS
+    return deps
+
+
+_DEP_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def dependency_name(requirement: str) -> str:
+    """The normalised distribution name of a PEP 508 requirement (`Foo_Bar[x]>=1` → `foo-bar`)."""
+    match = _DEP_NAME_RE.match(requirement)
+    return re.sub(r"[-_.]+", "-", match.group(1)).lower() if match else ""
+
+
+def listed_dev_dependencies(pyproject_text: str) -> list[str]:
+    """The development requirements a pyproject lists: PEP 735 `dev` group, else `[tool.uv]`."""
+    data = tomllib.loads(pyproject_text)
+    group = data.get("dependency-groups", {}).get("dev")
+    if not isinstance(group, list):
+        group = data.get("tool", {}).get("uv", {}).get("dev-dependencies", [])
+    return [item for item in group if isinstance(item, str)] if isinstance(group, list) else []
+
+
+def missing_dev_dependencies(cfg: Config, pyproject_text: str) -> list[str]:
+    """The development tools of this rigor and layout the pyproject does not list yet."""
+    listed = {dependency_name(req) for req in listed_dev_dependencies(pyproject_text)}
+    return [dep for dep in dev_dependencies(cfg) if dependency_name(dep) not in listed]
 
 
 def runtime_dependencies(cfg: Config) -> list[str]:
@@ -722,6 +836,15 @@ def runtime_dependencies(cfg: Config) -> list[str]:
         if cfg.sdk_package:
             deps.append(cfg.sdk_package)
     return deps
+
+
+def add_dev_dependencies(deps: list[str], dest: Path, report: Report) -> int:
+    """Runs `uv add --dev …` (ADR-0011: `rumbo promote`); 127 when uv is not installed."""
+    if shutil.which("uv") is None:
+        print("WARNING: 'uv' is not installed; install uv and run the 'uv add' line printed below.")
+        report.commands.append(("uv (not installed)", 127))
+        return 127
+    return _run(["uv", "add", "--dev", *deps], dest, report)
 
 
 def install(cfg: Config, dest: Path, report: Report) -> None:
