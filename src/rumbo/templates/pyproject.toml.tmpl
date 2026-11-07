@@ -36,15 +36,32 @@ sdk_package = "{{sdk_package}}"
 sdk_module = "{{sdk_module}}"
 sdk_env_key = "{{sdk_env_key}}"
 rigor = "{{rigor}}"
+{{#adopted}}
+# ADR-0013: the harness was mounted on an existing project; lint, format and types run on the
+# changed files (`{changed}` below), the nightly measures the whole tree with --full.
+adopted = true
+{{#custom_tests_dir}}
+tests = "{{tests_dir}}"
+{{/custom_tests_dir}}
+{{/adopted}}
 
 [tool.rumbo.checks]
 # Verification steps in execution order, read by `scripts/rumbo_check.py` (`rumbo check`).
 # One command per step, run without a shell (ADR-0006); `{base}` is origin/main if it exists, else main.
 # The steps scale with `rigor` (ADR-0011): `rumbo update` appends the ones your level requires
 # (after `rumbo promote` or a hand edit of `rigor`) and never replaces or removes one.
+{{#adopted}}
+# `{changed}` is the changed .py files (vs {base}, plus uncommitted and untracked ones); `rumbo
+# check --full` (or `scripts/rumbo_check.py --full`) replaces it with `.`: the whole tree.
+lint = "uv run ruff check {changed}"
+format = "uv run ruff format --check {changed}"
+types = "uv run pyright {changed}"
+{{/adopted}}
+{{^adopted}}
 lint = "uv run ruff check ."
 format = "uv run ruff format --check ."
 types = "uv run pyright"
+{{/adopted}}
 test = "uv run pytest{{#mvp_or_more}} --cov --cov-report=term-missing:skip-covered{{/mvp_or_more}}"
 {{#arch}}
 arch = "uv run lint-imports"
@@ -69,12 +86,12 @@ extend-exclude = ["spikes"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S603", "S607"]
+"{{tests_dir}}/**" = ["S101", "S603", "S607"]
 "evals/**" = ["S101"]
 "scripts/**" = ["S603", "S607"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "{{tests_dir}}"]
 typeCheckingMode = "standard"
 {{#arch}}
 strict = ["src/{{package}}/{{inner_layer}}"]
@@ -84,7 +101,7 @@ extraPaths = ["evals"]
 {{/evals}}
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["{{tests_dir}}"]
 addopts = "-q --strict-markers"
 
 [tool.coverage.run]
