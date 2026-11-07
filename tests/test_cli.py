@@ -940,6 +940,7 @@ def _kind_project(
     (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0.1.0"\n')
     flags = {
         kind: True,
+        "packaged": kind in ("library", "cli"),
         "production": rigor == "production",
         "mvp_or_more": rigor != "prototype",
     }
