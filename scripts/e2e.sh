@@ -55,4 +55,50 @@ if [ "$FLAGS" = "--no-llm --rigor prototype" ]; then
   rc=0; uv run --project "$ROOT" rumbo promote mvp || rc=$?; test "$rc" -eq 1   # equal rigor: refused
 fi
 if echo "$FLAGS" | grep -q production; then make sbom && test -s sbom.cdx.json; fi
+# ADR-0013: a project that existed before RUMBO is adopted without a skeleton; the strict steps run
+# on the changed files, and the runner, `rumbo doctor` and G4 pass on it.
+if [ "$FLAGS" = "--no-llm --rigor mvp" ]; then
+  LEGACY=$(mktemp -d)
+  trap 'rm -rf "$DIR" "$LEGACY"' EXIT
+  cd "$LEGACY"
+  git init -q -b main
+  git config user.email "e2e@rumbo.local"
+  git config user.name "rumbo e2e"
+  git config commit.gpgsign false
+  mkdir -p src/legacy_app test .github/workflows
+  cat > pyproject.toml <<'TOML'
+[project]
+name = "legacy-app"
+version = "0.1.0"
+description = "A project that existed before RUMBO"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+legacy = "legacy_app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/legacy_app"]
+TOML
+  printf 'def add(a: int, b: int) -> int:\n    return a + b\n\n\ndef main() -> None:\n    print(add(1, 2))\n' > src/legacy_app/__init__.py
+  printf 'from legacy_app import add\n\n\ndef test_add() -> None:\n    assert add(1, 2) == 3\n' > test/test_legacy.py
+  printf 'name: existing\non: [push]\njobs:\n  noop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: "true"\n' > .github/workflows/existing.yml
+  git add -A
+  git commit -qm "chore: the legacy project"
+  uv run --project "$ROOT" rumbo init --adopt --yes --no-llm --rigor mvp | tee "$DIR/adopt.log"
+  grep -q "package=legacy_app kind=cli layout=flat tests=test" "$DIR/adopt.log"
+  grep -q "ci.yml was not written" "$DIR/adopt.log"
+  test ! -e src/legacy_app/__main__.py && test ! -d tests && test ! -e .github/workflows/ci.yml
+  test -f test/architecture/test_architecture.py && test -f test/unit/test_check_tests_not_weakened.py
+  grep -q '^adopted = true' pyproject.toml && grep -q '^tests = "test"' pyproject.toml
+  grep -q '^lint = "uv run ruff check {changed}"' pyproject.toml
+  uv run python scripts/rumbo_check.py
+  uv run --project "$ROOT" rumbo doctor
+  uv run --project "$ROOT" rumbo gate G4 --no-run >/dev/null
+  echo "E2E adoption OK"
+fi
 echo "E2E OK ($FLAGS)"
