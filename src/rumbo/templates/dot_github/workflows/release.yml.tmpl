@@ -1,0 +1,39 @@
+# Release of {{name}} (ADR-0010): push a tag `vX.Y.Z` that matches `[project].version`.
+#   git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+# The package is published with PyPI Trusted Publishing (OIDC): no API token is created, stored
+# or passed anywhere. Register this workflow once on PyPI, under "Publishing" in the project's
+# settings (or https://pypi.org/manage/account/publishing/ for a project that does not exist yet):
+#   PyPI project name:  the `[project].name` of pyproject.toml
+#   Owner:              the GitHub owner of this repository (user or organisation)
+#   Repository name:    this repository
+#   Workflow name:      release.yml
+#   Environment name:   pypi (optional but recommended; it matches `environment: pypi` below,
+#                       where you can require a reviewer before anything is uploaded)
+# Actions are pinned by SHA (supply chain); Dependabot keeps them fresh.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write   # the OIDC token PyPI exchanges for a short-lived upload token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Tag matches [project].version
+        run: |
+          version=$(uv run --no-project python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != pyproject v$version"; exit 1; }
+      - name: Build the wheel and the sdist
+        run: uv build
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
