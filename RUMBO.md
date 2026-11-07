@@ -8,7 +8,7 @@
 >   and stops at every approval point.
 > - **Project that already has the harness** (`AGENTS.md` exists and `pyproject.toml` has a
 >   `[tool.rumbo]` section): Part A is done. Do **not** ask the A0 questions again — the answers
->   are in `docs/decisions.md`. Go to step A8 ("Final verification") if `make check` was never
+>   are in `docs/decisions.md`. Go to step A8 ("Final verification") if the check (`uv run python scripts/rumbo_check.py`) was never
 >   green, otherwise to Part C ("The RUMBO cycle").
 >
 > RUMBO is an end-to-end framework for building software with AI coding agents:
@@ -86,7 +86,7 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 ├── RUMBO.md                  # this file
 ├── README.md
 ├── SECURITY.md               # reporting policy + what the harness does by design
-├── Makefile
+├── Makefile                  # optional one-line aliases of the check
 ├── pyproject.toml            # includes [tool.rumbo], read by rumbo gate/doctor/update
 ├── .pre-commit-config.yaml
 ├── .gitignore
@@ -129,6 +129,7 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 │   ├── calibration/example.jsonl   # human-labeled rows for judge calibration
 │   ├── error_analysis/.gitkeep     # log.md grows with `rumbo eval add`
 │   └── run_evals.py
+├── scripts/rumbo_check.py                # verification runner (step A3)
 ├── scripts/check_tests_not_weakened.py   # anti-cheat sensor (step A6)
 ├── scripts/rumbo_guard.py                # guard hook for Claude Code (step A6)
 ├── spikes/README.md          # "Throwaway code. Never imported from src/."
@@ -202,37 +203,47 @@ only_mutate = ["src/<pkg>/domain/*"]
 
 (Adjust the keys if the installed version of a tool changed them; verify by running it.)
 
-### A3. Makefile: one verification command
+### A3. The check runner: one verification command
 
-Illustrative excerpt; `rumbo init` writes the exact file for the rigor and the provider.
+`scripts/rumbo_check.py` is a standard-library runner (the same module as `rumbo check`) that
+reads an ordered `[tool.rumbo.checks]` table from `pyproject.toml`, one command string per step,
+and runs each without a shell, so it behaves identically on Windows, macOS and Linux.
+Illustrative excerpt; `rumbo init` writes the exact table for the rigor and the provider.
 
-```make
-.PHONY: check check-brief test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
-
-RUMBO ?= uvx --from git+https://github.com/padillacm/RUMBO rumbo
-BASE ?= origin/main
-
-lint:       ; uv run ruff check . && uv run ruff format --check .
-fmt:        ; uv run ruff check --fix . && uv run ruff format .
-types:      ; uv run pyright
-test:       ; uv run pytest --cov --cov-report=term-missing:skip-covered   # no --cov in prototype
-arch:       ; uv run lint-imports
-security:   ; uv run bandit -q -r src evals && uv run bandit -q -r scripts -s B404,B603,B607 && uv run pip-audit --skip-editable
-evals:      ; uv run python evals/run_evals.py --suite smoke            # offline
-evals-live: ; uv run python evals/run_evals.py --suite all --live --k 1 # real model
-mutation:   ; uv run mutmut run && uv run mutmut results   # the generated file skips an empty domain/
-sensor:     ; uv run python scripts/check_tests_not_weakened.py --base $(BASE)
-sbom:       ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
-hooks:      ; uv run pre-commit install
-review:     ; $(RUMBO) tour $(BASE) --out docs/reviews/$$(date +%Y-%m-%d)-$$(git rev-parse --short HEAD).md
-rumbo:      ; $(RUMBO) $(ARGS)
-
-check: lint types test arch security
-check-brief: ; @$(MAKE) check > .rumbo-check.log 2>&1 && echo "green" || (tail -40 .rumbo-check.log; exit 1)
+```toml
+[tool.rumbo.checks]
+lint     = "uv run ruff check ."
+format   = "uv run ruff format --check ."
+types    = "uv run pyright"
+test     = "uv run pytest --cov --cov-report=term-missing:skip-covered"   # no --cov in prototype
+arch     = "uv run lint-imports"
+security = "uv run bandit -q -r src evals"
+security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
+audit    = "uv run pip-audit --skip-editable"
+evals    = "uv run python evals/run_evals.py --suite smoke"   # LLM products only, offline
+sensor   = "uv run python scripts/check_tests_not_weakened.py --base {base}"
 ```
 
-LLM products add `evals` to `check`; prototypes drop `security`. **`make check` is offline**:
-it never needs a model credential. The real model runs only in `make evals-live`.
+Steps run in this order: `lint`, `format`, `types`, `test`, `arch`, `security`,
+`security-scripts`, `audit`, `evals` (LLM products only), `sensor`. `uv run python
+scripts/rumbo_check.py` runs them all and stops at the first failure; `--keep-going` runs them
+all; a subset runs with `uv run python scripts/rumbo_check.py lint types`; `--brief` writes the
+output to `.rumbo-check.log` and prints one line, or only the failing tail (this is what the
+agent runs). `{base}` is `--base`, else `origin/main`, else `main`. Operators such as `&&` or `|`
+are a configuration error: a step that needs logic becomes a small Python script.
+
+Exit codes: `0` green; `1` a verification failed; `3` the environment is broken (a tool missing
+or crashing, a malformed table). The `Stop` hook blocks the agent on `1`; on `3` it tells the
+agent to report to the human and not to repair the environment. With the CLI installed,
+`rumbo check` is the same command.
+
+The `Makefile` keeps one-line aliases for people who have `make` (`make check`, `make check-brief`,
+`make lint`, `make types`, `make test`, `make arch`, `make security`, `make sensor`,
+`make evals`) plus `make fmt`, `make evals-live`, `make mutation`, `make sbom`, `make hooks`,
+`make review` and `make rumbo`; the agent does not need `make`.
+
+**The check is offline**: it never needs a model credential. The real model runs only in
+`make evals-live`. Prototypes drop the security steps.
 
 ### A4. pre-commit
 
@@ -244,13 +255,14 @@ and a local hook that runs `uv run lint-imports`. Then `pre-commit autoupdate` a
 
 ### A5. CI (GitHub Actions)
 
-- `ci.yml` (every push and PR), actions pinned by SHA, `permissions: contents: read`:
-  checkout with `fetch-depth: 0` → `astral-sh/setup-uv` → `uv sync --locked` → `make check`
+- `ci.yml` (every push and PR), with a `check` job on `ubuntu-latest` and a `check-windows` job
+  on `windows-latest` (the runner needs no `make`), actions pinned by SHA, `permissions: contents: read`:
+  checkout with `fetch-depth: 0` → `astral-sh/setup-uv` → `uv sync --locked` → `python scripts/rumbo_check.py`
   (no secrets) → `scripts/check_tests_not_weakened.py --strict` with `RUMBO_BASE_REF` set to
   the PR base → `pre-commit run --all-files` (mvp+) → SBOM artifact (production). A separate
   `secrets` job runs `gitleaks/gitleaks-action` over the full history: the pre-commit hook only
   sees staged files, so this job is the sensor that actually protects the repository.
-- `nightly.yml` (daily cron, mvp+): `make mutation` on `src/<pkg>/domain` and, for LLM
+- `nightly.yml` (daily cron, mvp+): `make mutation` (mutmut needs Linux, macOS or WSL) on `src/<pkg>/domain` and, for LLM
   products, `make evals-live` in a protected `evals` environment. **That is the only workflow
   that holds a model credential**, and it never runs on pull requests.
 - `.github/pull_request_template.md` carries the G4 checklist where the human is already
@@ -263,14 +275,21 @@ and a local hook that runs `uv run lint-imports`. Then `pre-commit autoupdate` a
 Comparing against `origin/main` (or the PR base commit), the script fails if:
 
 - a file under `tests/` is deleted or a `test_*` function disappears;
-- a test loses `assert` statements, or the total number of asserts in `tests/` drops;
+- a test loses assertions, or the total number of assertions in the tests directory drops
+  (`tests/` by default, `[tool.rumbo].tests` for other layouts);
 - a test gains always-true asserts (`assert True`), `skip`/`xfail` markers, or a shorter
   `parametrize` list.
 
 It can only be bypassed by a **human**: a commit in `base..HEAD` with `[tests-change-approved]`
 in its message that was not authored by an agent, or the `tests-change-approved` label on the
 PR. What it does not see (review by hand; mutation testing covers part of it): early `return`,
-mocks that empty the behavior, asserts moved into helpers, changes to pytest configuration.
+mocks that empty the behavior, helpers built dynamically or imported from outside the tests
+directory, changes to pytest configuration.
+An assertion is an `assert`, a `pytest.raises`/`warns`/`deprecated_call` block, a `self.assert*`
+or `self.fail` call, a mock assertion (`assert_called_once_with`, ...) or `pytest.fail`. A call
+to a helper defined in the same file, a `conftest.py` or a module imported from the tests
+directory counts as the assertions of its body (depth 3), so extracting repeated asserts into a
+helper passes and hollowing the helper is reported.
 It ships with its own tests (`tests/unit/test_check_tests_not_weakened.py`).
 
 `scripts/rumbo_guard.py` is the **guard hook**, wired by `.claude/settings.json` as Claude Code
@@ -279,10 +298,10 @@ edits to the protected files (Makefile, `pyproject.toml`, CI, `infra/`, pre-comm
 sensors, `evals/run_evals.py`, `.env*`), removal of the `<!-- rumbo:template` mark, writing
 `[tests-change-approved]`, `--no-verify`, force pushes, `git reset --hard`, disabling hooks,
 `rm -rf` on the root and shell redirections into protected files. On `Stop`, if Python, TOML
-or JSONL files changed since the last commit, it runs `make check-brief` and refuses to finish
-while it is red. The human is never blocked: edits by hand do not go through the hook, and a
+or JSONL files changed since the last commit, it runs `scripts/rumbo_check.py --brief` and refuses to finish
+while it is red; if the environment is broken (exit 3) it asks the agent to report to the human instead. The human is never blocked: edits by hand do not go through the hook, and a
 rule can be overridden in `.claude/settings.local.json`. `settings.json` also pre-approves the
-harness commands (`make check`, pytest, ruff, read-only git) and denies `curl`/`wget` and
+harness commands (the check runner, pytest, ruff, read-only git) and denies `curl`/`wget` and
 reading `.env`.
 
 ### A7. Evals skeleton (LLM products only)
@@ -314,7 +333,7 @@ Two tools keep the dataset honest:
 
 ### A8. Final verification of Part A 🛑
 
-Run `make check` and show the result. It must be green with a trivial example test in every
+Run `uv run python scripts/rumbo_check.py` and show the result. It must be green with a trivial example test in every
 `tests/` folder. Run `rumbo doctor` if available. Commit: `chore: initial RUMBO harness`.
 Stop and summarize.
 
@@ -337,13 +356,13 @@ LLM flag; the generated file also has a "Commands" and a "Human compass" section
 - Evals: evals/ (LLM products only)
 
 ## Before declaring a task done
-make check   # must be green; paste the summarized output
+uv run python scripts/rumbo_check.py   # must be green; paste the summarized output
 
 ## Per-task flow (ANCLA)
 1. Read the spec and the relevant ADRs.
 2. Write the tests first (they must fail) and wait for the human to approve them.
 3. Propose a short plan (files, tests, risks) and wait for approval.
-4. Minimal code, then refactor; iterate until `make check` passes.
+4. Minimal code, then refactor; iterate until the check passes.
 5. Summarize the change in 3 sentences and list new dependencies (if any).
 
 ## Hard rules
@@ -351,7 +370,7 @@ make check   # must be green; paste the summarized output
 - Never write [tests-change-approved] or remove the rumbo:template mark: only the human does.
 - Separate structural commits (refactor) from behavioral commits.
 - Small diffs (~300 lines max). If the task is bigger, propose splitting it.
-- `domain/` is pure: no I/O, no HTTP, no LLM SDKs.
+- `domain/` is pure: no I/O, no HTTP, no LLM SDKs (pure names such as `PurePath` and `StringIO` are fine; `open()` is not).
 - Numbers shown to the user are computed by code, never by the LLM.
 - Prompts live only in src/<pkg>/prompts/, with a version identifier.
 - No new dependency without approval and PyPI verification.
@@ -421,7 +440,7 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
   requirement it covers (`F-000N.Rk` in its docstring; `rumbo trace` builds the table). The
   human approves them.
 - **N**avigate: short plan before coding.
-- **C**lose the loop: iterate in a sandbox until `make check` is green.
+- **C**lose the loop: iterate in a sandbox until the check is green.
 - **L**imit: small diff; human review + a second review by a clean session or another model
   (`/rumbo-review`, which starts with a requirement-by-requirement traceability table against
   the spec). `make review` writes a guided review for the human: risk hotspots first, reading
@@ -442,7 +461,7 @@ the agent's effective context"), so the harness keeps each unit of work small:
 
 - One spec per session, started fresh from the spec; `/clear` between unrelated tasks. The
   session that wrote the spec is not the one that implements it.
-- Drop old tool output instead of summarizing it: `make check-brief` prints only the failing
+- Drop old tool output instead of summarizing it: `scripts/rumbo_check.py --brief` prints only the failing
   tail; the `# Compact instructions` section of AGENTS.md tells the agent what to keep.
 - Decisions that must outlive the session go to an ADR or `docs/decisions.md`.
 - **One writer per set of files.** The spec lists the files it owns. Agents that run in
@@ -450,7 +469,7 @@ the agent's effective context"), so the harness keeps each unit of work small:
   test runs). For long features, parallel drafts are assembled by one integrator holding the
   full spec; writers never coordinate ad hoc.
 - Parallelize at the level of specs, not inside them: at most 3–5 worktrees, each with its own
-  session, `make check` and small PR, merged in series. If a change touches an interface another
+  session, the check and small PR, merged in series. If a change touches an interface another
   spec depends on, write the new signature in that spec's "Data contracts" section.
 
 ### O — Operate, Observe, Optimize
@@ -597,7 +616,7 @@ What `rumbo init` and `rumbo gate` do per rigor:
 
 | | prototype | mvp | production |
 |---|---|---|---|
-| `make check` | lint, types, test, arch (+evals) | + security, coverage report | same (coverage is informational: mutation testing is the sensor) |
+| the check | lint, types, test, arch (+evals) | + security, coverage report | same (coverage is informational: mutation testing is the sensor) |
 | CI | check + sensor + gitleaks | + pre-commit on all files | + SBOM (CycloneDX from uv.lock) |
 | Nightly | — | mutation (+ live evals) | mutation + live evals with k=3 |
 | Dependabot | — | weekly, 7-day cooldown | same |
@@ -606,7 +625,7 @@ What `rumbo init` and `rumbo gate` do per rigor:
 
 What matters is the **worst plausible impact**, not the size of the code. An agent that hands
 out figures used in commercial decisions is, at the very least, an "MVP with production
-controls" as far as accuracy goes. Adjust `make check` and CI to the level chosen in A0.
+controls" as far as accuracy goes. Adjust `[tool.rumbo.checks]` and CI to the level chosen in A0.
 
 ---
 

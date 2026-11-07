@@ -11,12 +11,13 @@ mkdir price-agent && cd price-agent && git init -b main
 uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
   --name "Price Agent" --package price_agent --llm --provider claude-code --rigor mvp \
   --case "answers questions about daily spot prices"
-make check                      # green, offline
+uv run python scripts/rumbo_check.py   # green, offline
 git add -A && git commit -m "chore: initial RUMBO harness"
 ```
 
-What you got: `AGENTS.md` (the agent's map), a `Makefile` whose `make check` is the whole
-harness, CI with pinned actions, document templates with a `<!-- rumbo:template` mark, an
+What you got: `AGENTS.md` (the agent's map), `scripts/rumbo_check.py`, the whole
+harness (steps in `[tool.rumbo.checks]`; it runs the same on Windows, macOS and Linux, and a
+`Makefile` offers optional aliases such as `make check`), CI with pinned actions, document templates with a `<!-- rumbo:template` mark, an
 anti-cheat sensor, Claude Code hooks (`.claude/settings.json`) and, for LLM products, an eval
 runner, deterministic graders and a budget/telemetry skeleton. `rumbo doctor` confirms it.
 
@@ -59,13 +60,13 @@ Start a **new** Claude Code session (`/clear`) and type `/rumbo-ancla F-0001`.
   docstring (`F-0001.R1`). Read them; approve or correct them. Nothing else happens until you
   do.
 - **Navigate.** It proposes a short plan (files, risks). Approve it.
-- **Close the loop.** It implements and runs `make check-brief` until green. If it tries to
+- **Close the loop.** It implements and runs `scripts/rumbo_check.py --brief` until green. If it tries to
   edit the Makefile or a sensor, the hook blocks it and it asks you.
 - **Limit.** Small diff, structural and behavioral commits apart. Then:
 
 ```bash
 rumbo trace                     # every requirement has a test?
-rumbo gate G4                   # sensor, make check, diff size, traceability (compares with main)
+rumbo gate G4                   # sensor, check, diff size, traceability (compares with main)
 make review                     # docs/reviews/<date>-<sha>.md: your guided tour (base: main here)
 ```
 
