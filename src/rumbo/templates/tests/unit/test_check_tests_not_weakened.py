@@ -5,6 +5,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from textwrap import dedent
 
 ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
@@ -78,6 +79,120 @@ def test_detects_deleted_file() -> None:
 def test_adding_tests_is_fine() -> None:
     current = dict(BASE, **{"tests/test_b.py": "def test_new():\n    assert 1\n"})
     assert _problems(current) == []
+
+
+# ----------------------------------------------- idiomatic assertions and helpers (ADR-0007)
+RAISES = dedent(
+    """
+    import pytest
+
+    def test_err():
+        assert 1
+        with pytest.raises(ValueError):
+            int('x')
+    """
+)
+HELPER = dedent(
+    """
+    def check(x):
+        assert x == 2
+        assert x > 1
+        assert x < 3
+        assert x
+    """
+)
+INLINE = dedent(
+    """
+    def test_one():
+        x = 2
+        assert x == 2
+        assert x > 1
+        assert x < 3
+        assert x
+    """
+)
+CALLER = "def test_one():\n    x = 2\n    check(x)\n"
+MODULE_CALLER = "import helpers\n\n" + CALLER.replace("check(x)", "helpers.check(x)")
+
+
+def _compare(base: Mapping[str, str | None], current: Mapping[str, str | None]) -> list[str]:
+    return sensor.compare(sensor.analyze(base), sensor.analyze(current))
+
+
+def _asserts(snapshot: Mapping[str, str | None], test: str) -> int:
+    return sensor.analyze(snapshot).tests[test].asserts
+
+
+def test_deleting_a_pytest_raises_block_is_reported() -> None:
+    base = {"tests/test_r.py": RAISES}
+    current = {"tests/test_r.py": RAISES.split("    with pytest.raises")[0]}
+    assert _asserts(base, "tests/test_r.py::test_err") == 2
+    assert any("test_err: asserts dropped from 2 to 1" in p for p in _compare(base, current))
+
+
+def test_mock_and_self_assertions_are_counted() -> None:
+    source = dedent(
+        """
+        class TestX:
+            def test_m(self, m):
+                m.assert_called_once_with(1)
+                self.assertEqual(1, 1)
+        """
+    )
+    assert _asserts({"tests/test_m.py": source}, "tests/test_m.py::TestX.test_m") == 2
+
+
+def test_extracting_asserts_into_a_helper_is_accepted() -> None:
+    layouts: list[dict[str, str | None]] = [
+        {"tests/test_a.py": HELPER + "\n" + CALLER},
+        {"tests/conftest.py": HELPER, "tests/test_a.py": CALLER},
+        {
+            "tests/helpers.py": HELPER,
+            "tests/test_a.py": "from tests.helpers import check\n\n" + CALLER,
+        },
+        {"tests/helpers.py": HELPER, "tests/test_a.py": "from .helpers import check\n\n" + CALLER},
+        {"tests/helpers.py": HELPER, "tests/test_a.py": "from helpers import check\n\n" + CALLER},
+        {"tests/helpers.py": HELPER, "tests/test_a.py": MODULE_CALLER},
+    ]
+    for current in layouts:
+        base: dict[str, str | None] = dict.fromkeys(current, "")
+        base["tests/test_a.py"] = INLINE
+        assert _compare(base, current) == [], current
+        assert sensor.analyze(current).asserts == 4, current
+
+
+def test_hollowing_a_helper_is_reported_for_its_callers() -> None:
+    base: dict[str, str | None] = {"tests/helpers.py": HELPER, "tests/test_a.py": MODULE_CALLER}
+    hollow = dict(base, **{"tests/helpers.py": "def check(x):\n    pass\n"})
+    assert "tests/test_a.py::test_one: asserts dropped from 4 to 0" in _compare(base, hollow)
+
+
+def test_helper_cycle_and_depth_are_bounded() -> None:
+    cycle = dedent(
+        """
+        def h1(x):
+            assert x
+            h2(x)
+
+        def h2(x):
+            assert x
+            h1(x)
+
+        def test_c():
+            h1(1)
+        """
+    )
+    assert _asserts({"tests/test_c.py": cycle}, "tests/test_c.py::test_c") == 2
+    deep = "".join(f"def h{i}(x):\n    h{i + 1}(x)\n\n" for i in range(1, 4))
+    deep += "def h4(x):\n    assert x\n\ndef test_d():\n    h1(1)\n"
+    assert _asserts({"tests/test_d.py": deep}, "tests/test_d.py::test_d") == 0
+
+
+def test_tests_directory_comes_from_pyproject_or_flag(tmp_path: Path) -> None:
+    assert sensor.tests_directory(tmp_path) == "tests"
+    (tmp_path / "pyproject.toml").write_text('[tool.rumbo]\ntests = "spec"\n', encoding="utf-8")
+    assert sensor.tests_directory(tmp_path) == "spec"
+    assert sensor.tests_directory(tmp_path, "checks") == "checks"
 
 
 def _git(repo: Path, *args: str) -> None:
