@@ -24,6 +24,7 @@ def _edit(path: str, old: str = "a", new: str = "b") -> dict[str, object]:
         "infra/Dockerfile",
         "scripts/check_tests_not_weakened.py",
         "scripts/rumbo_guard.py",
+        "scripts/rumbo_check.py",
         ".env",
         ".env.local",
         "evals/run_evals.py",
@@ -353,4 +354,6 @@ def test_generated_project_wires_the_guard() -> None:
     assert all("$CLAUDE_PROJECT_DIR" in c for c in commands)
     assert settings["hooks"]["PostToolUse"][0]["matcher"] == "Bash"
     assert "Bash(make check)" in settings["permissions"]["allow"]
+    assert "Bash(uv run python scripts/rumbo_check.py *)" in settings["permissions"]["allow"]
+    assert "Bash(rumbo check *)" in settings["permissions"]["allow"]
     assert "Edit(./.claude/**)" in settings["permissions"]["deny"]

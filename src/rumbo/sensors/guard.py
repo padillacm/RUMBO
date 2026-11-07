@@ -56,6 +56,7 @@ PROTECTED_FILES = (
     ".claude/settings.json",
     "scripts/check_tests_not_weakened.py",
     "scripts/rumbo_guard.py",
+    "scripts/rumbo_check.py",
     "evals/run_evals.py",
 )
 PROTECTED_PREFIXES = (".github/", "infra/", ".claude/", ".env")
