@@ -184,7 +184,7 @@ def test_runner_is_copied_byte_identical_and_protected(simple_project: Path) -> 
     from rumbo.sensors import guard
 
     runner = simple_project / "scripts" / "rumbo_check.py"
-    assert runner.read_bytes() == CHECK_FILE.read_bytes()
+    assert runner.read_text(encoding="utf-8") == CHECK_FILE.read_text(encoding="utf-8")
     assert CHECK_FILE.name == "check.py" and CHECK_FILE.parent.name == "sensors"
     assert os.name == "nt" or runner.stat().st_mode & 0o111  # no exec bits on Windows
     assert "scripts/rumbo_check.py" in guard.PROTECTED_FILES
@@ -199,7 +199,7 @@ def test_update_refreshes_the_runner(llm_project: Path) -> None:
     runner.write_text("# stale copy\n", encoding="utf-8")
     rep = update(Project.load(llm_project), llm_project)
     assert "scripts/rumbo_check.py" in rep.updated
-    assert runner.read_bytes() == CHECK_FILE.read_bytes()
+    assert runner.read_text(encoding="utf-8") == CHECK_FILE.read_text(encoding="utf-8")
     runner.unlink()
     rep = update(Project.load(llm_project), llm_project)
     assert "scripts/rumbo_check.py" in rep.created and runner.exists()

@@ -403,10 +403,7 @@ def _write_text(target: Path, text: str) -> None:
 
 def _write(target: Path, item: str | Path, rel: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(item, str):
-        _write_text(target, item)
-    else:
-        shutil.copyfile(item, target)
+    _write_text(target, _content(item))  # also normalizes CRLF from a Windows checkout to LF
     if rel.startswith("scripts/"):
         target.chmod(0o755)
 
