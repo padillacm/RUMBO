@@ -1,6 +1,6 @@
 """Ports the use cases depend on, and the offline guard.
 
-`make check` must stay offline: the smoke evals call the entry point with
+The check (`scripts/rumbo_check.py`) must stay offline: the smoke evals call the entry point with
 RUMBO_EVALS_LIVE unset, and any adapter that would reach the network raises `OfflineError`
 instead. Record real responses as fixtures for the smoke suite; call the model only in
 `make evals-live`. Adapters implement these ports; the domain never imports them.
