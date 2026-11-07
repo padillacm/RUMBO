@@ -887,3 +887,366 @@ def test_init_generates_the_fix_command_and_doctor_accepts_it(tmp_path: Path) ->
     assert "/rumbo-fix" in (tmp_path / "README.md").read_text(encoding="utf-8")
     (tmp_path / "uv.lock").write_text("")
     assert main(["doctor", "--dir", str(tmp_path)]) == 0
+
+
+# ----------------------------------------------------------- ADR-0010: kinds and layouts
+def template_context(**overrides: object) -> dict[str, object]:
+    """Every variable `ci.yml.tmpl`, `release.yml.tmpl` and `CHANGELOG.md.tmpl` use.
+
+    This is the contract with `Config.context()` in scaffold.py: the rigor flags it always had
+    and the ADR-0010 axis flags (`service`, `library`, `cli`, `data`, `hexagonal`, `layered`,
+    `flat`, `evals`, `arch`).
+    """
+    ctx: dict[str, object] = {
+        "name": "Demo",
+        "package": "demo",
+        "rumbo_version": "0.3.0",
+        "date": "2026-11-07",
+        "prototype": False,
+        "mvp": True,
+        "production": False,
+        "mvp_or_more": True,
+        "service": False,
+        "library": False,
+        "cli": False,
+        "data": False,
+        "hexagonal": False,
+        "layered": False,
+        "flat": False,
+        "evals": False,
+        "arch": False,
+        "packaged": False,  # library or cli (released to a package index)
+        "deployable": False,  # service or data (shipped as an image)
+    }
+    ctx.update(overrides)
+    return ctx
+
+
+def _render_template(rel: str, **overrides: object) -> str:
+    from rumbo.render import render
+    from rumbo.scaffold import TEMPLATES_DIR
+
+    return render((TEMPLATES_DIR / rel).read_text(encoding="utf-8"), template_context(**overrides))
+
+
+def _kind_project(
+    root: Path, kind: str, rigor: str, layout: str = "", llm: bool = False
+) -> Project:
+    """A bare project with exactly the ops files ADR-0010 lists for `kind`, all complete."""
+    layout = layout or {"service": "hexagonal"}.get(kind, "flat")
+    (root / "src" / "demo").mkdir(parents=True)
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "dependabot.yml").write_text("version: 2\n")
+    (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0.1.0"\n')
+    flags = {
+        kind: True,
+        "packaged": kind in ("library", "cli"),
+        "deployable": kind in ("service", "data"),
+        "production": rigor == "production",
+        "mvp_or_more": rigor != "prototype",
+    }
+    (root / ".github" / "workflows" / "ci.yml").write_text(
+        _render_template("dot_github/workflows/ci.yml.tmpl", **flags)
+    )
+    if kind in ("library", "cli"):
+        (root / "CHANGELOG.md").write_text(_render_template("CHANGELOG.md.tmpl"))
+        (root / ".github" / "workflows" / "release.yml").write_text(
+            _render_template("dot_github/workflows/release.yml.tmpl")
+        )
+    else:
+        (root / "docs" / "ops").mkdir(parents=True)
+        (root / "docs" / "ops" / "runbook.md").write_text("# Runbook\n\nRestart it.\n")
+        if kind == "service":
+            (root / "docs" / "ops" / "slos.md").write_text("# SLOs\n\np95 < 300 ms.\n")
+            (root / "infra").mkdir()
+            (root / "infra" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    if kind == "data":
+        (root / "evals" / "datasets").mkdir(parents=True)
+        (root / "evals" / "datasets" / "cases.jsonl").write_text(
+            json.dumps({"id": "real-001", "input": {"rows": 3}, "expected": {"rows": 3}}) + "\n"
+        )
+    return Project(root=root, package="demo", llm=llm, rigor=rigor, kind=kind, layout=layout)
+
+
+def _by_description(code: str, project: Project) -> dict[str, bool | None]:
+    _, results = evaluate(code, project, run=False)
+    return {r.description: r.ok for r in results}
+
+
+def test_gate_g2_counts_eval_cases_for_a_data_project_without_llm(tmp_path: Path) -> None:
+    data = _by_description("G2", _kind_project(tmp_path / "data", "data", "prototype"))
+    assert "≥20 real cases in evals/datasets/ (rigor prototype)" in data
+    assert data["Eval plan exists"] is None  # prototype: recommended, not required
+    service = _by_description("G2", _kind_project(tmp_path / "svc", "service", "prototype"))
+    assert not any("real cases" in d or d.startswith("Eval plan") for d in service)
+
+
+def test_gate_g3_flat_layout_asks_for_the_architecture_test_not_the_contracts(
+    tmp_path: Path,
+) -> None:
+    project = _kind_project(tmp_path, "cli", "mvp", layout="flat")
+    rows = _by_description("G3", project)
+    assert "import-linter contracts" not in rows
+    assert rows["architecture test present"] is False
+    (tmp_path / "tests" / "architecture").mkdir(parents=True)
+    (tmp_path / "tests" / "architecture" / "test_architecture.py").write_text("def test_x(): ...\n")
+    assert _by_description("G3", project)["architecture test present"] is True
+
+
+def test_gate_g3_hexagonal_layout_requires_the_two_contracts(tmp_path: Path) -> None:
+    project = _kind_project(tmp_path, "service", "mvp", layout="hexagonal")
+    rows = _by_description("G3", project)
+    assert "architecture test present" not in rows
+    assert rows["import-linter contracts"] is False
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n'
+        '[[tool.importlinter.contracts]]\nname = "layers"\n'
+        '[[tool.importlinter.contracts]]\nname = "pure"\n'
+    )
+    assert _by_description("G3", project)["import-linter contracts"] is True
+
+
+def test_gate_g5_service_keeps_the_ops_trio(tmp_path: Path) -> None:
+    rows = _by_description("G5", _kind_project(tmp_path, "service", "mvp"))
+    assert rows["Runbook complete"] and rows["SLOs complete"] and rows["Dockerfile in infra/"]
+    assert rows["automatic dependency updates"] is True
+    assert not any(
+        "CHANGELOG" in d or "Trusted Publishing" in d or "Python versions" in d for d in rows
+    )
+
+
+@pytest.mark.parametrize("kind", ["library", "cli"])
+def test_gate_g5_library_and_cli_pass_with_the_generated_release_files(
+    tmp_path: Path, kind: str
+) -> None:
+    rows = _by_description("G5", _kind_project(tmp_path, kind, "production"))
+    assert rows == {
+        "CHANGELOG.md with an 'Unreleased' section": True,
+        "release workflow publishes with Trusted Publishing (no PyPI token secret)": True,
+        "CI runs on at least two Python versions": True,
+        "automatic dependency updates": True,
+        "SBOM generated in CI": True,
+    }
+
+
+def test_gate_g5_library_red_cases(tmp_path: Path) -> None:
+    changelog = "CHANGELOG.md with an 'Unreleased' section"
+    release = "release workflow publishes with Trusted Publishing (no PyPI token secret)"
+    matrix = "CI runs on at least two Python versions"
+    project = _kind_project(tmp_path, "library", "mvp")
+    _, results = evaluate("G5", project, run=False)
+    assert all(r.ok is True for r in results)
+
+    (tmp_path / "CHANGELOG.md").unlink()
+    _, results = evaluate("G5", project, run=False)
+    bad = next(r for r in results if r.description == changelog)
+    assert bad.ok is False and "missing CHANGELOG.md" in bad.detail
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [0.1.0] - 2026-11-07\n")
+    assert _by_description("G5", project)[changelog] is False
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## Unreleased\n")  # bare heading ok
+    assert _by_description("G5", project)[changelog] is True
+
+    workflow = tmp_path / ".github" / "workflows" / "release.yml"
+    good = workflow.read_text()
+    workflow.write_text(good + "        with:\n          password: ${{ secrets.PYPI_API_TOKEN }}\n")
+    assert _by_description("G5", project)[release] is False
+    workflow.write_text(good.replace("id-token: write", "id-token: none"))
+    assert _by_description("G5", project)[release] is False
+    workflow.unlink()
+    assert _by_description("G5", project)[release] is False
+    workflow.write_text(good)
+
+    ci = tmp_path / ".github" / "workflows" / "ci.yml"
+    ci.write_text(_render_template("dot_github/workflows/ci.yml.tmpl", service=True))
+    assert "matrix:" not in ci.read_text()
+    assert _by_description("G5", project)[matrix] is False
+    ci.write_text(
+        "jobs:\n  check:\n    strategy:\n      matrix:\n        python:\n"
+        "          - '3.12'\n          - '3.13'\n"
+    )
+    assert _by_description("G5", project)[matrix] is True
+    ci.write_text(
+        "jobs:\n  check:\n    strategy:\n      matrix:\n        python-version: ['3.13']\n"
+    )
+    assert _by_description("G5", project)[matrix] is False
+
+    # prototype: the same misses are recommendations, never failures
+    prototype = Project(
+        root=tmp_path, package="demo", llm=False, rigor="prototype", kind="library", layout="flat"
+    )
+    rows = _by_description("G5", prototype)
+    assert rows[matrix] is None and rows["automatic dependency updates"] is True
+
+
+def test_gate_g5_data_requires_runbook_and_datasets_but_only_recommends_a_dockerfile(
+    tmp_path: Path,
+) -> None:
+    datasets = "datasets present in evals/datasets/"
+    project = _kind_project(tmp_path, "data", "mvp")
+    rows = _by_description("G5", project)
+    assert rows["Runbook complete"] is True and rows[datasets] is True
+    assert rows["Dockerfile in infra/"] is None  # recommended: missing is not a failure
+    assert "SLOs complete" not in rows and "CHANGELOG.md with an 'Unreleased' section" not in rows
+    (tmp_path / "infra").mkdir()
+    (tmp_path / "infra" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    assert _by_description("G5", project)["Dockerfile in infra/"] is True
+
+    (tmp_path / "evals" / "datasets" / "cases.jsonl").write_text(
+        json.dumps({"id": "example-001", "tags": ["example"]}) + "\n"
+    )
+    assert _by_description("G5", project)[datasets] is False
+    (tmp_path / "docs" / "ops" / "runbook.md").unlink()
+    assert _by_description("G5", project)["Runbook exists"] is False
+
+    prototype = Project(
+        root=tmp_path, package="demo", llm=False, rigor="prototype", kind="data", layout="flat"
+    )
+    rows = _by_description("G5", prototype)
+    assert rows[datasets] is None and rows["Runbook exists"] is None
+    production = Project(
+        root=tmp_path, package="demo", llm=False, rigor="production", kind="data", layout="flat"
+    )
+    assert "SBOM generated in CI" in _by_description("G5", production)
+
+
+PINNED = re.compile(r"uses: ([\w./-]+)@([0-9a-f]{40}) # v\d+\.\d+\.\d+$", re.M)
+
+
+def test_release_template_uses_trusted_publishing_with_pinned_actions() -> None:
+    text = _render_template("dot_github/workflows/release.yml.tmpl")
+    assert 'tags: ["v*"]' in text and text.index("permissions:\n  contents: read") < text.index(
+        "jobs:"
+    )
+    from rumbo.gates import PYPI_SECRET
+
+    assert "id-token: write" in text and not PYPI_SECRET.search(text)  # no token secret anywhere
+    pins = dict(PINNED.findall(text))
+    assert pins == {
+        "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "astral-sh/setup-uv": "68559e99cc807c1eb7e9238fd43a15bba460eec2",
+        "pypa/gh-action-pypi-publish": "7245906fb61fa33a13554f9d5fb856fe61758086",
+    }
+    assert len(re.findall(r"^\s+(?:- )?uses: ", text, re.M)) == len(pins)  # every action is pinned
+    assert "uv build" in text and "['project']['version']" in text and "$GITHUB_REF_NAME" in text
+    assert "Trusted Publish" in text and "Workflow name:      release.yml" in text
+
+
+def test_changelog_template_starts_with_an_unreleased_section() -> None:
+    text = _render_template("CHANGELOG.md.tmpl", rumbo_version="9.9.9", date="2030-01-02")
+    assert text.startswith("# Changelog") and "## [Unreleased]" in text
+    assert "RUMBO 9.9.9 on 2030-01-02" in text
+
+
+@pytest.mark.parametrize(
+    ("kind", "versions"), [("library", 3), ("cli", 3), ("service", 0), ("data", 0)]
+)
+def test_ci_template_runs_a_python_matrix_only_for_packages(kind: str, versions: int) -> None:
+    from rumbo.gates import _python_matrix
+
+    flags: dict[str, object] = {kind: True, "packaged": kind in ("library", "cli")}
+    text = _render_template("dot_github/workflows/ci.yml.tmpl", **flags)
+    assert _python_matrix(text) == versions
+    assert ("UV_PYTHON: ${{ matrix.python }}" in text) is (versions > 0)
+    assert text.count("runs-on: windows-latest") == 1 and "matrix.os" not in text
+
+
+# --------------------------------------------------------------------------- ADR-0011
+def _checks(root: Path) -> dict[str, str]:
+    import tomllib
+
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    return data["tool"]["rumbo"]["checks"]
+
+
+def _list_dev_tools(root: Path, tools: list[str]) -> None:
+    """What `uv add --dev` would have written had the project been installed."""
+    pyproject = root / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    group = "\n[dependency-groups]\ndev = [" + ", ".join(f'"{t}"' for t in tools) + "]\n"
+    if "[dependency-groups]" in text:
+        text = text[: text.index("\n[dependency-groups]")]
+    pyproject.write_text(text + group, encoding="utf-8")
+
+
+PROTOTYPE_TOOLS = ["ruff", "pyright", "pytest", "hypothesis", "pre-commit", "import-linter"]
+
+
+def test_promote_refuses_equal_and_lower_rigor(
+    llm_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0011 fitness: promote only raises; lowering is a hand edit, by design."""
+    before = (llm_project / "pyproject.toml").read_text(encoding="utf-8")
+    assert main(["promote", "mvp", "--dir", str(llm_project), "--no-install"]) == 1
+    assert "already at rigor 'mvp'" in capsys.readouterr().err
+    assert main(["promote", "prototype", "--dir", str(llm_project), "--no-install"]) == 1
+    err = capsys.readouterr().err
+    assert "cannot lower the rigor from 'mvp' to 'prototype'" in err and "hand edit" in err
+    assert (llm_project / "pyproject.toml").read_text(encoding="utf-8") == before
+    assert main(["promote", "mvp", "--dir", str(llm_project / "nowhere")]) == 2  # usage error
+
+
+def test_promote_prototype_to_mvp_then_production(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0011 fitness: rigor written, steps appended, nightly and dependabot rendered, uv line."""
+    nightly = simple_project / ".github" / "workflows" / "nightly.yml"
+    dependabot = simple_project / ".github" / "dependabot.yml"
+    untouched = {p: (simple_project / p).read_bytes() for p in ("AGENTS.md", "Makefile")}
+    assert Project.load(simple_project).rigor == "prototype"
+    assert not nightly.exists() and not dependabot.exists()
+    assert list(_checks(simple_project)) == ["lint", "format", "types", "test", "arch", "sensor"]
+    _list_dev_tools(simple_project, PROTOTYPE_TOOLS)
+
+    assert main(["promote", "mvp", "--dir", str(simple_project), "--no-install"]) == 0
+    out = capsys.readouterr().out
+    assert "Promoting Demo from prototype to mvp" in out
+    assert "Run to complete the update:\n  uv add --dev pytest-cov bandit pip-audit" in out
+    assert "rumbo gate" in out
+    project = Project.load(simple_project)
+    assert project.rigor == "mvp" and project.package == "demo"  # the other keys are intact
+    assert nightly.exists() and dependabot.exists()
+    checks = _checks(simple_project)
+    assert list(checks) == [
+        "lint",
+        "format",
+        "types",
+        "test",
+        "arch",
+        "sensor",
+        "security",
+        "security-scripts",
+        "audit",
+    ]
+    assert checks["test"] == "uv run pytest"  # existing steps are never replaced
+    assert checks["audit"] == "uv run pip-audit --skip-editable"
+
+    # mvp → production: no new steps (the table is the same), mutmut is the new tool.
+    _list_dev_tools(simple_project, [*PROTOTYPE_TOOLS, "pytest-cov", "bandit", "pip-audit"])
+    assert main(["promote", "production", "--dir", str(simple_project), "--no-install"]) == 0
+    out = capsys.readouterr().out
+    assert "Promoting Demo from mvp to production" in out
+    assert "Run to complete the update:\n  uv add --dev mutmut" in out
+    assert Project.load(simple_project).rigor == "production"
+    assert list(_checks(simple_project)) == list(checks)
+    # Promote never touches AGENTS.md or the Makefile (ADR-0011); `update` only reports them.
+    assert {p: (simple_project / p).read_bytes() for p in untouched} == untouched
+    assert "AGENTS.md" in out  # listed under "Differ from the current template"
+
+
+def test_promote_runs_uv_add_unless_no_install(
+    simple_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path, report: Any) -> int:
+        calls.append(cmd)
+        report.commands.append((" ".join(cmd), 0))
+        return 0
+
+    from rumbo import scaffold as scaffold_module
+
+    monkeypatch.setattr(scaffold_module, "_run", fake_run)
+    monkeypatch.setattr(scaffold_module.shutil, "which", lambda name: "/usr/bin/uv")
+    _list_dev_tools(simple_project, PROTOTYPE_TOOLS)
+    assert main(["promote", "mvp", "--dir", str(simple_project)]) == 0
+    assert calls == [["uv", "add", "--dev", "pytest-cov", "bandit", "pip-audit"]]

@@ -119,6 +119,11 @@ apply recursively to the rest: in R, "anchor" means fixing metrics; in M, fixing
 ### 2.3 M — Model
 1. **Modular monolith** with a light hexagonal architecture: `domain/` (pure), `app/` (use
    cases), `adapters/` (APIs, LLM, DB) and `api/`. The agent touches one module per task.
+   That is the default for a service; a library, a cli or a pipeline starts `flat`, and any
+   project can declare its own stack (`--layout layered --layers api,core`): the contracts
+   are generated from the list and the innermost layer is the pure one (ADR-0010). Few, coarse
+   contracts: the fine-grained per-module configuration of tach-style tools is what teams
+   abandon.
 2. **MADR ADRs with an executable fitness function**: the ADR stops being documentation and
    becomes a sensor.
 3. **C4 levels 1–2** in Mermaid inside the repo.
@@ -321,9 +326,11 @@ sensor or the human.
 | Data | **Postgres** (+pgvector) or **DuckDB/Parquet** | SQLite | |
 | Flags | Environment variables; **Unleash/GrowthBook** later | LaunchDarkly | Proportional to size |
 
-`rumbo init` installs the core with `uv add` (ruff, pyright, pytest, Hypothesis, pytest-cov,
-import-linter, pre-commit, pip-audit, bandit, mutmut) and configures gitleaks as a hook and as a
-CI job. The rest is added in its phase, verified with `rumbo verify-dep` and approved by the
+`rumbo init` installs with `uv add` what the rigor verifies (ADR-0011): ruff, pyright, pytest,
+Hypothesis and pre-commit for a prototype (plus import-linter when the layout has layers);
+pytest-cov, bandit and pip-audit from mvp; mutmut at production. `rumbo promote` adds the next
+level's tools without removing anything. gitleaks runs as a hook and as a CI job at every
+level. The rest is added in its phase, verified with `rumbo verify-dep` and approved by the
 human.
 
 ---

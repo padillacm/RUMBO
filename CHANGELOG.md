@@ -25,6 +25,14 @@ All notable changes to this project are documented here. The format follows
   regression test added, diff ≤ 150 lines, no new runtime dependency.
 - `rumbo tour --out <dir>/` names the review file `<date>-<sha>.md`; the generated harness
   calls `rumbo` directly instead of `make rumbo ARGS=...`.
+- ADR-0010: `--kind service|library|cli|data` and `--layout hexagonal|layered|flat`
+  (`--layers` for a layered package); A0 question 2 asks what is being built, the LLM question
+  is its sub-question. A library or cli gets `CHANGELOG.md`, a Trusted Publishing release
+  workflow, a CI matrix and `[project.scripts]`; a data pipeline gets `evals/` without a model;
+  a service keeps its HTTP skeleton without LLM. G3 and G5 ask each kind and layout only for
+  what it can have. Older projects load as service/hexagonal; `rumbo update` writes the keys.
+- ADR-0011: development dependencies and the checks table scale with rigor (five tools for a
+  prototype); `rumbo promote mvp|production` raises the level without removing anything.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line

@@ -45,8 +45,9 @@ What it enforces, and how strongly
   clone (`rumbo init` sets it), and unknown otherwise, which counts as an agent. For an agent,
   `pre-commit` refuses a staged protected file (pyproject.toml and uv.lock excepted, as above)
   and a staged document whose `<!-- rumbo:template` mark was in HEAD and is gone; `commit-msg`
-  refuses `[tests-change-approved]`. The human's commits, and a run with nothing staged
-  (`pre-commit run --all-files` in CI), pass silently. The Bash heuristics also block
+  refuses `[tests-change-approved]`. The human's commits, the root commit of a repository (the
+  harness itself, nothing to protect yet) and a run with nothing staged (`pre-commit run
+  --all-files` in CI) pass silently. The Bash heuristics also block
   `git config` on `rumbo.human`, so the agent cannot declare itself human.
 """
 
@@ -357,6 +358,12 @@ def actor(root: Path) -> str:
     return "unknown"
 
 
+def has_head(root: Path) -> bool:
+    """False in a repository with no commit yet (the next commit is the root commit)."""
+    proc = _git(root, "rev-parse", "--verify", "-q", "HEAD")
+    return proc is not None and proc.returncode == 0
+
+
 def staged_files(root: Path) -> list[str]:
     proc = _git(root, "diff", "--cached", "--name-only", "--diff-filter=ACMRD")
     if proc is None or proc.returncode != 0:
@@ -389,6 +396,10 @@ def check_pre_commit(root: Path) -> str | None:
     """Reason to refuse the commit (git pre-commit hook), or None to let it through."""
     who = actor(root)
     if who == "human":
+        return None
+    if not has_head(root):
+        # The root commit IS the harness `rumbo init` just wrote (on the human's request, often
+        # from inside the agent's session): there is no previous state to protect yet.
         return None
     staged = staged_files(root)
     if not staged:

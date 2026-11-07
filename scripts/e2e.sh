@@ -18,6 +18,9 @@ uv run python scripts/rumbo_check.py
 make check                                        # the Makefile alias still works where make exists
 uv run --project "$ROOT" rumbo check --dir .      # the CLI runs the same module
 uv run --project "$ROOT" rumbo doctor
+# ADR-0010: a fresh library or cli project passes G5 (its ops items are all generated); a service
+# or data project cannot yet: its runbook and SLOs still carry the template mark from mvp on.
+if echo "$FLAGS" | grep -Eq -- "--kind (library|cli)"; then uv run --project "$ROOT" rumbo gate G5 --no-run; fi
 git add -A
 git commit -qm "chore: initial RUMBO harness"
 uv run python scripts/check_tests_not_weakened.py --base HEAD
@@ -43,5 +46,13 @@ rc=0; CLAUDECODE=1 git commit -q --allow-empty -m "x [tests-change-approved]" ||
 env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY -u MISTRAL_API_KEY uv run python scripts/rumbo_check.py --brief
 uv run --project "$ROOT" rumbo gate G4 --no-run >/dev/null
 uv run --project "$ROOT" rumbo update
+# ADR-0011: a prototype grows into an mvp with one command (new steps appended, their tools added
+# with `uv add --dev`); the runner must stay green with the whole mvp table.
+if [ "$FLAGS" = "--no-llm --rigor prototype" ]; then
+  uv run --project "$ROOT" rumbo promote mvp
+  test "$(grep -c '^audit = ' pyproject.toml)" -eq 1 && test -f .github/workflows/nightly.yml
+  uv run python scripts/rumbo_check.py
+  rc=0; uv run --project "$ROOT" rumbo promote mvp || rc=$?; test "$rc" -eq 1   # equal rigor: refused
+fi
 if echo "$FLAGS" | grep -q production; then make sbom && test -s sbom.cdx.json; fi
 echo "E2E OK ($FLAGS)"

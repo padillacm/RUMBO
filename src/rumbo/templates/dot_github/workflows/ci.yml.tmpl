@@ -18,6 +18,15 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+{{#packaged}}
+    # ADR-0010: a package others install runs on every Python it promises (requires-python).
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
+{{/packaged}}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

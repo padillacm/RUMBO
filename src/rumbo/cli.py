@@ -2,6 +2,7 @@
 
 rumbo init                      mount the harness (Part A) in a project
 rumbo update                    refresh the files the framework owns
+rumbo promote mvp|production    raise the rigor: new checks, files and dev tools (ADR-0011)
 rumbo new adr|spec|postmortem   create a document from its template
 rumbo decision "title"          log a human decision in docs/decisions.md
 rumbo gate G1..G5               automatic checks + human checklist of a gate
@@ -35,14 +36,18 @@ from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
 from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
-from rumbo.project import RIGOR_LEVELS, Project, slug
+from rumbo.project import KINDS, LAYOUTS, RIGOR_LEVELS, Project, rigor_rank, slug
 from rumbo.scaffold import (
     OTHER_PROVIDER,
     PROVIDERS,
     Config,
+    add_dev_dependencies,
+    dev_dependencies,
     install,
     plan_files,
+    runtime_dependencies,
     scaffold,
+    set_rigor,
     to_package,
     update,
     update_diff,
@@ -95,13 +100,17 @@ def _config_from_args(args: argparse.Namespace) -> Config:
     name, package, llm = args.name, args.package, args.llm
     provider, rigor, case = args.provider, args.rigor, args.case
     sdk_package, sdk_module, sdk_env_key = args.sdk_package, args.sdk_module, args.sdk_env_key
+    kind, layout = args.kind, args.layout or ""
+    layers = tuple(x.strip() for x in (args.layers or "").split(",") if x.strip())
 
     if interactive:
         print("A0 · RUMBO initial questions (Enter accepts the value in brackets)\n")
         name = name or _ask("1. Project name", Path(args.dir).resolve().name, valid_name)
         package = package or _ask("   Python package (snake_case)", to_package(name), valid_package)
+        # ADR-0010: the kind is the question; the LLM capability is its sub-question.
+        kind = kind or _ask("2. What are you building?", "service", choices=list(KINDS))
         if llm is None:
-            llm = _yes(_ask("2. Is it an LLM product?", "no", choices=["yes", "no"]))
+            llm = _yes(_ask("   Does it call an LLM?", "no", choices=["yes", "no"]))
         if llm and not provider:
             provider = _ask("   Model provider", "anthropic", choices=PROVIDER_CHOICES)
         if llm and provider == OTHER_PROVIDER:
@@ -119,6 +128,9 @@ def _config_from_args(args: argparse.Namespace) -> Config:
             raise ValueError("with --yes you must pass --rigor (A0 question 3)")
         name = name or Path(args.dir).resolve().name
         package = package or to_package(name)
+    kind = kind or "service"  # ADR-0010 default; --layout and --layers are never asked
+    if llm and layout and layout != "hexagonal":
+        print(f"note: an LLM product is hexagonal (ADR-0010); --layout {layout} is ignored")
     return Config(
         name=name,
         package=package,
@@ -129,6 +141,9 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         sdk_package=sdk_package or "",
         sdk_module=sdk_module or "",
         sdk_env_key=sdk_env_key or "",
+        kind=kind,
+        layout=layout,
+        layers=layers,
     )
 
 
@@ -140,7 +155,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     dest = Path(args.dir).resolve()
     print(f"\nMounting the RUMBO harness in {dest}")
     print(
-        f"  package={cfg.package} llm={cfg.llm} provider={cfg.provider or '-'} rigor={cfg.rigor}\n"
+        f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor}\n"
     )
     if args.force:
         print(
@@ -165,16 +181,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         install(cfg, dest, rep)
     print("\n" + rep.summary())
     if args.no_install:
+        runtime = runtime_dependencies(cfg)
         print(
             "\nNext steps (--no-install):\n"
-            "  1. uv add --dev ruff pyright pytest pytest-cov hypothesis import-linter "
-            "pre-commit pip-audit bandit mutmut"
-            + (
-                "\n     uv add pydantic fastapi httpx uvicorn"
-                + (f" {cfg.sdk_package}" if cfg.sdk_package else "")
-                if cfg.llm
-                else ""
-            )
+            f"  1. uv add --dev {' '.join(dev_dependencies(cfg))}"
+            + (f"\n     uv add {' '.join(runtime)}" if runtime else "")
             + "\n  2. uv run pre-commit autoupdate && uv run pre-commit install\n"
             "  3. uv run python scripts/rumbo_check.py    # must be green\n"
         )
@@ -203,6 +214,50 @@ def cmd_update(args: argparse.Namespace) -> int:
     print(rep.summary())
     print(f"\nHarness version is now {__version__}. Review the diff with: git diff")
     return 0
+
+
+# ---------------------------------------------------------------------- promote
+def cmd_promote(args: argparse.Namespace) -> int:
+    """Raises the rigor (ADR-0011): writes it, runs `update`, adds the level's dev tools."""
+    root = Path(args.dir).resolve()
+    try:
+        project = Project.load(root)
+    except (FileNotFoundError, ValueError) as exc:
+        return _err(str(exc))
+    target: str = args.rigor
+    if rigor_rank(target) <= rigor_rank(project.rigor):
+        # Not a usage error (exit 2): the command is fine, the project is not below `target`.
+        if target == project.rigor:
+            message = f"the project is already at rigor {target!r}; nothing to promote"
+        else:
+            message = (
+                f"cannot lower the rigor from {project.rigor!r} to {target!r}: `rumbo promote` "
+                "only raises it; lowering is a hand edit of [tool.rumbo].rigor (ADR-0011)"
+            )
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
+    pyproject = root / "pyproject.toml"
+    try:
+        text = set_rigor(pyproject.read_text(encoding="utf-8"), target)
+    except ValueError as exc:
+        return _err(str(exc))
+    with pyproject.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    print(f"Promoting {project.name or project.package} from {project.rigor} to {target}")
+    rep = update(Project.load(root), root)
+    if not args.no_install:
+        for cmd in list(rep.suggested):
+            if (
+                cmd.startswith("uv add --dev ")
+                and add_dev_dependencies(cmd.split()[3:], root, rep) == 0
+            ):
+                rep.suggested.remove(cmd)
+    print("\n" + rep.summary())
+    print(
+        f"\nRigor is now {target} (harness {__version__}). Review the diff with: git diff\n"
+        f"The new level asks more of the gates: see what it requires with: rumbo gate G4"
+    )
+    return 1 if any(rc != 0 for _, rc in rep.commands) else 0
 
 
 # -------------------------------------------------------------------------- new
@@ -336,8 +391,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"❌ {problem}")
     if not problems:
         print(
-            f"✅ Harness complete (package={project.package}, llm={project.llm}, "
-            f"provider={project.provider or '-'}, rigor={project.rigor})."
+            f"✅ Harness complete (package={project.package}, kind={project.kind}, "
+            f"layout={project.layout}, llm={project.llm}, provider={project.provider or '-'}, "
+            f"rigor={project.rigor})."
         )
         return 0
     return 1
@@ -605,7 +661,10 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     datasets = root / "evals" / "datasets"
     if not (root / "evals" / "graders" / "__init__.py").exists():
-        return _err("no evals/ in this project (LLM products only); did you run 'rumbo init'?")
+        return _err(
+            "no evals/ in this project (LLM products and data pipelines only); "
+            "did you run 'rumbo init'?"
+        )
     if not re.fullmatch(r"[a-z0-9_-]+", args.suite):
         return _err("suite must be a plain name (letters, digits, - or _)")
     if args.suite == "all":
@@ -707,6 +766,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_dir(p)
     p.add_argument("--name", help="project name (plain text, no quotes)")
     p.add_argument("--package", "--pkg", dest="package", help="Python package in snake_case")
+    p.add_argument(
+        "--kind", choices=KINDS, help="what you are building (A0 question 2; default: service)"
+    )
+    p.add_argument(
+        "--layout",
+        choices=LAYOUTS,
+        help="package layout (default by kind: service hexagonal, the others flat; --llm forces "
+        "hexagonal)",
+    )
+    p.add_argument(
+        "--layers", metavar="A,B,C", help="layers of a layered layout, outermost first (>= 2)"
+    )
     llm = p.add_mutually_exclusive_group()
     llm.add_argument("--llm", dest="llm", action="store_true", default=None, help="LLM product")
     llm.add_argument("--no-llm", dest="llm", action="store_false", help="no LLM in the product")
@@ -734,6 +805,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--diff", action="store_true", help="show what would change (nothing is written)"
     )
     p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser(
+        "promote",
+        help="raise the rigor level (prototype → mvp → production)",
+        description="Writes the new rigor in [tool.rumbo], runs `rumbo update` (appends the "
+        "level's checks, renders its files) and `uv add --dev` for the tools it needs. Nothing is "
+        "removed; lowering the rigor is a hand edit (ADR-0011).",
+    )
+    p.add_argument("rigor", choices=RIGOR_LEVELS, help="the new, higher rigor level")
+    add_dir(p)
+    p.add_argument(
+        "--no-install", action="store_true", help="write files only; print the 'uv add' line"
+    )
+    p.set_defaults(func=cmd_promote)
 
     p = sub.add_parser("new", help="create an ADR, spec or postmortem from its template")
     p.add_argument("kind", choices=sorted(NEW_KINDS), help="document kind")

@@ -1,12 +1,15 @@
-"""HTTP API (FastAPI). Validates at the boundary and delegates to app/."""
+"""HTTP API (FastAPI). Validates at the boundary and delegates to the use cases."""
 
 from importlib.metadata import version
 
 from fastapi import FastAPI
+{{#llm}}
 
 from {{package}}.app.telemetry import configure_json_logging
 
 configure_json_logging()  # spans and errors as JSON lines; without it INFO records are dropped
+{{/llm}}
+
 __version__ = version("{{package}}")
 app = FastAPI(title={{name_py}}, version=__version__)
 

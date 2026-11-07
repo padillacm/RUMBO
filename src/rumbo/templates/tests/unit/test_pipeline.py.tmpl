@@ -1,0 +1,11 @@
+"""The pipeline skeleton answers the example cases offline and abstains otherwise."""
+
+from {{package}}.pipeline import run
+
+
+def test_ping_pong() -> None:
+    assert run({"question": "ping"}) == {"answer": "pong"}
+
+
+def test_abstains_without_data() -> None:
+    assert run({"question": "data that does not exist"})["abstain"] is True

@@ -1,0 +1,14 @@
+"""Entry function the evals call (evals/run_evals.py --entry).
+
+SKELETON: replace it in the first ANCLA task with the real pipeline. For now it answers only
+the example cases of evals/datasets/smoke.jsonl so the harness is green. Numbers shown to the
+user are computed here, by code, and graded with the deterministic graders in evals/graders/.
+"""
+
+from typing import Any
+
+
+def run(request: dict[str, Any]) -> dict[str, Any]:
+    if request.get("question") == "ping":
+        return {"answer": "pong"}
+    return {"abstain": True, "reason": "no data for this request"}

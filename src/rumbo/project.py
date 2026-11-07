@@ -10,10 +10,39 @@ from pathlib import Path
 
 TEMPLATE_MARK = "<!-- rumbo:template"
 RIGOR_LEVELS = ("prototype", "mvp", "production")
+# ADR-0010: what the project is, and how its package is organised. Orthogonal to `llm`.
+KINDS = ("service", "library", "cli", "data")
+LAYOUTS = ("hexagonal", "layered", "flat")
+DEFAULT_LAYOUT = {"service": "hexagonal", "library": "flat", "cli": "flat", "data": "flat"}
+HEXAGONAL_LAYERS = ("api", "adapters", "app", "domain")  # outermost first
+_LAYER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def rigor_rank(rigor: str) -> int:
     return RIGOR_LEVELS.index(rigor)
+
+
+def resolve_layout(kind: str, layout: str, llm: bool) -> str:
+    """The layout to use: explicit, else derived from the kind; `llm` forces hexagonal."""
+    if llm:
+        return "hexagonal"
+    return layout or DEFAULT_LAYOUT[kind]
+
+
+def validate_axes(kind: str, layout: str, layers: tuple[str, ...]) -> None:
+    """Raises ValueError when kind, layout or layers (ADR-0010) are not consistent."""
+    if kind not in KINDS:
+        raise ValueError(f"invalid kind {kind!r}; use one of {KINDS}")
+    if layout not in LAYOUTS:
+        raise ValueError(f"invalid layout {layout!r}; use one of {LAYOUTS}")
+    if layout == "layered":
+        if len(layers) < 2:
+            raise ValueError("layout 'layered' needs at least two layers (outermost first)")
+        bad = [x for x in layers if not _LAYER_RE.match(x)]
+        if bad or len(set(layers)) != len(layers):
+            raise ValueError(f"layers must be distinct snake_case names, got {layers!r}")
+    elif layers:
+        raise ValueError(f"layers are only used with layout 'layered', got {layers!r}")
 
 
 @dataclass(frozen=True)
@@ -23,6 +52,9 @@ class Project:
     llm: bool
     rigor: str
     name: str = ""
+    kind: str = "service"
+    layout: str = "hexagonal"
+    layers: tuple[str, ...] = ()
     provider: str = ""
     sdk_package: str = ""
     sdk_module: str = ""
@@ -48,12 +80,27 @@ class Project:
         if rigor not in RIGOR_LEVELS:
             raise ValueError(f"[tool.rumbo].rigor must be one of {RIGOR_LEVELS}, got {rigor!r}")
         provider = str(cfg.get("provider", ""))
+        # ADR-0010: projects generated before the axes existed are services with hexagonal
+        # layers; the keys are inferred, never required.
+        kind = str(cfg.get("kind", "service"))
+        llm = bool(cfg.get("llm", False))
+        layout = resolve_layout(kind, str(cfg.get("layout", "")), llm) if kind in KINDS else ""
+        raw_layers = cfg.get("layers", [])
+        layers = (
+            tuple(str(x) for x in raw_layers)
+            if isinstance(raw_layers, list) and all(isinstance(x, str) for x in raw_layers)
+            else ()
+        )
+        validate_axes(kind, layout, layers)
         return cls(
             root=root,
             package=str(package),
             name=str(cfg.get("name", "")) or root.name or str(package),
-            llm=bool(cfg.get("llm", False)),
+            llm=llm,
             rigor=rigor,
+            kind=kind,
+            layout=layout,
+            layers=layers,
             provider="" if provider == "none" else provider,
             sdk_package=str(cfg.get("sdk_package", "")),
             sdk_module=str(cfg.get("sdk_module", "")),
@@ -67,6 +114,29 @@ class Project:
 
     def at_least(self, rigor: str) -> bool:
         return rigor_rank(self.rigor) >= rigor_rank(rigor)
+
+    @property
+    def evals(self) -> bool:
+        """Datasets and graders exist for LLM products and for data pipelines (ADR-0010)."""
+        return self.llm or self.kind == "data"
+
+    @property
+    def arch(self) -> bool:
+        """Import-linter contracts and the purity rules apply unless the layout is flat."""
+        return self.layout != "flat"
+
+    @property
+    def layer_names(self) -> tuple[str, ...]:
+        """Package layers, outermost first; empty for a flat layout."""
+        if self.layout == "hexagonal":
+            return HEXAGONAL_LAYERS
+        return self.layers if self.layout == "layered" else ()
+
+    @property
+    def inner_layer(self) -> str:
+        """The pure layer (strict types, mutation target, purity contract); '' when flat."""
+        names = self.layer_names
+        return names[-1] if names else ""
 
 
 def is_template(text: str | None) -> bool:

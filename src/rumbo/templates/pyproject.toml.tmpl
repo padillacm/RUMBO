@@ -5,6 +5,11 @@ description = {{name_toml}}
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+{{#cli}}
+
+[project.scripts]
+{{package}} = "{{package}}.__main__:main"
+{{/cli}}
 
 [build-system]
 requires = ["hatchling"]
@@ -18,6 +23,13 @@ packages = ["src/{{package}}"]
 version = "{{rumbo_version}}"
 name = {{name_toml}}
 package = "{{package}}"
+# ADR-0010: what the project is (service, library, cli, data) and how its package is organised
+# (hexagonal, layered, flat). `layers` lists a layered package's layers, outermost first.
+kind = "{{kind}}"
+layout = "{{layout}}"
+{{#layered}}
+layers = {{layers_toml_list}}
+{{/layered}}
 llm = {{#llm}}true{{/llm}}{{^llm}}false{{/llm}}
 provider = "{{provider}}"
 sdk_package = "{{sdk_package}}"
@@ -28,18 +40,24 @@ rigor = "{{rigor}}"
 [tool.rumbo.checks]
 # Verification steps in execution order, read by `scripts/rumbo_check.py` (`rumbo check`).
 # One command per step, run without a shell (ADR-0006); `{base}` is origin/main if it exists, else main.
+# The steps scale with `rigor` (ADR-0011): `rumbo update` appends the ones your level requires
+# (after `rumbo promote` or a hand edit of `rigor`) and never replaces or removes one.
 lint = "uv run ruff check ."
 format = "uv run ruff format --check ."
 types = "uv run pyright"
 test = "uv run pytest{{#mvp_or_more}} --cov --cov-report=term-missing:skip-covered{{/mvp_or_more}}"
+{{#arch}}
 arch = "uv run lint-imports"
-security = "uv run bandit -q -r src{{#llm}} evals{{/llm}}"
+{{/arch}}
+{{#mvp_or_more}}
+security = "uv run bandit -q -r src{{#evals}} evals{{/evals}}"
 security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
 audit = "uv run pip-audit --skip-editable"
-{{#llm}}
-# Smoke evals run OFFLINE (recorded fixtures); the model is only called by `make evals-live`.
+{{/mvp_or_more}}
+{{#evals}}
+# Smoke evals run OFFLINE (recorded fixtures){{#llm}}; the model is only called by `make evals-live`{{/llm}}.
 evals = "uv run python evals/run_evals.py --suite smoke"
-{{/llm}}
+{{/evals}}
 sensor = "uv run python scripts/check_tests_not_weakened.py --base {base}"
 
 [tool.ruff]
@@ -58,10 +76,12 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
 [tool.pyright]
 include = ["src", "tests"]
 typeCheckingMode = "standard"
-strict = ["src/{{package}}/domain"]
-{{#llm}}
+{{#arch}}
+strict = ["src/{{package}}/{{inner_layer}}"]
+{{/arch}}
+{{#evals}}
 extraPaths = ["evals"]
-{{/llm}}
+{{/evals}}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -70,28 +90,30 @@ addopts = "-q --strict-markers"
 [tool.coverage.run]
 source = ["src/{{package}}"]
 branch = true
-
-[tool.bandit]
-# asserts in evals/ and tests/ are intended (B101); ruff S101 still guards src/.
-skips = ["B101"]
+{{#arch}}
 
 [tool.importlinter]
 root_package = "{{package}}"
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "Hexagonal layers"
+name = "Layers ({{layout}}, outermost first)"
 type = "layers"
-layers = ["{{package}}.api", "{{package}}.adapters", "{{package}}.app", "{{package}}.domain"]
+layers = [{{layers_toml}}]
 
 [[tool.importlinter.contracts]]
-name = "The domain is pure"
+name = "The {{inner_layer}} layer is pure"
 type = "forbidden"
-source_modules = ["{{package}}.domain"]
+source_modules = ["{{package}}.{{inner_layer}}"]
 forbidden_modules = [{{forbidden_toml}}]
 
 [tool.mutmut]
-# Everything under src/ is copied, only the domain (critical modules) is mutated.
+# Everything under src/ is copied, only the {{inner_layer}} layer (critical modules) is mutated.
 source_paths = ["src/"]
-only_mutate = ["src/{{package}}/domain/*"]
-also_copy = ["evals/", "scripts/"]
+only_mutate = ["src/{{package}}/{{inner_layer}}/*"]
+also_copy = [{{#evals}}"evals/", {{/evals}}"scripts/"]
+{{/arch}}
+
+[tool.bandit]
+# asserts in evals/ and tests/ are intended (B101); ruff S101 still guards src/.
+skips = ["B101"]
