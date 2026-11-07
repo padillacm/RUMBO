@@ -37,7 +37,7 @@ rc=0; CLAUDECODE=1 git commit -qm "chore: touch the Makefile" || rc=$?; test "$r
 git restore --staged Makefile; git checkout -- Makefile
 echo "x: ; echo" >> Makefile; git add Makefile
 env -u CLAUDECODE -u GEMINI_CLI -u CURSOR_AGENT -u CODEX_SANDBOX_NETWORK_DISABLED git commit -qm "chore: touch the Makefile"
-git revert -q --no-edit HEAD
+git revert --no-edit HEAD >/dev/null
 rc=0; CLAUDECODE=1 git commit -q --allow-empty -m "x [tests-change-approved]" || rc=$?; test "$rc" -ne 0
 # the harness must stay offline: no model credential in the environment
 env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY -u MISTRAL_API_KEY uv run python scripts/rumbo_check.py --brief
