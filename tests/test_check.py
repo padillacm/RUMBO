@@ -34,7 +34,7 @@ def project(root: Path, steps: dict[str, str]) -> Path:
 
 def ran(root: Path) -> list[str]:
     path = root / "order.txt"
-    return path.read_text().strip(";").split(";") if path.exists() else []
+    return path.read_text(encoding="utf-8").strip(";").split(";") if path.exists() else []
 
 
 def run(root: Path, *args: str) -> int:

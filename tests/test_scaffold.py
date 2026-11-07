@@ -351,11 +351,11 @@ def test_other_provider_accepts_extras_and_dotted_modules() -> None:
 
 def test_scaffold_skips_existing_and_reports(simple_project: Path) -> None:
     agents = simple_project / "AGENTS.md"
-    agents.write_text("mine")
+    agents.write_text("mine", encoding="utf-8")
     rep = scaffold(
         Config(name="Demo", package="demo", llm=False, rigor="prototype"), simple_project
     )
-    assert agents.read_text() == "mine"
+    assert agents.read_text(encoding="utf-8") == "mine"
     assert "AGENTS.md" in rep.skipped and "pyproject.toml" in rep.skipped
     assert not rep.created and not rep.merged
 
@@ -363,20 +363,25 @@ def test_scaffold_skips_existing_and_reports(simple_project: Path) -> None:
 def test_force_overwrites_but_merges_pyproject_and_gitignore(simple_project: Path) -> None:
     pyproject = simple_project / "pyproject.toml"
     pyproject.write_text(
-        pyproject.read_text().replace("dependencies = []", 'dependencies = ["requests>=2"]')
+        pyproject.read_text(encoding="utf-8").replace(
+            "dependencies = []", 'dependencies = ["requests>=2"]'
+        ),
+        encoding="utf-8",
     )
-    (simple_project / ".gitignore").write_text("node_modules/\n")
+    (simple_project / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
     brief = simple_project / "docs" / "product" / "brief.md"
-    brief.write_text("# My brief\n")
+    brief.write_text("# My brief\n", encoding="utf-8")
     rep = scaffold(
         Config(name="Demo", package="demo", llm=False, rigor="prototype"),
         simple_project,
         force=True,
     )
-    assert '"requests>=2"' in pyproject.read_text()
-    assert "node_modules/" in (simple_project / ".gitignore").read_text()
-    assert "rumbo:template" in brief.read_text()
-    assert (simple_project / "docs" / "product" / "brief.md.bak").read_text() == "# My brief\n"
+    assert '"requests>=2"' in pyproject.read_text(encoding="utf-8")
+    assert "node_modules/" in (simple_project / ".gitignore").read_text(encoding="utf-8")
+    assert "rumbo:template" in brief.read_text(encoding="utf-8")
+    assert (simple_project / "docs" / "product" / "brief.md.bak").read_text(
+        encoding="utf-8"
+    ) == "# My brief\n"
     assert "docs/product/brief.md" in rep.created
 
 
@@ -408,21 +413,26 @@ def test_merge_lines_without_duplicates() -> None:
 
 def test_update_refreshes_owned_files_only(llm_project: Path) -> None:
     rumbo_md = llm_project / "RUMBO.md"
-    rumbo_md.write_text("old")
+    rumbo_md.write_text("old", encoding="utf-8")
     brief = llm_project / "docs" / "product" / "brief.md"
-    brief.write_text("# written by the human\n")
+    brief.write_text("# written by the human\n", encoding="utf-8")
     makefile = llm_project / "Makefile"
-    makefile.write_text(makefile.read_text() + "\nextra: ; echo hi\n")
+    makefile.write_text(
+        makefile.read_text(encoding="utf-8") + "\nextra: ; echo hi\n", encoding="utf-8"
+    )
     (llm_project / ".claude" / "commands" / "rumbo-r.md").unlink()
     pyproject = llm_project / "pyproject.toml"
     pyproject.write_text(
-        pyproject.read_text().replace(f'version = "{__version__}"', 'version = "0.0.1"')
+        pyproject.read_text(encoding="utf-8").replace(
+            f'version = "{__version__}"', 'version = "0.0.1"'
+        ),
+        encoding="utf-8",
     )
 
     rep = update(Project.load(llm_project), llm_project)
-    assert rumbo_md.read_text() != "old"
-    assert brief.read_text() == "# written by the human\n"
-    assert "extra:" in makefile.read_text()
+    assert rumbo_md.read_text(encoding="utf-8") != "old"
+    assert brief.read_text(encoding="utf-8") == "# written by the human\n"
+    assert "extra:" in makefile.read_text(encoding="utf-8")
     assert (llm_project / ".claude" / "commands" / "rumbo-r.md").exists()
     assert "RUMBO.md" in rep.updated and ".claude/commands/rumbo-r.md" in rep.created
     assert "Makefile" in rep.differs
@@ -450,14 +460,14 @@ def test_pre_commit_rev_bumps_are_not_drift(llm_project: Path) -> None:
     from rumbo.scaffold import update, update_diff
 
     config = llm_project / ".pre-commit-config.yaml"
-    original = config.read_text()
+    original = config.read_text(encoding="utf-8")
     bumped = original.replace("rev: v", "rev: v9.", 1)
     assert bumped != original
-    config.write_text(bumped)
+    config.write_text(bumped, encoding="utf-8")
     assert ".pre-commit-config.yaml" not in update_diff(Project.load(llm_project), llm_project)
     rep = update(Project.load(llm_project), llm_project)
     assert ".pre-commit-config.yaml" not in rep.differs
-    config.write_text(original)
+    config.write_text(original, encoding="utf-8")
 
 
 ARCH_TEST = "tests/architecture/test_architecture.py"

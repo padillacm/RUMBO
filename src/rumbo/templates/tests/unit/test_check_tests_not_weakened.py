@@ -207,12 +207,12 @@ def test_end_to_end_with_git(tmp_path: Path) -> None:
     _git(tmp_path, "config", "user.name", "Human")
     (tmp_path / "tests").mkdir()
     test_file = tmp_path / "tests" / "test_x.py"
-    test_file.write_text("def test_x():\n    assert 1\n    assert 2\n")
+    test_file.write_text("def test_x():\n    assert 1\n    assert 2\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "base")
     _git(tmp_path, "checkout", "-qb", "feature")
 
-    test_file.write_text("def test_x():\n    assert 1\n")
+    test_file.write_text("def test_x():\n    assert 1\n", encoding="utf-8")
     _git(tmp_path, "commit", "-qam", "weaken")
     assert sensor.main(["--root", str(tmp_path), "--base", "main"]) == 1
 
