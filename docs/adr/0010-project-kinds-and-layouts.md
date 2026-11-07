@@ -93,7 +93,8 @@ generated `pyproject.toml` has the expected import-linter contracts or none, the
 `layers` validation (≥ 2, snake_case, only with `layered`); `llm` forces `hexagonal`.
 `tests/test_cli.py`: `Project.load` without the keys infers service/hexagonal; `rumbo update`
 writes them; a generated `--kind cli --layout flat --no-llm --rigor production` project passes
-`rumbo doctor` and `rumbo gate G1…G5 --no-run` without a failed result; G5 per kind. The e2e
+`rumbo doctor` (once installed) and `rumbo gate G4` and `G5 --no-run` without a failed result
+(G1–G3 wait for the human's brief, specs and ADRs by design); G5 per kind. The e2e
 matrix gains `--kind library --no-llm --rigor mvp` and `--kind cli --layout flat --no-llm --rigor
 production`.
 

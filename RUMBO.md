@@ -53,9 +53,12 @@
 Ask the human (all at once, in a single message):
 
 1. Project name and Python package name (snake_case).
-2. Is it an LLM product? (yes/no). If yes: which model provider? (`anthropic`, `openai`,
-   `google`, `mistral`, `claude-code` — the Claude Code CLI with the developer's own login, no
-   API key — or `other`).
+2. What are you building? `service` (an API or backend, the default), `library` (a package
+   others install), `cli` (a command-line tool) or `data` (a pipeline). Does it call an LLM?
+   (yes/no). If yes: which model provider? (`anthropic`, `openai`, `google`, `mistral`,
+   `claude-code` — the Claude Code CLI with the developer's own login, no API key — or
+   `other`). The package layout is never asked: `hexagonal` for a service, `flat` for the
+   rest, `--layout layered --layers api,core` for an explicit stack (ADR-0010).
 3. Rigor level: `prototype`, `mvp` or `production` (see Part E "Scaling the rigor").
 4. Is there a concrete use case? (for example: a conversational agent over the Colombian
    electricity market data published by XM).
@@ -68,8 +71,9 @@ If `uv` is available, mount the whole harness (A1–A7) with one command, using 
 
 ```bash
 uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
-  --name "<project>" --package <pkg> --rigor <rigor> \
-  [--llm --provider anthropic|openai|google|mistral|claude-code | --no-llm] [--case "<case>"]
+  --name "<project>" --package <pkg> --kind service|library|cli|data --rigor <rigor> \
+  [--llm --provider anthropic|openai|google|mistral|claude-code | --no-llm] [--case "<case>"] \
+  [--layout hexagonal|layered|flat [--layers outer,...,inner]]
 ```
 
 `rumbo init` creates the structure, installs the dependencies with `uv add` (latest stable
@@ -105,26 +109,29 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 │   ├── adr/0000-template.md
 │   ├── architecture/c4.md
 │   ├── security/threat-model.md
-│   ├── ops/runbook.md
-│   ├── ops/slos.md
+│   ├── ops/runbook.md        # service and data
+│   ├── ops/slos.md           # service
 │   ├── postmortems/0000-template.md
-│   ├── evals/plan.md         # LLM products only
+│   ├── evals/plan.md         # LLM products and data pipelines
 │   ├── reviews/              # guided reviews written by rumbo tour
 │   └── decisions.md          # human decisions log (the compass)
 ├── specs/0000-template.md
+├── CHANGELOG.md              # library and cli (+ .github/workflows/release.yml, Trusted Publishing)
 ├── src/<pkg>/
-│   ├── __init__.py, __main__.py
+│   ├── __init__.py, __main__.py   # (`[project.scripts]` entry for a cli)
+│   │                         # the four packages below are the hexagonal layout (services);
+│   │                         # `layered` creates the packages listed in --layers, `flat` none
 │   ├── domain/__init__.py    # pure logic: no I/O, no LLM SDKs, no HTTP
 │   ├── app/__init__.py       # use cases; depends only on domain (+ ports.py, entrypoint.py, budget.py, telemetry.py with LLM)
 │   ├── adapters/__init__.py  # external APIs, DB, LLM (+ llm.py, claude_code.py with LLM)
 │   ├── prompts/__init__.py   # versioned prompts (LLM products only)
-│   └── api/__init__.py       # FastAPI / CLI (+ http.py with LLM)
+│   └── api/__init__.py       # FastAPI (+ http.py for a service, with or without LLM)
 ├── tests/
 │   ├── unit/                 # + test_check_tests_not_weakened.py (tests of the sensor)
 │   ├── property/
 │   ├── integration/
 │   └── architecture/
-├── evals/                    # LLM products only
+├── evals/                    # LLM products and data pipelines (judge.py only with LLM)
 │   ├── datasets/smoke.jsonl
 │   ├── graders/__init__.py   # deterministic graders · judge.py (LLM judge, calibrated first)
 │   ├── calibration/example.jsonl   # human-labeled rows for judge calibration
@@ -134,8 +141,15 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 ├── scripts/check_tests_not_weakened.py   # anti-cheat sensor (step A6)
 ├── scripts/rumbo_guard.py                # guard hook for Claude Code (step A6)
 ├── spikes/README.md          # "Throwaway code. Never imported from src/."
-└── infra/Dockerfile
+└── infra/Dockerfile          # service and data
 ```
+
+What `--kind` changes (ADR-0010): a `service` gets the HTTP skeleton, `infra/`, the runbook
+and the SLOs; a `library` or `cli` gets `CHANGELOG.md`, a release workflow with PyPI Trusted
+Publishing (no token anywhere) and a CI matrix over several Python versions; a `data` pipeline
+gets `evals/` with deterministic graders even without a model, `infra/` and the runbook. `llm`
+is a capability on top of any kind (it forces the hexagonal layout, where its skeleton lives).
+Gate G5 asks each kind only for what it can have.
 
 Documents under `docs/` and `specs/` start with the mark `<!-- rumbo:template … -->`. The
 human deletes it when the document is complete; `rumbo gate` checks it.
@@ -636,12 +650,18 @@ What `rumbo init` and `rumbo gate` do per rigor:
 
 | | prototype | mvp | production |
 |---|---|---|---|
-| the check | lint, types, test, arch (+evals) | + security, coverage report | same (coverage is informational: mutation testing is the sensor) |
+| the check | lint, format, types, test, arch unless flat (+evals) | + security, audit, coverage report | same (coverage is informational: mutation testing is the sensor) |
+| dev dependencies | ruff, pyright, pytest, hypothesis, pre-commit (+ import-linter unless flat) | + pytest-cov, bandit, pip-audit | + mutmut |
 | CI | check + sensor + gitleaks | + pre-commit on all files | + SBOM (CycloneDX from uv.lock) |
 | Nightly | — | mutation (+ live evals) | mutation + live evals with k=3 |
 | Dependabot | — | weekly, 7-day cooldown | same |
 | Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases; budget + telemetry wired (G5) | + fitness function per ADR, nightly, SBOM, every requirement traced to a test (G4); 100 cases |
 | Hooks | `.claude/settings.json` + `scripts/rumbo_guard.py`, also as git hooks via pre-commit | same | same |
+
+Moving up is one command: `rumbo promote mvp` (or `production`) rewrites the rigor, adds the
+level's dependencies with `uv add --dev`, appends the missing steps to `[tool.rumbo.checks]`
+and renders the level's files (nightly, Dependabot); nothing is removed (ADR-0011). Editing
+`rigor` by hand and running `rumbo update` does the same without the `uv add`.
 
 What matters is the **worst plausible impact**, not the size of the code. An agent that hands
 out figures used in commercial decisions is, at the very least, an "MVP with production

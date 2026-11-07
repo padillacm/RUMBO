@@ -55,7 +55,7 @@ The cycle, in one paragraph (every term below is defined in the [glossary](#glos
 **Recognize**: the human writes the brief first; the agent
 critiques it (gate G1). **Unify**: EARS specs with requirement ids and explicit data
 contracts, a PRD, a dataset of real questions when there is an LLM (G2). **Model**: ADRs with
-fitness functions, hexagonal layers enforced by import-linter, a threat model with the lethal
+fitness functions, layered packages (hexagonal by default) enforced by import-linter, a threat model with the lethal
 trifecta and the OWASP LLM/Agentic checklist (G3). **Build with ANCLA**: one spec per fresh
 session, failing tests approved by the human before the code, small diffs, a second review by
 a clean session and a guided tour for the human (G4, per PR). **Operate**: immutable image,
@@ -96,8 +96,9 @@ uv run python scripts/rumbo_check.py                              # must be gree
 git add -A && git commit -m "chore: initial RUMBO harness"
 ```
 
-The four A0 questions: project name, LLM product or not (and the provider), rigor level, and
-the concrete use case. Non-interactive:
+The four A0 questions: project name, what you are building (service, library, cli or data, and
+whether it calls an LLM, with the provider), rigor level, and the concrete use case.
+Non-interactive:
 
 ```bash
 rumbo init --yes --name "XM Agent" --package xm_agent \
@@ -106,9 +107,11 @@ rumbo init --yes --name "XM Agent" --package xm_agent \
 
 | Option | Values |
 |---|---|
-| `--llm` / `--no-llm` | LLM products get `evals/`, `prompts/`, a FastAPI skeleton, the offline guard, budget and telemetry, and the provider SDK |
+| `--kind` | `service` (default: HTTP skeleton, `infra/`, runbook, SLOs), `library` or `cli` (CHANGELOG, release workflow with Trusted Publishing, CI matrix; a cli also gets `[project.scripts]`), `data` (`evals/` with deterministic graders, `infra/`, runbook) |
+| `--layout` / `--layers` | `hexagonal` (default for a service: `domain/app/adapters/api` with import contracts), `flat` (default otherwise: no imposed packages, no import-linter), `layered` with `--layers outer,...,inner` (contracts generated from your list; the innermost layer is pure) |
+| `--llm` / `--no-llm` | LLM products get `evals/`, `prompts/`, the offline guard, budget and telemetry, and the provider SDK (the LLM skeleton forces the hexagonal layout) |
 | `--provider` | `anthropic`, `openai`, `google`, `mistral`, `claude-code` (the Claude Code CLI with your own login: no API key anywhere), `other` (with `--sdk-package`, `--sdk-module`, `--sdk-env-key`) |
-| `--rigor` | `prototype`, `mvp`, `production` (scales the check, CI, nightly, Dependabot and the gates) |
+| `--rigor` | `prototype`, `mvp`, `production` (scales the check, the dev dependencies, CI, nightly, Dependabot and the gates; `rumbo promote` moves up) |
 | `--no-install` | write files only; skip `uv add` and pre-commit |
 | `--force` | overwrite existing files (keeps `.bak` copies). `pyproject.toml` and `.gitignore` are always merged, never replaced |
 
@@ -159,6 +162,7 @@ one approval), `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`, `/rumbo-tour`.
 ```bash
 rumbo init [--yes ...]               # mount the harness (RUMBO.md Part A); see the table above
 rumbo update [--diff]                # refresh framework-owned files; --diff previews and writes nothing
+rumbo promote mvp|production [--no-install]           # raise the rigor: deps, checks table, nightly, Dependabot
 rumbo doctor                         # structure complete, AGENTS.md ≤ 100 lines, harness up to date
 rumbo new adr|spec|postmortem "T"    # docs/adr/0001-t.md · specs/0001-t.md · docs/postmortems/<date>-t.md
 rumbo decision "title" --why "..." [--who human|ci]   # append to docs/decisions.md
@@ -347,7 +351,7 @@ Release from the CHANGELOG, optional PyPI trusted publishing). See
 - **Gate (G1–G5):** the exit criterion of each phase; automatic checks plus a checklist the
   human signs.
 - **Parts A–F, A0–A8, G1–G5:** how `RUMBO.md` is organised. Part A mounts the harness in steps
-  A0 (the four questions: name, LLM or not, rigor, use case) to A8 (final check); Part B is the
+  A0 (the four questions: name, kind and LLM or not, rigor, use case) to A8 (final check); Part B is the
   content of AGENTS.md; Part C the cycle R·U·M·B·O; Part D the templates; Part E the rigor
   levels; Part F case profiles. G1–G5 are the gates at the end of each phase. `docs/method.md`
   is numbered by sections (for example 3.1 is the context limit).
