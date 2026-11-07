@@ -44,7 +44,8 @@ the staged files from `git diff --cached --name-only --diff-filter=ACMRD`:
 - a protected file is staged (same `PROTECTED_FILES` and `PROTECTED_PREFIXES` as the Claude Code
   hook; `pyproject.toml` and `uv.lock` are allowed, as in `PostToolUse`, because `uv add` writes
   them legitimately) → exit 1 listing the files and the ADR-0005 message;
-- the template mark `<!-- rumbo:template` is present in `HEAD:<path>` and absent in the staged
+- the template mark (the HTML comment that opens every unfinished document, `TEMPLATE_MARK` in
+  the guard) is present in `HEAD:<path>` and absent in the staged
   `:<path>` → exit 1 naming the file.
 For the human actor, or with nothing staged (which is what `pre-commit run --all-files` sees in
 CI), exit 0 silently.
