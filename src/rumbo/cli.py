@@ -2,6 +2,7 @@
 
 rumbo init                      mount the harness (Part A) in a project
 rumbo update                    refresh the files the framework owns
+rumbo promote mvp|production    raise the rigor: new checks, files and dev tools (ADR-0011)
 rumbo new adr|spec|postmortem   create a document from its template
 rumbo decision "title"          log a human decision in docs/decisions.md
 rumbo gate G1..G5               automatic checks + human checklist of a gate
@@ -35,16 +36,18 @@ from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
 from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
-from rumbo.project import KINDS, LAYOUTS, RIGOR_LEVELS, Project, slug
+from rumbo.project import KINDS, LAYOUTS, RIGOR_LEVELS, Project, rigor_rank, slug
 from rumbo.scaffold import (
     OTHER_PROVIDER,
     PROVIDERS,
     Config,
+    add_dev_dependencies,
     dev_dependencies,
     install,
     plan_files,
     runtime_dependencies,
     scaffold,
+    set_rigor,
     to_package,
     update,
     update_diff,
@@ -211,6 +214,50 @@ def cmd_update(args: argparse.Namespace) -> int:
     print(rep.summary())
     print(f"\nHarness version is now {__version__}. Review the diff with: git diff")
     return 0
+
+
+# ---------------------------------------------------------------------- promote
+def cmd_promote(args: argparse.Namespace) -> int:
+    """Raises the rigor (ADR-0011): writes it, runs `update`, adds the level's dev tools."""
+    root = Path(args.dir).resolve()
+    try:
+        project = Project.load(root)
+    except (FileNotFoundError, ValueError) as exc:
+        return _err(str(exc))
+    target: str = args.rigor
+    if rigor_rank(target) <= rigor_rank(project.rigor):
+        # Not a usage error (exit 2): the command is fine, the project is not below `target`.
+        if target == project.rigor:
+            message = f"the project is already at rigor {target!r}; nothing to promote"
+        else:
+            message = (
+                f"cannot lower the rigor from {project.rigor!r} to {target!r}: `rumbo promote` "
+                "only raises it; lowering is a hand edit of [tool.rumbo].rigor (ADR-0011)"
+            )
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
+    pyproject = root / "pyproject.toml"
+    try:
+        text = set_rigor(pyproject.read_text(encoding="utf-8"), target)
+    except ValueError as exc:
+        return _err(str(exc))
+    with pyproject.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    print(f"Promoting {project.name or project.package} from {project.rigor} to {target}")
+    rep = update(Project.load(root), root)
+    if not args.no_install:
+        for cmd in list(rep.suggested):
+            if (
+                cmd.startswith("uv add --dev ")
+                and add_dev_dependencies(cmd.split()[3:], root, rep) == 0
+            ):
+                rep.suggested.remove(cmd)
+    print("\n" + rep.summary())
+    print(
+        f"\nRigor is now {target} (harness {__version__}). Review the diff with: git diff\n"
+        f"The new level asks more of the gates: see what it requires with: rumbo gate G4"
+    )
+    return 1 if any(rc != 0 for _, rc in rep.commands) else 0
 
 
 # -------------------------------------------------------------------------- new
@@ -758,6 +805,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--diff", action="store_true", help="show what would change (nothing is written)"
     )
     p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser(
+        "promote",
+        help="raise the rigor level (prototype → mvp → production)",
+        description="Writes the new rigor in [tool.rumbo], runs `rumbo update` (appends the "
+        "level's checks, renders its files) and `uv add --dev` for the tools it needs. Nothing is "
+        "removed; lowering the rigor is a hand edit (ADR-0011).",
+    )
+    p.add_argument("rigor", choices=RIGOR_LEVELS, help="the new, higher rigor level")
+    add_dir(p)
+    p.add_argument(
+        "--no-install", action="store_true", help="write files only; print the 'uv add' line"
+    )
+    p.set_defaults(func=cmd_promote)
 
     p = sub.add_parser("new", help="create an ADR, spec or postmortem from its template")
     p.add_argument("kind", choices=sorted(NEW_KINDS), help="document kind")
