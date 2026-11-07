@@ -24,8 +24,15 @@ What it enforces, and how strongly
   (or is new) blocks with the list of files. `uv add`/`uv lock` are the exception: pyproject.toml
   and uv.lock may change through Bash. The binding layer outside Claude Code is CODEOWNERS plus
   the CI sensors.
-- Stop: if Python/TOML/JSONL files changed since the last commit, `make check-brief` must be
-  green before the agent declares itself done (skipped when RUMBO_GUARD_SKIP_CHECK is set).
+- Stop: if Python/TOML/JSONL files changed since the last commit, the verification runner
+  (`python scripts/rumbo_check.py --brief`, ADR-0006) must be green before the agent declares
+  itself done (skipped when RUMBO_GUARD_SKIP_CHECK is set). Exit 1 (a verification failure)
+  blocks with the failing tail; exit 3 (a broken environment: a tool missing or crashing) does
+  not hand the agent a repair job. The hook then exits 0 and prints one JSON object on stdout,
+  `{"decision": "block", "reason": ..., "systemMessage": ...}`, telling the agent to report the
+  failure to the human and stop, and telling the human in one line. Projects generated before
+  the runner existed fall back to `make check-brief`; without `make` the same environment route
+  asks for `rumbo update`.
 """
 
 from __future__ import annotations
@@ -207,8 +214,77 @@ def check_post_bash(root: Path) -> str | None:
     )
 
 
+def _tail(proc: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-40:])
+
+
+def _red(runner: str, changed: int, tail: str) -> tuple[int, str]:
+    return BLOCK, (
+        f"{runner} is red after changing {changed} file(s). Fix it before declaring the "
+        f"task done (full log in .rumbo-check.log):\n{tail}"
+    )
+
+
+def _environment(agent: str, human: str, tail: str = "") -> tuple[int, str]:
+    """Exit 0 with the hook JSON: block the agent with a report-to-human reason, tell the human."""
+    reason = (
+        f"{agent} This is the verification environment, not your code: do NOT try to repair it "
+        "(no installs, no config edits, no changes to pyproject.toml or the harness). Report "
+        "the failing step and the output below to the human, then stop."
+    )
+    if tail:
+        reason += f"\n{tail}"
+    return 0, json.dumps({"decision": "block", "reason": reason, "systemMessage": human})
+
+
+def run_verification(root: Path, changed: int) -> tuple[int, str]:
+    """`scripts/rumbo_check.py --brief` (ADR-0006), else `make check-brief`, else ask for an update.
+
+    Exit 0 green; exit 1 red (BLOCK with the tail); exit 3 or anything else is a broken
+    environment reported to the human through the hook JSON, never a repair job for the agent.
+    """
+    runner = root / "scripts" / "rumbo_check.py"
+    if runner.is_file():
+        proc = subprocess.run(
+            [sys.executable, "scripts/rumbo_check.py", "--brief"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return 0, ""
+        if proc.returncode == 1:
+            return _red("rumbo check", changed, _tail(proc))
+        return _environment(
+            f"rumbo check could not verify the project (exit {proc.returncode}): the "
+            "verification environment is broken.",
+            f"rumbo check: the verification environment is broken (exit {proc.returncode}); "
+            "the agent was told to report it and stop. Details in .rumbo-check.log.",
+            _tail(proc),
+        )
+    try:
+        proc = subprocess.run(
+            ["make", "check-brief"], cwd=root, capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        return _environment(
+            "the project cannot be verified: scripts/rumbo_check.py is missing and make is not "
+            "installed. Ask the human to run `rumbo update`, which adds the runner.",
+            "The guard found neither scripts/rumbo_check.py nor make: run `rumbo update` to add "
+            "the verification runner; the agent was told to report it and stop.",
+        )
+    if proc.returncode == 0:
+        return 0, ""
+    return _red("make check", changed, _tail(proc))
+
+
 def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
-    """(exit code, message). Protected files intact, then `make check-brief` if code changed."""
+    """(exit code, message), mirroring the hook protocol: with BLOCK the message is the stderr
+    reason; with 0 a non-empty message is the JSON object printed on stdout (environment route).
+
+    Protected files intact first, then the verification runner if code files changed.
+    """
     if payload.get("stop_hook_active"):
         return 0, ""  # a previous Stop hook already asked for a fix: do not loop
     if touched := check_post_bash(root):
@@ -218,19 +294,7 @@ def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
     changed = changed_code_files(root)
     if not changed:
         return 0, ""
-    try:
-        proc = subprocess.run(
-            ["make", "check-brief"], cwd=root, capture_output=True, text=True, check=False
-        )
-    except FileNotFoundError:
-        return 0, ""  # no make on this machine: nothing the agent can do about it
-    if proc.returncode == 0:
-        return 0, ""
-    tail = "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-40:])
-    return BLOCK, (
-        f"make check is red after changing {len(changed)} file(s). Fix it before declaring the "
-        f"task done (full log in .rumbo-check.log):\n{tail}"
-    )
+    return run_verification(root, len(changed))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -243,8 +307,8 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or str(payload.get("cwd") or Path.cwd()))
     if event == "stop":
         code, message = check_stop(payload, root)
-        if message:
-            print(message, file=sys.stderr)
+        if message:  # exit 2: the reason on stderr; exit 0: the hook JSON, alone on stdout
+            print(message, file=sys.stderr if code else sys.stdout)
         return code
     tool_name = str(payload.get("tool_name", ""))
     tool_input: dict[str, Any] = dict(payload.get("tool_input") or {})
