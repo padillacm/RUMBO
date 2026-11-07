@@ -15,7 +15,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rumbo import __version__
-from rumbo.project import RIGOR_LEVELS, Project
+from rumbo.project import (
+    HEXAGONAL_LAYERS,
+    KINDS,
+    LAYOUTS,
+    RIGOR_LEVELS,
+    Project,
+    resolve_layout,
+    validate_axes,
+)
 from rumbo.render import render
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -58,29 +66,53 @@ DEV_DEPS = [
     "bandit",
     "mutmut",
 ]
-LLM_DEPS = ["pydantic", "fastapi", "httpx", "uvicorn"]
+# ADR-0010: the HTTP skeleton belongs to the `service` kind; the LLM capability only adds
+# `pydantic` (and the provider SDK) on top of it.
+SERVICE_DEPS = ["fastapi", "uvicorn", "httpx"]
+LLM_DEPS = ["pydantic"]
 
-# Template paths (prefixes) that are only generated when the condition holds.
+# Template paths (prefixes) that are only generated when the condition holds. A path must
+# satisfy every prefix it matches (`evals/graders/judge.py` needs `evals` AND `llm`).
 CONDITIONS: dict[str, Callable[[Config], bool]] = {
-    "evals/": lambda c: c.llm,
-    "docs/evals/": lambda c: c.llm,
+    # The LLM capability (ADR-0010: orthogonal to kind and layout; forces hexagonal).
     "dot_env.example": lambda c: c.llm,
     "src/__pkg__/prompts/": lambda c: c.llm,
     "src/__pkg__/app/entrypoint.py": lambda c: c.llm,
-    "src/__pkg__/api/http.py": lambda c: c.llm,
     "src/__pkg__/adapters/llm.py": lambda c: c.llm,
+    "src/__pkg__/adapters/claude_code.py": lambda c: c.llm and c.provider == "claude-code",
     "src/__pkg__/app/ports.py": lambda c: c.llm,
     "src/__pkg__/app/budget.py": lambda c: c.llm,
     "src/__pkg__/app/telemetry.py": lambda c: c.llm,
+    "evals/graders/judge.py": lambda c: c.llm,
+    "evals/calibration/": lambda c: c.llm,
     "tests/unit/test_budget.py": lambda c: c.llm,
     "tests/unit/test_telemetry.py": lambda c: c.llm,
-    "src/__pkg__/adapters/claude_code.py": lambda c: c.llm and c.provider == "claude-code",
-    "tests/unit/test_graders.py": lambda c: c.llm,
-    "tests/unit/test_judge.py": lambda c: c.llm,
     "tests/unit/test_entrypoint.py": lambda c: c.llm,
     "tests/unit/test_prompts.py": lambda c: c.llm,
+    "tests/unit/test_judge.py": lambda c: c.llm,
     "tests/unit/test_claude_code_adapter.py": lambda c: c.llm and c.provider == "claude-code",
-    "tests/integration/test_http.py": lambda c: c.llm,
+    # Evals: LLM products and data pipelines (deterministic graders; the judge is llm-only).
+    "evals/": lambda c: c.evals,
+    "docs/evals/": lambda c: c.evals,
+    "tests/unit/test_graders.py": lambda c: c.evals,
+    # A data pipeline without a model still needs an entry the evals can call.
+    "src/__pkg__/pipeline.py": lambda c: c.kind == "data" and not c.llm,
+    "tests/unit/test_pipeline.py": lambda c: c.kind == "data" and not c.llm,
+    # The kind: what the project is (ADR-0010 table).
+    "src/__pkg__/api/http.py": lambda c: c.kind == "service",
+    "tests/integration/test_http.py": lambda c: c.kind == "service",
+    "infra/": lambda c: c.kind in ("service", "data"),
+    "docs/ops/runbook.md": lambda c: c.kind in ("service", "data"),
+    "docs/ops/slos.md": lambda c: c.kind == "service",
+    "CHANGELOG.md": lambda c: c.kind in ("library", "cli"),
+    "dot_github/workflows/release.yml": lambda c: c.kind in ("library", "cli"),
+    # The layout: hexagonal packages come from templates, layered ones from plan_files().
+    # A service keeps its `api/` boundary whatever the layout (the HTTP skeleton lives there).
+    "src/__pkg__/domain/": lambda c: c.layout == "hexagonal",
+    "src/__pkg__/app/": lambda c: c.layout == "hexagonal",
+    "src/__pkg__/adapters/": lambda c: c.layout == "hexagonal",
+    "src/__pkg__/api/": lambda c: c.layout == "hexagonal" or c.kind == "service",
+    # Rigor.
     "dot_github/workflows/nightly.yml": lambda c: c.rigor != "prototype",
     "dot_github/dependabot.yml": lambda c: c.rigor != "prototype",
 }
@@ -170,6 +202,10 @@ class Config:
     sdk_package: str = ""
     sdk_module: str = ""
     sdk_env_key: str = ""
+    # ADR-0010: what the project is and how its package is organised; "" = derived from kind.
+    kind: str = "service"
+    layout: str = ""
+    layers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
@@ -181,6 +217,13 @@ class Config:
             raise ValueError(f"invalid package name (use snake_case): {self.package!r}")
         if self.rigor not in RIGOR_LEVELS:
             raise ValueError(f"invalid rigor {self.rigor!r}; use one of {RIGOR_LEVELS}")
+        if self.kind not in KINDS:
+            raise ValueError(f"invalid kind {self.kind!r}; use one of {KINDS}")
+        if self.layout and self.layout not in LAYOUTS:
+            raise ValueError(f"invalid layout {self.layout!r}; use one of {LAYOUTS}")
+        self.layers = tuple(self.layers)
+        self.layout = resolve_layout(self.kind, self.layout, self.llm)
+        validate_axes(self.kind, self.layout, self.layers)
         if not self.llm:
             self.provider = ""
             self.sdk_package = self.sdk_module = self.sdk_env_key = ""
@@ -223,7 +266,34 @@ class Config:
             sdk_package=project.sdk_package,
             sdk_module=project.sdk_module,
             sdk_env_key=project.sdk_env_key,
+            kind=project.kind,
+            layout=project.layout,
+            layers=project.layers,
         )
+
+    # Same semantics as the Project properties (ADR-0010).
+    @property
+    def evals(self) -> bool:
+        """Datasets and graders exist for LLM products and for data pipelines."""
+        return self.llm or self.kind == "data"
+
+    @property
+    def arch(self) -> bool:
+        """Import-linter contracts and the purity rules apply unless the layout is flat."""
+        return self.layout != "flat"
+
+    @property
+    def layer_names(self) -> tuple[str, ...]:
+        """Package layers, outermost first; empty for a flat layout."""
+        if self.layout == "hexagonal":
+            return HEXAGONAL_LAYERS
+        return self.layers if self.layout == "layered" else ()
+
+    @property
+    def inner_layer(self) -> str:
+        """The pure layer (strict types, mutation target, purity contract); '' when flat."""
+        names = self.layer_names
+        return names[-1] if names else ""
 
     def domain_forbidden_modules(self) -> list[str]:
         modules = ["httpx", "requests", "fastapi"]
@@ -249,6 +319,25 @@ class Config:
             "mvp": self.rigor == "mvp",
             "production": self.rigor == "production",
             "mvp_or_more": self.rigor != "prototype",
+            # ADR-0010 axes, as flags and precomputed strings (the engine has no lists).
+            "kind": self.kind,
+            "layout": self.layout,
+            "service": self.kind == "service",
+            "library": self.kind == "library",
+            "cli": self.kind == "cli",
+            "data": self.kind == "data",
+            "packaged": self.kind in ("library", "cli"),  # released to a package index
+            "deployable": self.kind in ("service", "data"),  # shipped as an image
+            "hexagonal": self.layout == "hexagonal",
+            "layered": self.layout == "layered",
+            "flat": self.layout == "flat",
+            "evals": self.evals,
+            "arch": self.arch,
+            "inner_layer": self.inner_layer,
+            # `"pkg.api", "pkg.adapters", ...` for the import-linter layers contract.
+            "layers_toml": ", ".join(f'"{self.package}.{x}"' for x in self.layer_names),
+            # `["api", "adapters", ...]` for [tool.rumbo].layers (written only when layered).
+            "layers_toml_list": "[" + ", ".join(f'"{x}"' for x in self.layer_names) + "]",
             "case": self.case or "(no concrete case yet)",
             "date": dt.date.today().isoformat(),
             "rumbo_version": __version__,
@@ -317,11 +406,23 @@ def plan_files(cfg: Config) -> dict[str, str | Path]:
             plan[target] = render(src.read_text(encoding="utf-8"), ctx)
         else:
             plan[target] = src
+    if cfg.layout == "layered":
+        for layer in cfg.layers:
+            plan[f"src/{cfg.package}/{layer}/__init__.py"] = _layer_module(cfg, layer)
     plan["scripts/check_tests_not_weakened.py"] = SENSOR_FILE
     plan["scripts/rumbo_guard.py"] = GUARD_FILE
     plan["scripts/rumbo_check.py"] = CHECK_FILE
     plan["RUMBO.md"] = rumbo_md()
     return plan
+
+
+def _layer_module(cfg: Config, layer: str) -> str:
+    """The `__init__.py` of one layer of a layered package (ADR-0010), outermost first."""
+    names = list(cfg.layers)
+    below = names[names.index(layer) + 1 :]
+    if not below:
+        return f'"""Layer {layer}: the innermost one, kept pure (no I/O; pyright strict)."""\n'
+    return f'"""Layer {layer}: may import only {", ".join(below)}."""\n'
 
 
 def rumbo_md() -> Path:
@@ -486,6 +587,7 @@ def update(project: Project, dest: Path) -> Report:
         elif rel not in MERGEABLE and is_harness_file(rel):
             report.differs.append(rel)
     _add_checks_table(dest / "pyproject.toml", _content(plan_files(cfg)["pyproject.toml"]), report)
+    _add_axes_keys(dest / "pyproject.toml", cfg, report)
     _bump_harness_version(dest / "pyproject.toml")
     return report
 
@@ -515,6 +617,40 @@ def _add_checks_table(pyproject: Path, template: str, report: Report) -> None:
     tomllib.loads(merged)  # raises if the result is not valid TOML
     _write_text(pyproject, merged)
     report.merged.append(f"pyproject.toml (+{_CHECKS_HEADER})")
+
+
+_RUMBO_HEADER = re.compile(r"(?m)^\[tool\.rumbo\][ \t]*(?:#[^\n]*)?\n")
+
+
+def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
+    """Writes the `kind`, `layout` (and `layers`) keys a project generated before ADR-0010 lacks.
+
+    `Project.load` inferred them (service, hexagonal); writing them makes the inference explicit.
+    Keys that exist are never touched.
+    """
+    current = pyproject.read_text(encoding="utf-8")
+    try:
+        rumbo = tomllib.loads(current).get("tool", {}).get("rumbo")
+    except tomllib.TOMLDecodeError:
+        return
+    header = _RUMBO_HEADER.search(current)
+    if not isinstance(rumbo, dict) or header is None:
+        return
+    wanted = {"kind": f'"{cfg.kind}"', "layout": f'"{cfg.layout}"'}
+    if cfg.layout == "layered":
+        wanted["layers"] = str(cfg.context()["layers_toml_list"])
+    missing = [key for key in wanted if key not in rumbo]
+    if not missing:
+        return
+    next_header = re.compile(r"(?m)^\[").search(current, header.end())
+    end = next_header.start() if next_header else len(current)
+    block = current[header.end() : end].rstrip("\n") + "\n"
+    added = "".join(f"{key} = {wanted[key]}\n" for key in missing)
+    tail = current[end:]
+    merged = current[: header.end()] + block + added + ("\n" + tail if tail else "")
+    tomllib.loads(merged)  # raises if the result is not valid TOML
+    _write_text(pyproject, merged)
+    report.merged.append(f"pyproject.toml (+{', '.join(missing)})")
 
 
 def update_diff(project: Project, dest: Path) -> str:
@@ -571,17 +707,32 @@ def _run(cmd: list[str], cwd: Path, report: Report) -> int:
     return rc
 
 
+def dev_dependencies(cfg: Config) -> list[str]:
+    """The development tools; import-linter only when the layout has layers to contract."""
+    return [dep for dep in DEV_DEPS if dep != "import-linter" or cfg.arch]
+
+
+def runtime_dependencies(cfg: Config) -> list[str]:
+    """Runtime dependencies by kind and capability (ADR-0010): HTTP for a service, SDK for LLM."""
+    deps: list[str] = []
+    if cfg.kind == "service":
+        deps += SERVICE_DEPS
+    if cfg.llm:
+        deps += LLM_DEPS
+        if cfg.sdk_package:
+            deps.append(cfg.sdk_package)
+    return deps
+
+
 def install(cfg: Config, dest: Path, report: Report) -> None:
     """Installs dependencies with uv (latest stable versions), the git hooks and `rumbo.human`."""
     if shutil.which("uv") is None:
         print("WARNING: 'uv' is not installed; install uv and run the commands in README.md.")
         report.commands.append(("uv (not installed)", 127))
         return
-    _run(["uv", "add", "--dev", *DEV_DEPS], dest, report)
-    if cfg.llm:
-        runtime = list(LLM_DEPS)
-        if cfg.sdk_package:
-            runtime.append(cfg.sdk_package)
+    _run(["uv", "add", "--dev", *dev_dependencies(cfg)], dest, report)
+    runtime = runtime_dependencies(cfg)
+    if runtime:
         _run(["uv", "add", *runtime], dest, report)
     if (dest / ".git").exists():
         _run(["uv", "run", "pre-commit", "autoupdate"], dest, report)
