@@ -572,7 +572,7 @@ def _run(cmd: list[str], cwd: Path, report: Report) -> int:
 
 
 def install(cfg: Config, dest: Path, report: Report) -> None:
-    """Installs dependencies with uv (latest stable versions) and the pre-commit hooks."""
+    """Installs dependencies with uv (latest stable versions), the git hooks and `rumbo.human`."""
     if shutil.which("uv") is None:
         print("WARNING: 'uv' is not installed; install uv and run the commands in README.md.")
         report.commands.append(("uv (not installed)", 127))
@@ -586,5 +586,7 @@ def install(cfg: Config, dest: Path, report: Report) -> None:
     if (dest / ".git").exists():
         _run(["uv", "run", "pre-commit", "autoupdate"], dest, report)
         _run(["uv", "run", "pre-commit", "install"], dest, report)
+        # ADR-0008: the human runs `rumbo init`; the git hooks let their commits through.
+        _run(["git", "config", "rumbo.human", "true"], dest, report)
     else:
         print("WARNING: not a git repository; run 'git init', then 'uv run pre-commit install'.")

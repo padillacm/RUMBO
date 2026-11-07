@@ -16,6 +16,15 @@ All notable changes to this project are documented here. The format follows
   endings.
 - ADR-0007: the anti-cheat sensor counts `pytest.raises`, unittest and mock assertions, resolves
   assertion helpers inside the tests directory, and reads the directory from `[tool.rumbo].tests`.
+- ADR-0008: the guard also runs as git `pre-commit` and `commit-msg` hooks (installed by
+  `rumbo init` through pre-commit), so any coding agent is bound by the hard rules at commit
+  time. The actor comes from `[tool.rumbo].agent_env` markers or `git config rumbo.human`;
+  `rumbo doctor` warns when the clone is not declared.
+- ADR-0009: a fix lane in ANCLA. `/rumbo-fix` (red regression test, minimal change, one
+  approval) and three extra `rumbo gate G4` checks when every commit is non-`feat`:
+  regression test added, diff ≤ 150 lines, no new runtime dependency.
+- `rumbo tour --out <dir>/` names the review file `<date>-<sha>.md`; the generated harness
+  calls `rumbo` directly instead of `make rumbo ARGS=...`.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line

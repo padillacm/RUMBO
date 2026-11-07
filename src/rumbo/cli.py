@@ -23,6 +23,7 @@ import datetime as dt
 import http.client
 import json
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -277,6 +278,21 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------- doctor
+def _declared_human(root: Path) -> bool:
+    """`git config rumbo.human` is true in this clone (set by `rumbo init`, ADR-0008)."""
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "rumbo.human"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "true"
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     try:
@@ -304,6 +320,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     security = project.read("SECURITY.md") or ""
     if "<security contact" in security:
         warnings.append("SECURITY.md still has the <security contact> placeholder")
+    if (root / ".git").exists() and not _declared_human(root):
+        warnings.append(
+            "rumbo.human is not set in this clone: the git hooks treat your commits as an "
+            "agent's (ADR-0008); run 'git config rumbo.human true'"
+        )
     for warning in warnings:
         print(f"⚠️  {warning}")
     if project.harness_version and project.harness_version != __version__:

@@ -40,6 +40,7 @@ rumbo tour origin/main --out docs/reviews/   # guided review for the human
 3. **C**lose the loop: minimal code, then refactor; iterate until the check passes.
 4. **L**imit: small diff; separate structural from behavioral commits; summarize in 3 sentences and list new dependencies.
 5. Learn **A**nd measure: if a mistake repeats, propose a sensor (test, lint rule, contract) or a line here.
+A bug fix uses the fix lane (`/rumbo-fix`): red regression test first, minimal fix, diff ≤ 150, commits `fix:`/`test:` only, no new dependency; if a contract, signature or spec requirement must change, it is a feature (`/rumbo-ancla`).
 
 ## Hard rules
 Most of these are enforced by the guard hook (`scripts/rumbo_guard.py`, wired in `.claude/settings.json`): a blocked action means "ask the human", not "find another way".
