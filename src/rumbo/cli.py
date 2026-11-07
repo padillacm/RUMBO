@@ -533,6 +533,9 @@ def cmd_tour(args: argparse.Namespace) -> int:
         out = Path(args.out)
         if not out.is_absolute():
             out = root / out
+        if args.out.endswith(("/", "\\")) or out.is_dir():
+            # A directory: name the file like the Makefile's `review` target did.
+            out = out / f"{dt.date.today().isoformat()}-{commits[-1].short}.md"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(text, encoding="utf-8")
         print(f"Wrote {out}")
@@ -781,7 +784,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--head", default="HEAD", help="head ref (default: HEAD)")
     p.add_argument("--since", help="previous head of the same series, for git range-diff")
-    p.add_argument("--out", help="write the guide to this file instead of stdout")
+    p.add_argument(
+        "--out",
+        help="write the guide to this file, or into this directory as <date>-<sha>.md",
+    )
     add_dir(p)
     p.set_defaults(func=cmd_tour)
 

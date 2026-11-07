@@ -67,7 +67,7 @@ Start a **new** Claude Code session (`/clear`) and type `/rumbo-ancla F-0001`.
 ```bash
 rumbo trace                     # every requirement has a test?
 rumbo gate G4                   # sensor, check, diff size, traceability (compares with main)
-make review                     # docs/reviews/<date>-<sha>.md: your guided tour (base: main here)
+rumbo tour main --out docs/reviews/   # docs/reviews/<date>-<sha>.md: your guided tour
 ```
 
 Read the tour, not the agent's summary: risk hotspots first, tests before code, three

@@ -80,7 +80,7 @@ pip-audit, mutmut, FastAPI for LLM products).
 | [`docs/tutorial.md`](docs/tutorial.md) | 30 minutes from `rumbo init` to the first spec closed with gate G4. |
 | [`docs/adr/`](docs/adr/) | The framework's own decisions, each with a fitness function in `tests/`. |
 | [`docs/examples/xm-agent.md`](docs/examples/xm-agent.md) | Worked example: an agent over the Colombian electricity market (XM). |
-| `docs/reviews/` | Guided reviews of this repository's own batches (`make review`). |
+| `docs/reviews/` | Guided reviews of this repository's own batches (`rumbo tour`). |
 | `reports/`, `research_notes/` | The research report on context-length degradation and parallel work (Spanish) and its notes. |
 
 ## Install and mount the harness
@@ -118,8 +118,8 @@ reported. Two things only you can do: replace `@your-handle` in
 `.github/CODEOWNERS` and the contact in `SECURITY.md`.
 
 Permanent install: `uv tool install git+https://github.com/padillacm/RUMBO`. Pin a release tag:
-`…/RUMBO@v0.3.0`. Inside a generated project the CLI is also available as
-`make rumbo ARGS="gate G4"`.
+`…/RUMBO@v0.3.0`. Inside a generated project the agent calls it directly
+(`rumbo gate G4`, `rumbo trace`, `rumbo tour origin/main --out docs/reviews/`); nothing needs `make`.
 
 ### What happens right after `rumbo init`
 
@@ -142,7 +142,7 @@ or use the slash commands. First time? Follow the [tutorial](docs/tutorial.md).
 | **R** Recognize | Write `docs/product/brief.md` by hand; validate the problem with users or data | Critiques the brief, proposes interview questions | `/rumbo-r` | `rumbo gate G1`, `rumbo decision "G1 signed" --why ...` |
 | **U** Unify | Write the specs (EARS, requirement ids `R1…`, data contracts and owned files); PRD; real questions for the dataset | Lists ambiguities, proposes acceptance tests | `/rumbo-u` | `rumbo new spec "..."`, `rumbo gate G2` |
 | **M** Model | Sketch the irreversible decisions first; one-hour threat model | Completes ADR options, proposes the import-linter contract and adversarial tests | `/rumbo-m` | `rumbo new adr "..."`, `rumbo gate G3` |
-| **B** Build (ANCLA) | Approve the failing tests, then the plan; read the guided tour; pass the explanation test; merge | Writes tests first (each naming its requirement `F-NNNN.Rk`), implements until `scripts/rumbo_check.py --brief` is green, keeps diffs small | `/rumbo-ancla F-0001`, then `/rumbo-review` in a fresh session | `rumbo trace`, `rumbo gate G4`, `make review`, `rumbo decision "F-0001 closed" --why "1 session"` |
+| **B** Build (ANCLA) | Approve the failing tests, then the plan; read the guided tour; pass the explanation test; merge | Writes tests first (each naming its requirement `F-NNNN.Rk`), implements until `scripts/rumbo_check.py --brief` is green, keeps diffs small | `/rumbo-ancla F-0001`, then `/rumbo-review` in a fresh session | `rumbo trace`, `rumbo gate G4`, `rumbo tour`, `rumbo decision "F-0001 closed" --why "1 session"` |
 | **O** Operate | Rehearse the rollback; review 20–30 traces weekly; write the runbook entries | Instruments with `app/telemetry.span` and `app/budget.Meter`, proposes failure categories | `/rumbo-o` | `rumbo eval add ...`, `rumbo metrics`, `rumbo new postmortem "..."`, `rumbo gate G5` |
 
 Every document the harness generates starts with `<!-- rumbo:template … -->`. You delete that
@@ -317,7 +317,7 @@ rumbo update           # replaces only framework-owned files (RUMBO.md, scripts/
 uv sync
 make check   # lint, types and the CLI test suite
 make e2e     # mounts real projects in several configurations and requires their check (`scripts/rumbo_check.py`)
-make review  # guided review of your branch
+rumbo tour origin/main --out docs/reviews/  # guided review of your branch
 ```
 
 Templates live in `src/rumbo/templates/`: `.tmpl` files are rendered (`{{var}}`,

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -361,6 +362,10 @@ def test_tour(simple_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert "Explanation test" in out and "<details>" in out
     assert main(["tour", "main", "--out", "docs/reviews/x.md", "--dir", str(simple_project)]) == 0
     assert (simple_project / "docs" / "reviews" / "x.md").exists()
+    # A directory (trailing slash, or existing) names the file <date>-<sha>.md.
+    assert main(["tour", "main", "--out", "docs/reviews/", "--dir", str(simple_project)]) == 0
+    written = [p.name for p in (simple_project / "docs" / "reviews").glob("20*-*.md")]
+    assert len(written) == 1 and re.fullmatch(r"\d{4}-\d{2}-\d{2}-[0-9a-f]{7,}\.md", written[0])
     assert main(["tour", "feature", "--dir", str(simple_project)]) == 2
 
 

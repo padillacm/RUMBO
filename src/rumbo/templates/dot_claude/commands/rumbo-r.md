@@ -9,6 +9,6 @@ Follow phase **R — Recognize** of `RUMBO.md` (Part C, "The RUMBO cycle").
 3. Propose an interview script with open questions. The human runs the interviews.
 4. LLM products: propose the feasibility test (20–30 real questions run by hand with the model and the data).
 5. If a prototype is needed, it goes **only** in `spikes/`. What moves to phase U is what was learned, not the code.
-6. Finish with the checklist of `make rumbo ARGS="gate G1"` (or the 🛑 Gate G1 section of RUMBO.md) and stop.
+6. Finish with the checklist of `rumbo gate G1` (or the 🛑 Gate G1 section of RUMBO.md) and stop.
 
 Additional context from the human: $ARGUMENTS
