@@ -3,7 +3,7 @@ description: Phase B — one task with the ANCLA loop (Anchor, Navigate, Close, 
 argument-hint: <task>
 ---
 Implement this task with **ANCLA** (`RUMBO.md`, Part C "The RUMBO cycle", phase B "Build with ANCLA"): $ARGUMENTS
-If no task was given, ask for one before doing anything.
+If no task was given, ask for one before doing anything. A bug fix takes the shorter fix lane instead: `/rumbo-fix <bug>` (red regression test, minimal change, one approval at the PR).
 
 1. **Anchor:** read the spec and the relevant ADRs. Write the acceptance tests first (Hypothesis for domain invariants). Run them and show that they **fail**. 🛑 Stop: the human approves the tests.
 2. **Navigate:** propose a short plan (files, tests, risks, new dependencies). 🛑 Wait for approval.

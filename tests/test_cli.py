@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -701,3 +702,188 @@ def test_check_subcommand_parses_and_delegates_to_the_runner(
     assert main(["check", "--brief", "--dir", str(tmp_path)]) == 0
     assert capsys.readouterr().out.startswith("rumbo check: green (")
     assert (tmp_path / ".rumbo-check.log").is_file()
+
+
+# ----------------------------------------------------------------- ADR-0009: fix lane
+def _git_in(root: Path) -> Callable[..., str]:
+    """A `git` runner for a temporary repository with a fixed identity (ADR-0009 tests)."""
+    identity = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@x",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@x",
+    }
+
+    def git(*args: str) -> str:
+        proc = subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", *args],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, **identity},
+        )
+        return proc.stdout.strip()
+
+    return git
+
+
+def _branch_repo(root: Path) -> tuple[Callable[..., str], str]:
+    """Commits everything in `root` on `main`, checks out `fix`; returns (git, merge base)."""
+    git = _git_in(root)
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-qm", "chore: harness")
+    git("checkout", "-qb", "fix")
+    return git, git("rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize(
+    ("subjects", "expected"),
+    [
+        (["fix: null average", "test: cover it", "refactor(calc): extract", "docs: note"], "fix"),
+        (["fix: null average", "feat: median"], "normal"),
+        (["fix!: drop the old field"], "normal"),
+        (["fix(calc)!: drop the old field"], "normal"),
+        (["Fixed the average"], "normal"),
+        ([], "normal"),
+    ],
+)
+def test_lane_is_fix_only_when_every_commit_is_a_fix_type(
+    tmp_path: Path, subjects: list[str], expected: str
+) -> None:
+    """ADR-0009: the lane is recognised from Conventional Commit types in base..HEAD."""
+    from rumbo.gates import lane, merge_base
+
+    (tmp_path / "a.txt").write_text("a\n")
+    git, base = _branch_repo(tmp_path)
+    for n, subject in enumerate(subjects):
+        (tmp_path / f"f{n}.txt").write_text("x\n")
+        git("add", "-A")
+        git("commit", "-qm", subject)
+    assert lane(tmp_path, base) == expected
+    if subjects:
+        assert merge_base(tmp_path) == (base, "main")
+    else:
+        found, info = merge_base(tmp_path)  # empty range: HEAD is the base
+        assert found is None and "HEAD is already on 'main'" in info
+
+
+def _fix_lane_results(root: Path) -> dict[str, Any]:
+    _, results = evaluate("G4", Project.load(root), run=False)
+    return {r.description: r for r in results}
+
+
+def test_gate_g4_fix_lane_is_green_for_a_tested_small_fix(simple_project: Path) -> None:
+    """ADR-0009: regression test added, diff ≤ 150, no new dependency; heading names the lane."""
+    from rumbo.gates import report
+
+    git, _ = _branch_repo(simple_project)
+    (simple_project / "src" / "demo" / "domain" / "calc.py").write_text(
+        "def avg(xs):\n    return sum(xs) / len(xs) if xs else 0.0\n"
+    )
+    (simple_project / "tests" / "unit" / "test_calc.py").write_text(
+        '"""Bug #12: avg([]) raised ZeroDivisionError."""\n'
+        "from demo.domain.calc import avg\n\n\ndef test_avg_empty():\n    assert avg([]) == 0.0\n"
+    )
+    git("add", "-A")
+    git("commit", "-qm", "fix: avg of an empty list")
+    by_desc = _fix_lane_results(simple_project)
+    assert by_desc["lane: fix"].ok is True
+    assert by_desc["fix lane: regression test added"].ok is True
+    assert by_desc["fix lane: diff ≤ 150 lines"].ok is True
+    assert by_desc["fix lane: no new runtime dependency"].ok is True
+    assert by_desc["small diff (≤300 lines, lockfiles excluded)"].ok is True
+    gate, results = evaluate("G4", Project.load(simple_project), run=False)
+    text, ok = report(gate, results, Project.load(simple_project))
+    assert ok and text.splitlines()[0].endswith("· lane: fix")
+    assert "  ✅ lane: fix" not in text  # shown in the heading, not as a check
+    # One feat commit returns the PR to the normal lane: the extra rules disappear.
+    (simple_project / "src" / "demo" / "domain" / "median.py").write_text("x = 1\n")
+    git("add", "-A")
+    git("commit", "-qm", "feat: median")
+    by_desc = _fix_lane_results(simple_project)
+    assert "lane: normal" in by_desc
+    assert not any(d.startswith("fix lane:") for d in by_desc)
+
+
+def test_gate_g4_fix_lane_requires_a_regression_test(simple_project: Path) -> None:
+    """ADR-0009 rule 1: a fix that adds no line under the tests directory is red."""
+    git, _ = _branch_repo(simple_project)
+    (simple_project / "src" / "demo" / "domain" / "calc.py").write_text("x = 2\n")
+    git("add", "-A")
+    git("commit", "-qm", "fix: untested patch")
+    by_desc = _fix_lane_results(simple_project)
+    red = by_desc["fix lane: regression test added"]
+    assert red.ok is False and "tests/" in red.detail
+    assert by_desc["fix lane: diff ≤ 150 lines"].ok is True
+
+
+def test_gate_g4_fix_lane_limits_the_diff_to_150_lines(simple_project: Path) -> None:
+    """ADR-0009 rule 2: half the normal limit; the normal 300-line rule still passes."""
+    git, _ = _branch_repo(simple_project)
+    (simple_project / "tests" / "unit" / "test_big.py").write_text("x = 1\n" * 200)
+    git("add", "-A")
+    git("commit", "-qm", "test: a very long regression test")
+    by_desc = _fix_lane_results(simple_project)
+    assert by_desc["fix lane: regression test added"].ok is True
+    red = by_desc["fix lane: diff ≤ 150 lines"]
+    assert red.ok is False and red.detail.startswith("200 lines")
+    assert by_desc["small diff (≤300 lines, lockfiles excluded)"].ok is True
+
+
+def test_gate_g4_fix_lane_forbids_a_new_runtime_dependency(simple_project: Path) -> None:
+    """ADR-0009 rule 3: [project].dependencies is compared by normalised name."""
+    pyproject = simple_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    assert "dependencies = []" in original
+    pyproject.write_text(
+        original.replace("dependencies = []", 'dependencies = ["Typing_Extensions>=4"]'),
+        encoding="utf-8",
+    )
+    git, _ = _branch_repo(simple_project)
+    (simple_project / "tests" / "unit" / "test_dep.py").write_text("x = 1\n")
+    # Same distribution, spelled differently and with an extra: not a new dependency.
+    pyproject.write_text(
+        original.replace("dependencies = []", 'dependencies = ["typing-extensions[x] >= 4.1"]'),
+        encoding="utf-8",
+    )
+    git("add", "-A")
+    git("commit", "-qm", "fix: pin")
+    assert _fix_lane_results(simple_project)["fix lane: no new runtime dependency"].ok is True
+    pyproject.write_text(
+        original.replace(
+            "dependencies = []", 'dependencies = ["typing-extensions>=4", "Requests>=2"]'
+        ),
+        encoding="utf-8",
+    )
+    git("add", "-A")
+    git("commit", "-qm", "fix: use requests")
+    red = _fix_lane_results(simple_project)["fix lane: no new runtime dependency"]
+    assert red.ok is False and red.detail.endswith("added since main: requests")
+
+
+def test_gate_g4_without_a_merge_base_is_the_normal_lane(simple_project: Path) -> None:
+    """ADR-0009: no git history means the normal lane and no fix-lane result."""
+    by_desc = _fix_lane_results(simple_project)
+    assert "lane: normal" in by_desc and by_desc["diff size measured"].ok is None
+    assert not any(d.startswith("fix lane:") for d in by_desc)
+
+
+def test_init_generates_the_fix_command_and_doctor_accepts_it(tmp_path: Path) -> None:
+    """ADR-0009: `/rumbo-fix` is part of the harness and `rumbo doctor` still passes."""
+    rc = main(
+        ["init", "--dir", str(tmp_path), "--yes", "--no-install", "--no-llm", "--rigor", "mvp"]
+    )
+    assert rc == 0
+    command = tmp_path / ".claude" / "commands" / "rumbo-fix.md"
+    assert command.is_file()
+    text = command.read_text(encoding="utf-8")
+    assert text.startswith("---\n") and "argument-hint: <bug>" in text
+    assert "regression test" in text and "≤ 150" in text and "/rumbo-ancla" in text
+    assert "/rumbo-fix" in (tmp_path / ".claude" / "commands" / "rumbo-ancla.md").read_text()
+    agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "/rumbo-fix" in agents and len(agents.splitlines()) < 100
+    assert "/rumbo-fix" in (tmp_path / "README.md").read_text(encoding="utf-8")
+    (tmp_path / "uv.lock").write_text("")
+    assert main(["doctor", "--dir", str(tmp_path)]) == 0

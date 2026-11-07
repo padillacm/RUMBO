@@ -21,6 +21,11 @@ from rumbo.project import Project, is_template, numbered_documents, section
 from rumbo.trace import trace, uncovered
 
 MAX_DIFF_LINES = 300
+FIX_MAX_DIFF_LINES = 150  # ADR-0009: the fix lane allows half the normal diff
+# ADR-0009: a PR is in the fix lane when every commit since the merge base has one of these
+# types and none carries the breaking marker `!` before the colon.
+FIX_TYPES = re.compile(r"^(fix|test|refactor|chore|docs|ci|perf|style|build)(\([^)]*\))?:")
+BASES = ("origin/main", "origin/master", "origin/HEAD", "@{upstream}", "main", "master")
 CHECK_ENV = 3  # scripts/rumbo_check.py: the verification environment is broken (ADR-0006)
 MIN_EVAL_CASES = {"prototype": 20, "mvp": 50, "production": 100}
 EARS = re.compile(r"\bshall\b|\bdeber[áa]n?\b", re.I)
@@ -257,51 +262,138 @@ def _check_command(root: Path) -> list[str]:
     return ["make", "check"]
 
 
-def diff_size(root: Path) -> tuple[int | None, str]:
-    """Lines added+removed since the merge base, excluding lockfiles. (None, reason) if unknown."""
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=False
-    )
+def _git(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+
+
+def merge_base(root: Path) -> tuple[str | None, str]:
+    """(merge-base sha, base name) of the branch work; (None, reason) when there is none."""
+    head = _git(["rev-parse", "HEAD"], root)
     if head.returncode != 0:
         return None, "not a git repository or no commits yet"
-    for base in ("origin/main", "origin/master", "origin/HEAD", "@{upstream}", "main", "master"):
-        mb = subprocess.run(
-            ["git", "merge-base", "HEAD", base],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+    for base in BASES:
+        mb = _git(["merge-base", "HEAD", base], root)
         if mb.returncode != 0:
             continue
-        merge_base = mb.stdout.strip()
-        if merge_base == head.stdout.strip():
+        sha = mb.stdout.strip()
+        if sha == head.stdout.strip():
             # HEAD is the base (or behind it): there is no branch work to measure, and
             # counting only the uncommitted changes would pass a huge commit on main.
             return None, f"HEAD is already on '{base}': commit on a branch to measure the diff"
-        excludes = [f":(exclude){lock}" for lock in LOCKFILES]
-        diff = subprocess.run(
-            ["git", "diff", "--numstat", merge_base, "--", ".", *excludes],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        total = 0
-        for line in diff.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-                total += int(parts[0]) + int(parts[1])
-        return total, base
+        return sha, base
     return None, "no base branch found (origin/main, main, @{upstream}...)"
+
+
+def _numstat(root: Path, base: str) -> list[tuple[int, int, str]]:
+    """(added, removed, path) per text file changed since `base`, lockfiles excluded."""
+    excludes = [f":(exclude){lock}" for lock in LOCKFILES]
+    diff = _git(["diff", "--numstat", base, "--", ".", *excludes], root)
+    rows: list[tuple[int, int, str]] = []
+    for line in diff.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    return rows
+
+
+def diff_size(root: Path) -> tuple[int | None, str]:
+    """Lines added+removed since the merge base, excluding lockfiles. (None, reason) if unknown."""
+    base, info = merge_base(root)
+    if base is None:
+        return None, info
+    return sum(added + removed for added, removed, _ in _numstat(root, base)), info
+
+
+def lane(root: Path, base: str) -> str:
+    """`fix` when every commit in base..HEAD has a non-feat type and no `!` (ADR-0009)."""
+    log = _git(["log", "--format=%s", f"{base}..HEAD"], root)
+    subjects = [s for s in log.stdout.splitlines() if s.strip()]
+    if log.returncode != 0 or not subjects:
+        return "normal"
+    return "fix" if all(FIX_TYPES.match(s) for s in subjects) else "normal"
+
+
+def _tests_dir(p: Project) -> str:
+    """`[tool.rumbo].tests` in pyproject.toml, else `tests`."""
+    try:
+        data = tomllib.loads(p.read("pyproject.toml") or "")
+    except tomllib.TOMLDecodeError:
+        return "tests"
+    rumbo = data.get("tool", {}).get("rumbo", {})
+    value = rumbo.get("tests") if isinstance(rumbo, dict) else None
+    return (str(value).replace("\\", "/").strip("/") or "tests") if value else "tests"
+
+
+def _dependency_names(pyproject: str) -> set[str] | None:
+    """`[project].dependencies` as normalised names (PEP 503); None when unreadable."""
+    try:
+        data = tomllib.loads(pyproject)
+    except tomllib.TOMLDecodeError:
+        return None
+    deps = data.get("project", {}).get("dependencies", [])
+    if not isinstance(deps, list):
+        return None
+    names: set[str] = set()
+    for dep in deps:
+        match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", str(dep))
+        if match:
+            names.add(re.sub(r"[-_.]+", "-", match.group(1)).lower())
+    return names
+
+
+def _fix_lane(p: Project, base: str, info: str) -> list[Result]:
+    """The three extra G4 rules of the fix lane (ADR-0009)."""
+    rows = _numstat(p.root, base)
+    tests_dir = _tests_dir(p)
+    tests_touched = [path for added, _, path in rows if added and path.startswith(f"{tests_dir}/")]
+    results = [
+        Result(
+            "fix lane: regression test added",
+            bool(tests_touched),
+            f"no file under {tests_dir}/ gained lines since {info}",
+        )
+    ]
+    size = sum(added + removed for added, removed, _ in rows)
+    results.append(
+        Result(
+            f"fix lane: diff ≤ {FIX_MAX_DIFF_LINES} lines",
+            size <= FIX_MAX_DIFF_LINES,
+            f"{size} lines vs {info} (lockfiles excluded); a bigger change is a feature",
+        )
+    )
+    shown = _git(["show", f"{base}:pyproject.toml"], p.root)
+    before = _dependency_names(shown.stdout) if shown.returncode == 0 else None
+    after = _dependency_names(p.read("pyproject.toml") or "")
+    if before is None or after is None:
+        results.append(
+            Result(
+                "fix lane: no new runtime dependency",
+                None,
+                "could not read [project].dependencies at the merge base and in the worktree",
+            )
+        )
+    else:
+        new = sorted(after - before)
+        results.append(
+            Result(
+                "fix lane: no new runtime dependency",
+                not new,
+                f"added since {info}: {', '.join(new)}",
+            )
+        )
+    return results
 
 
 def _g4(p: Project, run: bool) -> list[Result]:
     results: list[Result] = []
-    size, info = diff_size(p.root)
-    if size is None:
+    base, info = merge_base(p.root)
+    current = lane(p.root, base) if base else "normal"
+    # `report` moves this result into the heading.
+    results.append(Result(f"lane: {current}", True, info))
+    if base is None:
         results.append(Result("diff size measured", None, f"could not measure: {info}"))
     else:
+        size = sum(added + removed for added, removed, _ in _numstat(p.root, base))
         results.append(
             Result(
                 f"small diff (≤{MAX_DIFF_LINES} lines, lockfiles excluded)",
@@ -309,6 +401,8 @@ def _g4(p: Project, run: bool) -> list[Result]:
                 f"{size} lines vs {info}",
             )
         )
+        if current == "fix":
+            results += _fix_lane(p, base, info)
     reqs = trace(p.root)
     if reqs:
         missing = uncovered(reqs)
@@ -479,9 +573,14 @@ def report(gate: Gate, results: list[Result], project: Project) -> tuple[str, bo
     failed = [r for r in results if r.ok is False]
     unmeasured = [r for r in results if r.ok is None]
     head = "🛑" if failed else "✅"
-    lines = [f"{head} Gate {gate.code} · {gate.phase} · rigor {project.rigor}", ""]
-    lines.append("Automatic checks (sensors):")
+    heading = f"{head} Gate {gate.code} · {gate.phase} · rigor {project.rigor}"
+    lane_result = next((r for r in results if r.description.startswith("lane: ")), None)
+    if lane_result is not None:
+        heading += f" · {lane_result.description}"
+    lines = [heading, "", "Automatic checks (sensors):"]
     for r in results:
+        if r is lane_result:
+            continue
         mark = "✅" if r.ok else ("⚠️ " if r.ok is None else "❌")
         lines.append(f"  {mark} {r.description}")
         if r.detail and not r.ok:
