@@ -1,3 +1,12 @@
 """{{name}}."""
+{{#packaged}}
+
+from importlib.metadata import version
+
+__all__ = ["__version__"]
+__version__ = version("{{package}}")
+{{/packaged}}
+{{^packaged}}
 
 __version__ = "0.1.0"
+{{/packaged}}

@@ -1,4 +1,4 @@
-"""Entry point for `python -m {{package}}`."""
+"""Entry point for `python -m {{package}}`{{#cli}} and the `{{package}}` console script{{/cli}}."""
 
 from importlib.metadata import version
 {{#llm}}
@@ -6,8 +6,14 @@ from importlib.metadata import version
 from {{package}}.app.telemetry import configure_json_logging
 {{/llm}}
 
-if __name__ == "__main__":
+
+def main() -> int:
 {{#llm}}
     configure_json_logging()
 {{/llm}}
     print(f"{{package}} {version('{{package}}')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

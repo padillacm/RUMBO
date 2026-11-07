@@ -16,10 +16,10 @@ WORKDIR /app
 COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH"
 USER app
-{{#llm}}
+{{#service}}
 EXPOSE 8000
 CMD ["uvicorn", "{{package}}.api.http:app", "--host", "0.0.0.0", "--port", "8000"]
-{{/llm}}
-{{^llm}}
+{{/service}}
+{{^service}}
 CMD ["python", "-m", "{{package}}"]
-{{/llm}}
+{{/service}}

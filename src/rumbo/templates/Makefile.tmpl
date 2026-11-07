@@ -1,7 +1,7 @@
 # RUMBO Makefile — optional aliases for the verification runner (ADR-0006):
 #   uv run python scripts/rumbo_check.py [STEP ...]   (steps: [tool.rumbo.checks] in pyproject.toml)
 # One-line recipes (`target: ; command`) so tabs never bite.
-# Rigor: {{rigor}}{{#llm}} · LLM provider: {{provider}}{{/llm}}
+# Kind: {{kind}} · Layout: {{layout}} · Rigor: {{rigor}}{{#llm}} · LLM provider: {{provider}}{{/llm}}
 
 .PHONY: check check-brief test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
 
@@ -17,16 +17,22 @@ lint:        ; uv run python scripts/rumbo_check.py lint format
 fmt:         ; uv run ruff check --fix . && uv run ruff format .
 types:       ; uv run python scripts/rumbo_check.py types
 test:        ; uv run python scripts/rumbo_check.py test
+{{#arch}}
 arch:        ; uv run python scripts/rumbo_check.py arch
+{{/arch}}
 security:    ; uv run python scripts/rumbo_check.py security security-scripts audit
 sensor:      ; uv run python scripts/rumbo_check.py sensor
-{{#llm}}
-# Smoke evals run OFFLINE (recorded fixtures); the model is only called with `make evals-live`.
+{{#evals}}
+# Smoke evals run OFFLINE (recorded fixtures){{#llm}}; the model is only called with `make evals-live`{{/llm}}.
 evals:       ; uv run python scripts/rumbo_check.py evals
+{{/evals}}
+{{#llm}}
 evals-live:  ; uv run python evals/run_evals.py --suite all --live --k {{#production}}3{{/production}}{{^production}}1{{/production}}
 {{/llm}}
+{{#arch}}
 # POSIX only: mutmut needs os.fork, so this stays out of the runner (nightly runs it on Linux).
-mutation:    ; @if find src/{{package}}/domain -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo 'domain/ is still empty: nothing to mutate'; fi
+mutation:    ; @if find src/{{package}}/{{inner_layer}} -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo '{{inner_layer}}/ is still empty: nothing to mutate'; fi
+{{/arch}}
 sbom:        ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
 hooks:       ; uv run pre-commit install
 review:      ; $(RUMBO) tour $(BASE) --out docs/reviews/
