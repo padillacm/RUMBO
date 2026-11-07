@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """RUMBO anti-cheat sensor: fails when the tests get weaker than the base revision.
 
-Compares ``tests/`` at the base (``origin/main`` or the PR base commit) against the
-working tree and fails if any of these happen:
+Compares the tests directory at the base (``origin/main`` or the PR base commit) against
+the working tree and fails if any of these happen:
 
-1. a file under ``tests/`` is deleted;
+1. a file under the tests directory is deleted;
 2. a ``test_*`` function disappears (identified by file + qualified name);
-3. a test loses ``assert`` statements, or the total number of asserts in ``tests/`` drops;
+3. a test loses assertions, or the total number of assertions in the tests drops;
 4. a test gains always-true asserts (``assert True``, ``assert (x, "msg")``);
 5. a test gains ``skip``/``skipif``/``xfail`` markers or ``pytest.skip()`` calls;
 6. a ``parametrize`` literal list shrinks.
 
+Assertions are counted the way idiomatic Python writes them (ADR-0007). Inside a test,
+one each: ``assert``; every ``with pytest.raises(...)``, ``pytest.warns(...)`` or
+``pytest.deprecated_call(...)`` item; ``self.assert*(...)`` and ``self.fail(...)``; the
+``unittest.mock`` assertions by exact name on any receiver; ``pytest.fail(...)``. A call to
+a helper function defined in the same file, in a ``conftest.py`` of the same directory or
+an ancestor, or in a module imported from inside the tests directory counts as the
+assertions of that helper's body under the same rules (depth at most 3, cycles count 0).
+Anything else counts 0, so a hollow helper never passes for an assertion.
+
 What it does NOT see (review these by hand, and let mutation testing catch the rest):
-early ``return`` before the asserts, mocks that empty the behavior, asserts moved into
-helpers, and changes to ``[tool.pytest.ini_options]`` or ``conftest.py``.
+early ``return`` before the asserts, mocks that empty the behavior, helpers built
+dynamically or imported from outside the tests directory, and changes to
+``[tool.pytest.ini_options]``.
 
 The rule can only be bypassed by a HUMAN: either a commit in ``base..HEAD`` whose message
 contains ``[tests-change-approved]`` and whose author is not an agent (no
@@ -31,6 +41,7 @@ import argparse
 import ast
 import json
 import os
+import posixpath
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -45,6 +56,24 @@ NULL_SHA = "0" * 40
 AGENT_EMAIL_MARKERS = ("noreply@anthropic.com", "[bot]", "users.noreply.github.com/bot")
 AGENT_TRAILERS = ("co-authored-by: claude", "claude-session:")
 SKIP_NAMES = {"skip", "skipif", "xfail"}
+PYTEST_CONTEXT_ASSERTS = {"pytest.raises", "pytest.warns", "pytest.deprecated_call"}
+MOCK_ASSERT_NAMES = {
+    "assert_called",
+    "assert_called_once",
+    "assert_called_with",
+    "assert_called_once_with",
+    "assert_any_call",
+    "assert_has_calls",
+    "assert_not_called",
+    "assert_awaited",
+    "assert_awaited_once",
+    "assert_awaited_with",
+    "assert_awaited_once_with",
+    "assert_any_await",
+    "assert_has_awaits",
+    "assert_not_awaited",
+}
+MAX_HELPER_DEPTH = 3
 
 
 @dataclass
@@ -103,31 +132,186 @@ def _decorator_info(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[int, 
     return skips, cases
 
 
-def _body_stats(func: ast.AST) -> tuple[int, int, int]:
-    """(asserts, constant asserts, skip calls) inside a function, nested defs included."""
+FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def _syntactic_call(call: ast.Call) -> str | None:
+    """``"assert"`` / ``"skip"`` when the call is one of the counted forms, else None."""
+    chain = _attr_chain(call.func)
+    if not chain:
+        return None
+    head, _, last = chain.rpartition(".")
+    if chain in {"pytest.fail", "self.fail"}:
+        return "assert"
+    if head == "self" and last.startswith("assert"):
+        return "assert"
+    if head and last in MOCK_ASSERT_NAMES:
+        return "assert"
+    if last in {"skip", "xfail"} and chain.startswith("pytest"):
+        return "skip"
+    return None
+
+
+def _is_pytest_context(item: ast.withitem) -> bool:
+    call = item.context_expr
+    return isinstance(call, ast.Call) and _attr_chain(call.func) in PYTEST_CONTEXT_ASSERTS
+
+
+def _syntactic_stats(func: FunctionNode) -> tuple[int, int, int]:
+    """(asserts, constant asserts, skip calls) counted without resolving helper calls."""
     asserts = constant = skip_calls = 0
-    for node in ast.walk(func):
-        if isinstance(node, ast.Assert):
-            asserts += 1
-            if _is_constant_assert(node):
-                constant += 1
-        elif isinstance(node, ast.Call):
-            chain = _attr_chain(node.func)
-            if chain.rsplit(".", 1)[-1] in {"skip", "xfail"} and chain.startswith("pytest"):
-                skip_calls += 1
+    for stmt in func.body:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Assert):
+                asserts += 1
+                if _is_constant_assert(node):
+                    constant += 1
+            elif isinstance(node, ast.With | ast.AsyncWith):
+                asserts += sum(_is_pytest_context(item) for item in node.items)
+            elif isinstance(node, ast.Call):
+                kind = _syntactic_call(node)
+                asserts += kind == "assert"
+                skip_calls += kind == "skip"
     return asserts, constant, skip_calls
 
 
-def _collect(tree: ast.AST) -> tuple[dict[str, TestInfo], int]:
+@dataclass(frozen=True)
+class _Import:
+    """``from <module> import <name>`` (``name`` set) or ``import <module>`` (``name`` None)."""
+
+    module: str
+    name: str | None
+    level: int
+
+
+@dataclass
+class _Module:
+    path: str
+    tree: ast.Module
+    functions: dict[str, FunctionNode] = field(default_factory=dict)
+    imports: dict[str, _Import] = field(default_factory=dict)
+
+
+def _index_module(path: str, tree: ast.Module) -> _Module:
+    module = _Module(path, tree)
+    for stmt in tree.body:
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+            module.functions[stmt.name] = stmt
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".", 1)[0]
+                module.imports[bound] = _Import(alias.name if alias.asname else bound, None, 0)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    module.imports[alias.asname or alias.name] = _Import(
+                        node.module or "", alias.name, node.level
+                    )
+    return module
+
+
+def _ancestors(directory: str) -> list[str]:
+    """``"a/b/c"`` → ``["a/b/c", "a/b", "a", ""]``."""
+    chain = [directory]
+    while chain[-1]:
+        chain.append(posixpath.dirname(chain[-1]))
+    return chain
+
+
+class _Resolver:
+    """Static resolution of helper calls inside one snapshot of the tests directory."""
+
+    def __init__(self, modules: Mapping[str, _Module]) -> None:
+        self.modules = modules
+        self.reached: set[tuple[str, str]] = set()
+
+    def count(self, module: _Module, func: FunctionNode) -> tuple[int, int, int]:
+        return self._count(module, func, 0, frozenset({(module.path, func.name)}))
+
+    def _count(
+        self, module: _Module, func: FunctionNode, depth: int, active: frozenset[tuple[str, str]]
+    ) -> tuple[int, int, int]:
+        asserts, constant, skip_calls = _syntactic_stats(func)
+        if depth >= MAX_HELPER_DEPTH:
+            return asserts, constant, skip_calls
+        for stmt in func.body:
+            for node in ast.walk(stmt):
+                if not isinstance(node, ast.Call) or _syntactic_call(node) is not None:
+                    continue
+                resolved = self._resolve_call(module, node.func)
+                if resolved is None:
+                    continue
+                target, helper = resolved
+                key = (target.path, helper.name)
+                if key in active:
+                    continue  # a cycle counts 0
+                self.reached.add(key)
+                a, c, s = self._count(target, helper, depth + 1, active | {key})
+                asserts, constant, skip_calls = asserts + a, constant + c, skip_calls + s
+        return asserts, constant, skip_calls
+
+    def _resolve_call(self, module: _Module, func: ast.expr) -> tuple[_Module, FunctionNode] | None:
+        if isinstance(func, ast.Name):
+            return self._resolve_name(module, func.id)
+        if isinstance(func, ast.Attribute):
+            chain = _attr_chain(func).split(".")
+            if len(chain) >= 2 and chain[0]:
+                target = self._resolve_module(module, chain[:-1])
+                if target is not None and chain[-1] in target.functions:
+                    return target, target.functions[chain[-1]]
+        return None
+
+    def _resolve_name(self, module: _Module, name: str) -> tuple[_Module, FunctionNode] | None:
+        if name in module.functions:
+            return module, module.functions[name]
+        imported = module.imports.get(name)
+        if imported is not None and imported.name is not None:
+            target = self._find_module(module, imported.module, imported.level)
+            if target is not None and imported.name in target.functions:
+                return target, target.functions[imported.name]
+        for directory in _ancestors(posixpath.dirname(module.path)):
+            conftest = self.modules.get(posixpath.join(directory, "conftest.py"))
+            if conftest is not None and conftest is not module and name in conftest.functions:
+                return conftest, conftest.functions[name]
+        return None
+
+    def _resolve_module(self, module: _Module, prefix: list[str]) -> _Module | None:
+        imported = module.imports.get(prefix[0])
+        if imported is None:
+            return None
+        parts = [part for part in imported.module.split(".") if part]
+        if imported.name is not None:
+            parts.append(imported.name)
+        parts.extend(prefix[1:])
+        return self._find_module(module, ".".join(parts), imported.level)
+
+    def _find_module(self, module: _Module, dotted: str, level: int) -> _Module | None:
+        directory = posixpath.dirname(module.path)
+        if level:
+            for _ in range(level - 1):
+                directory = posixpath.dirname(directory)
+            bases = [directory]
+        else:
+            bases = _ancestors(directory)
+        relative = dotted.replace(".", "/")
+        for base in bases:
+            for candidate in (f"{relative}.py", f"{relative}/__init__.py"):
+                found = self.modules.get(posixpath.join(base, candidate))
+                if found is not None:
+                    return found
+        return None
+
+
+def _collect(module: _Module, resolver: _Resolver) -> dict[str, TestInfo]:
     tests: dict[str, TestInfo] = {}
-    total_asserts = sum(isinstance(n, ast.Assert) for n in ast.walk(tree))
 
     def visit(node: ast.AST, prefix: str) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                 qualname = f"{prefix}{child.name}"
                 if child.name.startswith("test_"):
-                    asserts, constant, skip_calls = _body_stats(child)
+                    asserts, constant, skip_calls = resolver.count(module, child)
                     skips, cases = _decorator_info(child)
                     tests[qualname] = TestInfo(asserts, constant, skips + skip_calls, cases)
                 else:
@@ -137,13 +321,44 @@ def _collect(tree: ast.AST) -> tuple[dict[str, TestInfo], int]:
             else:
                 visit(child, prefix)
 
-    visit(tree, "")
-    return tests, total_asserts
+    visit(module.tree, "")
+    return tests
+
+
+def _residual_asserts(module: _Module, reached: set[tuple[str, str]]) -> int:
+    """Assertions outside tests that no test reaches through a helper call.
+
+    Module-level statements and non-test functions are counted syntactically; helpers
+    reached from a test are skipped because their callers already count them.
+    """
+    total = 0
+
+    def visit(node: ast.AST) -> None:
+        nonlocal total
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                if child.name.startswith("test_") or (module.path, child.name) in reached:
+                    continue
+                total += _syntactic_stats(child)[0]
+            elif isinstance(child, ast.Assert):
+                total += 1
+            elif isinstance(child, ast.With | ast.AsyncWith):
+                total += sum(_is_pytest_context(item) for item in child.items)
+                visit(child)
+            elif isinstance(child, ast.Call):
+                total += _syntactic_call(child) == "assert"
+                visit(child)
+            else:
+                visit(child)
+
+    visit(module.tree)
+    return total
 
 
 def analyze(files: Mapping[str, str | None]) -> Inventory:
     """``files``: path → content (``None`` when it is not a readable .py file)."""
     inv = Inventory()
+    modules: dict[str, _Module] = {}
     for path, content in files.items():
         inv.files.add(path)
         if content is None or not path.endswith(".py"):
@@ -153,9 +368,14 @@ def analyze(files: Mapping[str, str | None]) -> Inventory:
         except SyntaxError as exc:
             inv.errors.append(f"{path}: cannot parse ({exc.msg}, line {exc.lineno})")
             continue
-        tests, asserts = _collect(tree)
+        modules[path] = _index_module(path, tree)
+    resolver = _Resolver(modules)
+    for path, module in modules.items():
+        tests = _collect(module, resolver)
         inv.tests.update({f"{path}::{name}": info for name, info in tests.items()})
-        inv.asserts += asserts
+        inv.asserts += sum(info.asserts for info in tests.values())
+    for module in modules.values():
+        inv.asserts += _residual_asserts(module, resolver.reached)
     return inv
 
 
@@ -210,7 +430,9 @@ def compare(base: Inventory, current: Inventory) -> list[str]:
                 f"{name}: parametrize cases dropped from {old.param_cases} to {new.param_cases}"
             )
     if current.asserts < base.asserts:
-        problems.append(f"total asserts in tests/ dropped from {base.asserts} to {current.asserts}")
+        problems.append(
+            f"total asserts in the tests directory dropped from {base.asserts} to {current.asserts}"
+        )
     problems.extend(f"parse error: {e}" for e in current.errors)
     return problems
 
