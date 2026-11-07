@@ -29,6 +29,16 @@ rc=0; echo '{"tool_name":"Edit","tool_input":{"file_path":"scripts/rumbo_check.p
 echo "x: ; echo" >> Makefile; rc=0; echo '{"tool_name":"Bash","tool_input":{"command":"true"}}' | uv run python scripts/rumbo_guard.py post-tool || rc=$?; test "$rc" -eq 2; git checkout -- Makefile
 echo '{"tool_name":"Bash","tool_input":{"command":"uv run python scripts/rumbo_check.py --brief"}}' | uv run python scripts/rumbo_guard.py pre-tool
 echo '{}' | RUMBO_GUARD_SKIP_CHECK=1 uv run python scripts/rumbo_guard.py stop
+# ADR-0008: the same guard runs as git hooks (installed by `rumbo init` through pre-commit), so any
+# agent is refused at commit time; the human (rumbo init set rumbo.human in this clone) passes.
+test "$(git config --get rumbo.human)" = "true"
+echo "x: ; echo" >> Makefile; git add Makefile
+rc=0; CLAUDECODE=1 git commit -qm "chore: touch the Makefile" || rc=$?; test "$rc" -ne 0
+git restore --staged Makefile; git checkout -- Makefile
+echo "x: ; echo" >> Makefile; git add Makefile
+env -u CLAUDECODE -u GEMINI_CLI -u CURSOR_AGENT -u CODEX_SANDBOX_NETWORK_DISABLED git commit -qm "chore: touch the Makefile"
+git revert -q --no-edit HEAD
+rc=0; CLAUDECODE=1 git commit -q --allow-empty -m "x [tests-change-approved]" || rc=$?; test "$rc" -ne 0
 # the harness must stay offline: no model credential in the environment
 env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY -u MISTRAL_API_KEY uv run python scripts/rumbo_check.py --brief
 uv run --project "$ROOT" rumbo gate G4 --no-run >/dev/null
