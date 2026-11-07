@@ -35,13 +35,15 @@ from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
 from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
-from rumbo.project import RIGOR_LEVELS, Project, slug
+from rumbo.project import KINDS, LAYOUTS, RIGOR_LEVELS, Project, slug
 from rumbo.scaffold import (
     OTHER_PROVIDER,
     PROVIDERS,
     Config,
+    dev_dependencies,
     install,
     plan_files,
+    runtime_dependencies,
     scaffold,
     to_package,
     update,
@@ -95,13 +97,17 @@ def _config_from_args(args: argparse.Namespace) -> Config:
     name, package, llm = args.name, args.package, args.llm
     provider, rigor, case = args.provider, args.rigor, args.case
     sdk_package, sdk_module, sdk_env_key = args.sdk_package, args.sdk_module, args.sdk_env_key
+    kind, layout = args.kind, args.layout or ""
+    layers = tuple(x.strip() for x in (args.layers or "").split(",") if x.strip())
 
     if interactive:
         print("A0 · RUMBO initial questions (Enter accepts the value in brackets)\n")
         name = name or _ask("1. Project name", Path(args.dir).resolve().name, valid_name)
         package = package or _ask("   Python package (snake_case)", to_package(name), valid_package)
+        # ADR-0010: the kind is the question; the LLM capability is its sub-question.
+        kind = kind or _ask("2. What are you building?", "service", choices=list(KINDS))
         if llm is None:
-            llm = _yes(_ask("2. Is it an LLM product?", "no", choices=["yes", "no"]))
+            llm = _yes(_ask("   Does it call an LLM?", "no", choices=["yes", "no"]))
         if llm and not provider:
             provider = _ask("   Model provider", "anthropic", choices=PROVIDER_CHOICES)
         if llm and provider == OTHER_PROVIDER:
@@ -119,6 +125,9 @@ def _config_from_args(args: argparse.Namespace) -> Config:
             raise ValueError("with --yes you must pass --rigor (A0 question 3)")
         name = name or Path(args.dir).resolve().name
         package = package or to_package(name)
+    kind = kind or "service"  # ADR-0010 default; --layout and --layers are never asked
+    if llm and layout and layout != "hexagonal":
+        print(f"note: an LLM product is hexagonal (ADR-0010); --layout {layout} is ignored")
     return Config(
         name=name,
         package=package,
@@ -129,6 +138,9 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         sdk_package=sdk_package or "",
         sdk_module=sdk_module or "",
         sdk_env_key=sdk_env_key or "",
+        kind=kind,
+        layout=layout,
+        layers=layers,
     )
 
 
@@ -140,7 +152,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     dest = Path(args.dir).resolve()
     print(f"\nMounting the RUMBO harness in {dest}")
     print(
-        f"  package={cfg.package} llm={cfg.llm} provider={cfg.provider or '-'} rigor={cfg.rigor}\n"
+        f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor}\n"
     )
     if args.force:
         print(
@@ -165,16 +178,11 @@ def cmd_init(args: argparse.Namespace) -> int:
         install(cfg, dest, rep)
     print("\n" + rep.summary())
     if args.no_install:
+        runtime = runtime_dependencies(cfg)
         print(
             "\nNext steps (--no-install):\n"
-            "  1. uv add --dev ruff pyright pytest pytest-cov hypothesis import-linter "
-            "pre-commit pip-audit bandit mutmut"
-            + (
-                "\n     uv add pydantic fastapi httpx uvicorn"
-                + (f" {cfg.sdk_package}" if cfg.sdk_package else "")
-                if cfg.llm
-                else ""
-            )
+            f"  1. uv add --dev {' '.join(dev_dependencies(cfg))}"
+            + (f"\n     uv add {' '.join(runtime)}" if runtime else "")
             + "\n  2. uv run pre-commit autoupdate && uv run pre-commit install\n"
             "  3. uv run python scripts/rumbo_check.py    # must be green\n"
         )
@@ -336,8 +344,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"❌ {problem}")
     if not problems:
         print(
-            f"✅ Harness complete (package={project.package}, llm={project.llm}, "
-            f"provider={project.provider or '-'}, rigor={project.rigor})."
+            f"✅ Harness complete (package={project.package}, kind={project.kind}, "
+            f"layout={project.layout}, llm={project.llm}, provider={project.provider or '-'}, "
+            f"rigor={project.rigor})."
         )
         return 0
     return 1
@@ -605,7 +614,10 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     datasets = root / "evals" / "datasets"
     if not (root / "evals" / "graders" / "__init__.py").exists():
-        return _err("no evals/ in this project (LLM products only); did you run 'rumbo init'?")
+        return _err(
+            "no evals/ in this project (LLM products and data pipelines only); "
+            "did you run 'rumbo init'?"
+        )
     if not re.fullmatch(r"[a-z0-9_-]+", args.suite):
         return _err("suite must be a plain name (letters, digits, - or _)")
     if args.suite == "all":
@@ -707,6 +719,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_dir(p)
     p.add_argument("--name", help="project name (plain text, no quotes)")
     p.add_argument("--package", "--pkg", dest="package", help="Python package in snake_case")
+    p.add_argument(
+        "--kind", choices=KINDS, help="what you are building (A0 question 2; default: service)"
+    )
+    p.add_argument(
+        "--layout",
+        choices=LAYOUTS,
+        help="package layout (default by kind: service hexagonal, the others flat; --llm forces "
+        "hexagonal)",
+    )
+    p.add_argument(
+        "--layers", metavar="A,B,C", help="layers of a layered layout, outermost first (>= 2)"
+    )
     llm = p.add_mutually_exclusive_group()
     llm.add_argument("--llm", dest="llm", action="store_true", default=None, help="LLM product")
     llm.add_argument("--no-llm", dest="llm", action="store_false", help="no LLM in the product")
