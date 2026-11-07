@@ -2,25 +2,40 @@
 
 Written for the agent; the human reads it to know what the agent was told.
 
-RUMBO project · package `{{package}}` · rigor **{{rigor}}**{{#llm}} · LLM provider: {{provider}}{{/llm}}.
+RUMBO project · {{kind}} · package `{{package}}` ({{layout}}) · rigor **{{rigor}}**{{#llm}} · LLM provider: {{provider}}{{/llm}}.
 The full cycle (phases R·U·M·B·O, gates, templates) is in `RUMBO.md`.
 
 ## Map
 - Product: docs/product/brief.md, docs/product/prd.md
 - Feature specs (EARS): specs/
 - Architecture decisions: docs/adr/ (read them before any structural decision)
+{{#hexagonal}}
 - Layers: src/{{package}}/{domain,app,adapters,api}; contracts in pyproject.toml [tool.importlinter]
+{{/hexagonal}}
+{{#layered}}
+- Layers: src/{{package}}/<layer>, outermost first as in pyproject.toml [tool.rumbo].layers; contracts in [tool.importlinter]
+{{/layered}}
+{{#flat}}
+- Package: src/{{package}} (flat: no layer contracts; keep modules small and pure where you can)
+{{/flat}}
 - Security: docs/security/threat-model.md
-- Operations: docs/ops/runbook.md, docs/ops/slos.md, docs/postmortems/
+{{#deployable}}
+- Operations: docs/ops/runbook.md{{#service}}, docs/ops/slos.md{{/service}}, docs/postmortems/
+{{/deployable}}
+{{#packaged}}
+- Releases: CHANGELOG.md (keep an `Unreleased` section), .github/workflows/release.yml, docs/postmortems/
+{{/packaged}}
 - Human decisions (compass): docs/decisions.md · Review guides: docs/reviews/
 {{#llm}}
 - Versioned prompts: src/{{package}}/prompts/
-- Evals: evals/ (JSONL datasets, deterministic graders, run_evals.py) · plan in docs/evals/plan.md
 {{/llm}}
+{{#evals}}
+- Evals: evals/ (JSONL datasets, deterministic graders, run_evals.py) · plan in docs/evals/plan.md
+{{/evals}}
 
 ## Commands
 ```
-uv run python scripts/rumbo_check.py         # the WHOLE harness, offline: lint, types, tests, architecture{{#mvp_or_more}}, security{{/mvp_or_more}}{{#llm}}, smoke evals{{/llm}}
+uv run python scripts/rumbo_check.py         # the WHOLE harness, offline: lint, types, tests{{#arch}}, architecture{{/arch}}{{#mvp_or_more}}, security{{/mvp_or_more}}{{#evals}}, smoke evals{{/evals}}
 uv run python scripts/rumbo_check.py --brief # same, but prints only the failing tail (keeps your context small); full log in .rumbo-check.log
 uv run python scripts/rumbo_check.py lint types   # a subset of the steps in [tool.rumbo.checks]
 uv run python scripts/rumbo_check.py sensor  # did I weaken any test relative to origin/main?
@@ -49,7 +64,9 @@ Most of these are enforced by the guard hook (`scripts/rumbo_guard.py`, wired in
 - Never remove the `<!-- rumbo:template` mark from a document: the human removes it when the document is complete.
 - Separate structural commits (refactor) from behavioral commits.
 - Small diffs (~300 lines max). If the task is bigger, propose splitting it.
-- `domain/` is pure: no I/O, no HTTP, no LLM SDKs.
+{{#arch}}
+- `{{inner_layer}}/` is pure: no I/O, no HTTP, no LLM SDKs.
+{{/arch}}
 - Numbers shown to the user are computed by code, never by the LLM.
 {{#llm}}
 - Prompts live only in src/{{package}}/prompts/, with a version identifier.
@@ -59,7 +76,7 @@ Most of these are enforced by the guard hook (`scripts/rumbo_guard.py`, wired in
 - The check stays offline: evals in it use recorded fixtures; the real model runs only in `make evals-live`.
 {{/llm}}
 - No new dependency without approval and PyPI verification (`rumbo verify-dep`).
-- Do not touch infra/, secrets, the Makefile, pyproject.toml (except through `uv add`; it holds `[tool.rumbo.checks]`), CI workflows{{#llm}}, evals/run_evals.py{{/llm}} or the guard hook: the human edits them.
+- Do not touch {{#deployable}}infra/, {{/deployable}}secrets, the Makefile, pyproject.toml (except through `uv add`; it holds `[tool.rumbo.checks]`), CI workflows{{#evals}}, evals/run_evals.py{{/evals}} or the guard hook: the human edits them.
 - Nothing in spikes/ is imported from src/.
 - If you make the same mistake twice, propose a test, lint rule or contract that catches it.
 

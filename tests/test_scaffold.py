@@ -11,13 +11,18 @@ from typing import Any
 import pytest
 
 from rumbo import __version__
-from rumbo.project import Project
+from rumbo.project import HEXAGONAL_LAYERS, KINDS, Project
 from rumbo.scaffold import (
+    DEV_DEPS,
     PROVIDERS,
     Config,
+    Report,
+    _included,
+    dev_dependencies,
     merge_lines,
     merge_pyproject,
     plan_files,
+    runtime_dependencies,
     scaffold,
     target_path,
     to_package,
@@ -575,3 +580,263 @@ def test_init_declares_the_human_in_the_clone(
     assert main([*init, "--dir", str(plain)]) == 0
     assert not any(cmd[0] == "git" for cmd in commands)
     assert "not a git repository" in capsys.readouterr().out
+
+
+# ------------------------------------------------------- kinds and layouts (ADR-0010)
+def _axes(kind: str, layout: str = "", layers: tuple[str, ...] = (), llm: bool = False) -> Config:
+    return Config(
+        name="x",
+        package="x",
+        llm=llm,
+        provider="anthropic" if llm else "",
+        rigor="mvp",
+        kind=kind,
+        layout=layout,
+        layers=layers,
+    )
+
+
+HTTP_FILES = {"src/x/api/http.py", "tests/integration/test_http.py"}
+OPS_FILES = {"infra/Dockerfile", "docs/ops/runbook.md"}
+SLOS_FILES = {"docs/ops/slos.md"}
+RELEASE_FILES = {"CHANGELOG.md", ".github/workflows/release.yml"}
+EVALS_FILES = {
+    "evals/run_evals.py",
+    "evals/graders/__init__.py",
+    "evals/datasets/smoke.jsonl",
+    "docs/evals/plan.md",
+    "tests/unit/test_graders.py",
+}
+JUDGE_FILES = {
+    "evals/graders/judge.py",
+    "evals/calibration/example.jsonl",
+    "tests/unit/test_judge.py",
+}
+PIPELINE_FILES = {"src/x/pipeline.py", "tests/unit/test_pipeline.py"}
+HEXAGONAL_INITS = {f"src/x/{layer}/__init__.py" for layer in HEXAGONAL_LAYERS}
+COLUMNS = HTTP_FILES | OPS_FILES | SLOS_FILES | EVALS_FILES | JUDGE_FILES
+# The release files are owned by another ADR-0010 slice: the condition is checked by path.
+RELEASE_TEMPLATES = ("CHANGELOG.md", "dot_github/workflows/release.yml.tmpl")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_each_kind_generates_exactly_its_column(kind: str) -> None:
+    """ADR-0010 fitness: the plan holds what the table says for the kind and nothing else."""
+    cfg = _axes(kind)
+    plan = plan_files(cfg)
+    expected = {
+        "service": HTTP_FILES | OPS_FILES | SLOS_FILES,
+        "library": set(),
+        "cli": set(),
+        "data": OPS_FILES | EVALS_FILES | PIPELINE_FILES,
+    }[kind]
+    assert plan.keys() & (COLUMNS | PIPELINE_FILES) == expected
+    assert all(_included(rel, cfg) is (kind in ("library", "cli")) for rel in RELEASE_TEMPLATES)
+    assert not plan.keys() & RELEASE_FILES or kind in ("library", "cli")
+    if kind in ("library", "cli"):
+        assert not any(p.startswith(("infra/", "docs/ops/", "src/x/api/")) for p in plan)
+    data = tomllib.loads(str(plan["pyproject.toml"]))
+    assert ("scripts" in data["project"]) is (kind == "cli")
+    if kind == "cli":
+        assert data["project"]["scripts"] == {"x": "x.__main__:main"}
+    assert data["tool"]["rumbo"]["kind"] == kind
+    assert data["tool"]["rumbo"]["layout"] == cfg.layout
+    assert "layers" not in data["tool"]["rumbo"]
+    checks = data["tool"]["rumbo"]["checks"]
+    assert ("evals" in checks) is (kind == "data")
+    targets = [ln.split(":")[0] for ln in str(plan["Makefile"]).splitlines() if ":" in ln]
+    assert ("evals" in targets) is (kind == "data")
+    assert "evals-live" not in targets  # no model: nothing to run live
+    package_init = str(plan["src/x/__init__.py"])
+    assert ('version("x")' in package_init and "__all__" in package_init) is (
+        kind in ("library", "cli")
+    )
+    main = str(plan["src/x/__main__.py"])
+    assert "def main() -> int:" in main and "configure_json_logging" not in main
+
+
+def test_data_gets_evals_without_a_model_and_the_judge_only_with_one() -> None:
+    offline = plan_files(_axes("data"))
+    assert offline.keys() >= EVALS_FILES and not JUDGE_FILES & offline.keys()
+    assert "x.pipeline:run" in str(offline["evals/run_evals.py"])
+    assert "src/x/app/entrypoint.py" not in offline
+    with_model = plan_files(_axes("data", llm=True))
+    assert with_model.keys() >= EVALS_FILES | JUDGE_FILES
+    assert "x.app.entrypoint:answer" in str(with_model["evals/run_evals.py"])
+    assert "src/x/pipeline.py" not in with_model
+    assert "tests/unit/test_graders.py" not in plan_files(_axes("library"))
+
+
+def test_service_keeps_http_without_llm_and_logs_json_only_with_it() -> None:
+    plain = plan_files(_axes("service"))
+    http = str(plain["src/x/api/http.py"])
+    assert "FastAPI" in http and "configure_json_logging" not in http and "telemetry" not in http
+    assert "uvicorn" in str(plain["infra/Dockerfile"])
+    assert "configure_json_logging()" in str(
+        plan_files(_axes("service", llm=True))["src/x/api/http.py"]
+    )
+    assert '"python", "-m", "x"' in str(plan_files(_axes("data"))["infra/Dockerfile"])
+
+
+@pytest.mark.parametrize(
+    ("layout", "layers", "inner"),
+    [("hexagonal", (), "domain"), ("layered", ("web", "core"), "core"), ("flat", (), "")],
+)
+def test_each_layout_has_its_contracts_or_none(
+    layout: str, layers: tuple[str, ...], inner: str
+) -> None:
+    """ADR-0010 fitness: contracts, strict/only_mutate target and arch step follow the layout."""
+    cfg = _axes("library", layout=layout, layers=layers)
+    assert (cfg.arch, cfg.inner_layer) == (layout != "flat", inner)
+    plan = plan_files(cfg)
+    data = tomllib.loads(str(plan["pyproject.toml"]))
+    tool = data["tool"]
+    checks = tool["rumbo"]["checks"]
+    makefile = str(plan["Makefile"])
+    arch_test = str(plan["tests/architecture/test_architecture.py"])
+    pre_commit = str(plan[".pre-commit-config.yaml"])
+    nightly = str(plan[".github/workflows/nightly.yml"])
+    assert "def test_src_does_not_import_spikes" in arch_test
+    src_files = sorted(p for p in plan if p.startswith("src/x/"))
+    if layout == "flat":
+        assert "importlinter" not in tool and "mutmut" not in tool
+        assert "strict" not in tool["pyright"]
+        assert "arch" not in checks
+        assert "arch:" not in makefile and "mutation:" not in makefile
+        assert "_domain_violations" not in arch_test
+        assert "lint-imports" not in pre_commit
+        assert "mutation" not in nightly and "rumbo_check.py audit" in nightly
+        assert src_files == ["src/x/__init__.py", "src/x/__main__.py"]
+        return
+    expected_layers = list(HEXAGONAL_LAYERS) if layout == "hexagonal" else list(layers)
+    contracts = {c["type"]: c for c in tool["importlinter"]["contracts"]}
+    assert contracts["layers"]["layers"] == [f"x.{layer}" for layer in expected_layers]
+    assert contracts["forbidden"]["source_modules"] == [f"x.{inner}"]
+    assert tool["pyright"]["strict"] == [f"src/x/{inner}"]
+    assert tool["mutmut"]["only_mutate"] == [f"src/x/{inner}/*"]
+    assert checks["arch"] == "uv run lint-imports"
+    assert "arch:" in makefile and f"find src/x/{inner}" in makefile
+    assert f'INNER = SRC / "{inner}"' in arch_test
+    assert "lint-imports" in pre_commit
+    assert f"mutmut on src/x/{inner}" in nightly
+    assert src_files == sorted(
+        [
+            "src/x/__init__.py",
+            "src/x/__main__.py",
+            *(f"src/x/{x}/__init__.py" for x in expected_layers),
+        ]
+    )
+    if layout == "layered":
+        assert tool["rumbo"]["layers"] == ["web", "core"]
+        assert "may import only core" in str(plan["src/x/web/__init__.py"])
+        assert "innermost" in str(plan["src/x/core/__init__.py"])
+        for path in (f"src/x/{x}/__init__.py" for x in expected_layers):
+            ast.parse(str(plan[path]), filename=path)
+
+
+def test_layout_defaults_follow_the_kind_and_llm_forces_hexagonal() -> None:
+    assert _axes("service").layout == "hexagonal"
+    assert all(_axes(kind).layout == "flat" for kind in ("library", "cli", "data"))
+    forced = _axes("cli", layout="flat", llm=True)
+    assert (forced.layout, forced.arch, forced.inner_layer) == ("hexagonal", True, "domain")
+    assert plan_files(forced).keys() >= HEXAGONAL_INITS
+    assert _axes("data", llm=True).layout == "hexagonal"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"kind": "monolith"},
+        {"kind": "library", "layout": "onion"},
+        {"kind": "library", "layout": "layered"},  # no layers
+        {"kind": "library", "layout": "layered", "layers": ("only",)},  # < 2
+        {"kind": "library", "layout": "layered", "layers": ("Web", "core")},  # not snake_case
+        {"kind": "library", "layout": "layered", "layers": ("core", "core")},  # duplicates
+        {"kind": "library", "layout": "flat", "layers": ("web", "core")},  # layers need layered
+        {"kind": "service", "layers": ("web", "core")},  # hexagonal has fixed layers
+    ],
+)
+def test_axes_validation(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        Config(name="x", package="x", llm=False, **kwargs)
+
+
+def test_service_dependencies_do_not_depend_on_llm() -> None:
+    assert runtime_dependencies(_axes("service")) == ["fastapi", "uvicorn", "httpx"]
+    assert runtime_dependencies(_axes("service", llm=True)) == [
+        "fastapi",
+        "uvicorn",
+        "httpx",
+        "pydantic",
+        "anthropic",
+    ]
+    assert runtime_dependencies(_axes("cli", llm=True)) == ["pydantic", "anthropic"]
+    assert runtime_dependencies(_axes("library")) == []
+    assert "import-linter" in dev_dependencies(_axes("service"))
+    assert "import-linter" not in dev_dependencies(_axes("cli"))
+    assert dev_dependencies(_axes("cli", layout="hexagonal")) == DEV_DEPS
+
+
+def test_project_load_infers_service_hexagonal_and_update_writes_the_keys(
+    llm_project: Path,
+) -> None:
+    """ADR-0010 migration: older projects load unchanged; `rumbo update` makes the axes explicit."""
+    pyproject = llm_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    assert 'kind = "service"' in original and 'layout = "hexagonal"' in original
+    stripped = re.sub(r"(?m)^(kind|layout) = .*\n", "", original)
+    pyproject.write_text(stripped, encoding="utf-8")
+    try:
+        rumbo = tomllib.loads(stripped)["tool"]["rumbo"]
+        assert "kind" not in rumbo and "layout" not in rumbo
+        project = Project.load(llm_project)
+        assert (project.kind, project.layout, project.layers) == ("service", "hexagonal", ())
+        assert (
+            plan_files(Config.from_project(project)).keys()
+            == plan_files(
+                Config(
+                    name="XM Agent", package="xm_agent", llm=True, provider="anthropic", rigor="mvp"
+                )
+            ).keys()
+        )
+        rep = update(project, llm_project)
+        assert "pyproject.toml (+kind, layout)" in rep.merged
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        assert data["tool"]["rumbo"]["kind"] == "service"
+        assert data["tool"]["rumbo"]["layout"] == "hexagonal"
+        assert "layers" not in data["tool"]["rumbo"]
+        assert data["tool"]["rumbo"]["checks"]  # the other keys and tables are untouched
+        assert data["tool"]["rumbo"]["package"] == "xm_agent"
+        # Idempotent: a second update adds nothing.
+        rep = update(Project.load(llm_project), llm_project)
+        assert not rep.merged
+    finally:
+        pyproject.write_text(original, encoding="utf-8")
+
+
+def test_update_writes_layers_for_a_layered_project(tmp_path: Path) -> None:
+    cfg = _axes("library", layout="layered", layers=("web", "core"))
+    scaffold(cfg, tmp_path)
+    pyproject = tmp_path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(re.sub(r"(?m)^(kind|layers) = .*\n", "", text), encoding="utf-8")
+    # Without `layers`, a layered project does not load: `update` cannot run without the key…
+    with pytest.raises(ValueError, match="at least two layers"):
+        Project.load(tmp_path)
+    # …but a Config rebuilt with the layers writes it (and kind) back, keeping `layout`.
+    from rumbo.scaffold import _add_axes_keys
+
+    report = Report()
+    _add_axes_keys(pyproject, cfg, report)
+    assert report.merged == ["pyproject.toml (+kind, layers)"]
+    loaded = Project.load(tmp_path)
+    assert (loaded.kind, loaded.layout, loaded.layers) == ("library", "layered", ("web", "core"))
+    assert plan_files(Config.from_project(loaded)).keys() == plan_files(cfg).keys()
+
+
+def test_config_round_trips_the_axes_through_project(tmp_path: Path) -> None:
+    cfg = _axes("cli", llm=True)
+    scaffold(cfg, tmp_path)
+    loaded = Config.from_project(Project.load(tmp_path))
+    assert (loaded.kind, loaded.layout, loaded.layers, loaded.llm) == ("cli", "hexagonal", (), True)
+    assert plan_files(loaded).keys() == plan_files(cfg).keys()

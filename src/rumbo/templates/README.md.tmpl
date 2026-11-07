@@ -35,11 +35,24 @@ When it is blocked it asks you; you edit those files by hand. Replace `@your-han
 
 | Folder | What lives there |
 |---|---|
+{{#hexagonal}}
 | `src/{{package}}/domain` | pure logic (no I/O) |
 | `src/{{package}}/app` | use cases; depends only on `domain` |
 | `src/{{package}}/adapters` | external APIs, databases, LLM |
 | `src/{{package}}/api` | FastAPI / CLI |
+{{/hexagonal}}
+{{#layered}}
+| `src/{{package}}/<layer>` | one package per layer, outermost first: `[tool.rumbo].layers` in pyproject.toml; the last one ({{inner_layer}}) is pure |
+{{/layered}}
+{{#flat}}
+| `src/{{package}}` | the package, flat: no layer contracts (kind {{kind}}) |
+{{/flat}}
+{{^hexagonal}}
+{{#service}}
+| `src/{{package}}/api` | the HTTP boundary (FastAPI) |
+{{/service}}
+{{/hexagonal}}
 | `tests/{unit,property,integration,architecture}` | sensors |
-| `docs/` | brief, PRD, ADRs, C4, threat model, runbook, SLOs, decisions, reviews |
+| `docs/` | brief, PRD, ADRs, C4, threat model, {{#deployable}}runbook, {{/deployable}}{{#service}}SLOs, {{/service}}decisions, reviews |
 | `specs/` | EARS specs per feature |
 | `spikes/` | throwaway code; never imported from `src/` |

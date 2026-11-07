@@ -31,12 +31,14 @@ repos:
       - id: uv-lock
   - repo: local
     hooks:
+{{#arch}}
       - id: lint-imports
         name: lint-imports (architecture contracts)
         entry: uv run lint-imports
         language: system
         pass_filenames: false
         types: [python]
+{{/arch}}
       # ADR-0008: the guard binds any coding agent at commit time (AGENTS.md hard rules).
       # The actor is read from the environment and `git config rumbo.human`; the human passes.
       - id: rumbo-guard

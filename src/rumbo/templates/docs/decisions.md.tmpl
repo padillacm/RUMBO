@@ -7,7 +7,8 @@ that number is the team's own measure of whether tasks fit the agent's effective
 
 ## {{date}} — Project start with RUMBO (answers to the A0 questions of RUMBO.md)
 - Project: {{name}} (package `{{package}}`)
-- LLM product: {{#llm}}yes — provider {{provider}}{{/llm}}{{^llm}}no{{/llm}}
+- Building: {{kind}} (layout {{layout}}{{#layered}}, layers {{layers_toml_list}}{{/layered}})
+- Calls an LLM: {{#llm}}yes — provider {{provider}}{{/llm}}{{^llm}}no{{/llm}}
 - Rigor level: {{rigor}}
 - Use case: {{case}}
 - Decided by: human (answers given to `rumbo init`)

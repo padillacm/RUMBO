@@ -1,7 +1,9 @@
 """Architecture fitness functions (they complement the import-linter contracts).
 
-- domain/ stays pure: no I/O or infrastructure imports (standard library included) and no call to
-  the builtin open(). Pure in-memory types (PurePath, StringIO...) are allowed by exact name.
+{{#arch}}
+- {{inner_layer}}/ stays pure: no I/O or infrastructure imports (standard library included) and
+  no call to the builtin open(). Pure in-memory types (PurePath, StringIO...) are allowed by name.
+{{/arch}}
 - Nothing in src/ imports spikes/.
 """
 
@@ -10,16 +12,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "{{package}}"
-# Same modules as the "The domain is pure" import-linter contract…
+{{#arch}}
+INNER = SRC / "{{inner_layer}}"
+# Same modules as the "The {{inner_layer}} layer is pure" import-linter contract…
 CONTRACT_MODULES = ({{forbidden_py}})
 # …plus standard-library I/O, which import-linter does not cover.
 STDLIB_IO = ("socket", "subprocess", "urllib", "http", "sqlite3", "shutil", "os", "pathlib", "io")
-FORBIDDEN_IN_DOMAIN = {*CONTRACT_MODULES, *STDLIB_IO}
+FORBIDDEN_IN_INNER = {*CONTRACT_MODULES, *STDLIB_IO}
 # Names that touch no disk, network or process, so `from <module> import <name>` is fine.
 PURE_NAMES = {
     "pathlib": {"PurePath", "PurePosixPath", "PureWindowsPath"},
     "io": {"StringIO", "BytesIO"},
 }
+{{/arch}}
 
 
 def _imports(path: Path) -> set[str]:
@@ -31,15 +36,16 @@ def _imports(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             names.add(node.module.split(".")[0])
     return names
+{{#arch}}
 
 
 def _forbidden_imports(tree: ast.AST) -> list[str]:
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            found.update(a.name for a in node.names if a.name.split(".")[0] in FORBIDDEN_IN_DOMAIN)
+            found.update(a.name for a in node.names if a.name.split(".")[0] in FORBIDDEN_IN_INNER)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            if node.module.split(".")[0] not in FORBIDDEN_IN_DOMAIN:
+            if node.module.split(".")[0] not in FORBIDDEN_IN_INNER:
                 continue
             allowed = PURE_NAMES.get(node.module, set())
             # An alias (`as`) never changes the name that is checked.
@@ -96,12 +102,14 @@ def _domain_violations(path: Path) -> list[str]:
 
 
 def test_domain_has_no_io() -> None:
+    """The innermost layer ({{inner_layer}}/) is pure (ADR-0007)."""
     violations = {
         str(f.relative_to(ROOT)): found
-        for f in (SRC / "domain").rglob("*.py")
+        for f in INNER.rglob("*.py")
         if (found := _domain_violations(f))
     }
-    assert violations == {}, f"domain/ is not pure: {violations}"
+    assert violations == {}, f"{{inner_layer}}/ is not pure: {violations}"
+{{/arch}}
 
 
 def test_src_does_not_import_spikes() -> None:
