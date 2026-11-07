@@ -45,6 +45,8 @@ rc=0; CLAUDECODE=1 git commit -q --allow-empty -m "x [tests-change-approved]" ||
 # the harness must stay offline: no model credential in the environment
 env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY -u MISTRAL_API_KEY uv run python scripts/rumbo_check.py --brief
 uv run --project "$ROOT" rumbo gate G4 --no-run >/dev/null
+# ADR-0012: the eval runner bounds concurrency; the offline smoke suite must pass the same with 2 in flight.
+if echo "$FLAGS" | grep -q -- "--llm"; then uv run python evals/run_evals.py --suite smoke --concurrency 2; fi
 uv run --project "$ROOT" rumbo update
 # ADR-0011: a prototype grows into an mvp with one command (new steps appended, their tools added
 # with `uv add --dev`); the runner must stay green with the whole mvp table.
