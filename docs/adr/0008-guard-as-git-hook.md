@@ -47,8 +47,10 @@ the staged files from `git diff --cached --name-only --diff-filter=ACMRD`:
 - the template mark (the HTML comment that opens every unfinished document, `TEMPLATE_MARK` in
   the guard) is present in `HEAD:<path>` and absent in the staged
   `:<path>` → exit 1 naming the file.
-For the human actor, or with nothing staged (which is what `pre-commit run --all-files` sees in
-CI), exit 0 silently.
+For the human actor, with nothing staged (which is what `pre-commit run --all-files` sees in
+CI), or for the root commit of a repository (no `HEAD` yet: that commit is the harness `rumbo
+init` just wrote, so there is no previous state to protect and the documented flow, where the
+agent mounts the harness and commits it, keeps working), exit 0 silently.
 
 **`commit-msg` event** (`python scripts/rumbo_guard.py commit-msg <message-file>`). For an agent
 actor, a message containing `[tests-change-approved]` → exit 1 with the ADR-0005 wording ("only

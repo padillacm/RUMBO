@@ -511,7 +511,7 @@ def test_pre_commit_refuses_removing_the_template_mark(
     assert guard.check_pre_commit(repo) is None
 
 
-def test_pre_commit_tolerates_a_repository_without_head(
+def test_pre_commit_exempts_the_root_commit_and_guards_from_the_second(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _quiet_env(monkeypatch, tmp_path)
@@ -522,7 +522,15 @@ def test_pre_commit_tolerates_a_repository_without_head(
     (root / "notes.md").write_text("# Notes\n", encoding="utf-8")
     _git(root, "add", "notes.md")
     assert guard.check_pre_commit(root) is None
+    # The root commit is the harness itself: a protected file in it is not an alteration.
     (root / "Makefile").write_text("check: ; echo\n", encoding="utf-8")
+    _git(root, "add", "Makefile")
+    assert guard.check_pre_commit(root) is None
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "t")
+    _git(root, "commit", "-qm", "chore: initial RUMBO harness")
+    # From the second commit on, the same file is refused to an agent.
+    (root / "Makefile").write_text("check: ; echo changed\n", encoding="utf-8")
     _git(root, "add", "Makefile")
     assert "Makefile" in (guard.check_pre_commit(root) or "")
 
