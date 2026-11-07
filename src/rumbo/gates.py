@@ -142,7 +142,7 @@ def _g2(p: Project, _run: bool) -> list[Result]:
                 "splitting the work across sessions",
             )
         )
-    if p.llm:
+    if p.evals:  # ADR-0010: LLM products and data pipelines both have datasets
         minimum = MIN_EVAL_CASES[p.rigor]
         n = eval_cases(p.root)
         results.append(
@@ -228,11 +228,23 @@ def _g3(p: Project, _run: bool) -> list[Result]:
             "two diagrams, in a document whose template mark was removed",
         )
     )
-    results.append(
-        Result(
-            "import-linter contracts", _contracts(p) >= 2, "need the layers and purity contracts"
+    if p.arch:
+        results.append(
+            Result(
+                "import-linter contracts",
+                _contracts(p) >= 2,
+                "need the layers and purity contracts",
+            )
         )
-    )
+    else:
+        # ADR-0010: a flat package has no layers to contract; the spikes rule still applies.
+        results.append(
+            Result(
+                "architecture test present",
+                (p.root / "tests" / "architecture" / "test_architecture.py").is_file(),
+                "missing tests/architecture/test_architecture.py",
+            )
+        )
     ci = p.read(".github/workflows/ci.yml") or ""
     results.append(
         Result(
@@ -434,23 +446,111 @@ def _g4(p: Project, run: bool) -> list[Result]:
 
 
 # -------------------------------------------------------------------- G5 Operate
-def _g5(p: Project, _run: bool) -> list[Result]:
-    ops = p.at_least("mvp")
-    results = [
-        _doc(p, "docs/ops/runbook.md", "Runbook", required=ops),
-        _doc(p, "docs/ops/slos.md", "SLOs", required=ops),
-        Result("Dockerfile in infra/", (p.root / "infra" / "Dockerfile").exists()),
-    ]
+UNRELEASED = re.compile(r"^##\s+\[?Unreleased\]?", re.M | re.I)
+PYPI_SECRET = re.compile(r"secrets\.PYPI|PYPI_API_TOKEN|PYPI_TOKEN")
+
+
+def _dependency_updates(p: Project, ops: bool) -> Result:
     dependabot = (p.root / ".github" / "dependabot.yml").exists() or (
         p.root / "renovate.json"
     ).exists()
+    return Result(
+        "automatic dependency updates",
+        dependabot if ops else (dependabot or None),
+        "no .github/dependabot.yml or renovate.json (not generated for prototype)",
+    )
+
+
+def _python_matrix(ci: str) -> int:
+    """Entries of the `python` list under the first `matrix:` key of a workflow; 0 without one."""
+    lines = ci.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != "matrix:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        for j in range(i + 1, len(lines)):
+            row = lines[j]
+            if row.strip() and len(row) - len(row.lstrip()) <= indent:
+                break  # end of the matrix block
+            key = re.match(r"\s*python(?:-version)?:\s*(.*)$", row)
+            if not key:
+                continue
+            value = key.group(1).strip()
+            if value.startswith("["):
+                return len([x for x in value.strip("[]").split(",") if x.strip()])
+            depth = len(row) - len(row.lstrip())
+            count = 0
+            for item in lines[j + 1 :]:
+                if not item.strip():
+                    continue
+                if len(item) - len(item.lstrip()) <= depth or not item.lstrip().startswith("-"):
+                    break
+                count += 1
+            return count
+    return 0
+
+
+def _g5_release(p: Project, ops: bool) -> list[Result]:
+    """Library and cli (ADR-0010): a changelog, Trusted Publishing and a Python matrix."""
+    changelog = p.read("CHANGELOG.md")
+    unreleased = changelog is not None and bool(UNRELEASED.search(changelog))
+    results = [
+        Result(
+            "CHANGELOG.md with an 'Unreleased' section",
+            unreleased if ops else (unreleased or None),
+            "missing CHANGELOG.md" if changelog is None else "no '## [Unreleased]' heading",
+        )
+    ]
+    release = p.read(".github/workflows/release.yml")
+    trusted = release is not None and "id-token: write" in release
+    no_secret = release is not None and not PYPI_SECRET.search(release)
     results.append(
         Result(
-            "automatic dependency updates",
-            dependabot if ops else (dependabot or None),
-            "no .github/dependabot.yml or renovate.json (not generated for prototype)",
+            "release workflow publishes with Trusted Publishing (no PyPI token secret)",
+            (trusted and no_secret) if ops else ((trusted and no_secret) or None),
+            "missing .github/workflows/release.yml"
+            if release is None
+            else "needs 'id-token: write' and no PYPI secret (register the Trusted Publisher)",
         )
     )
+    versions = _python_matrix(p.read(".github/workflows/ci.yml") or "")
+    results.append(
+        Result(
+            "CI runs on at least two Python versions",
+            (versions >= 2) if ops else ((versions >= 2) or None),
+            f"found a matrix with {versions} 'python' entries in .github/workflows/ci.yml",
+        )
+    )
+    return results
+
+
+def _g5(p: Project, _run: bool) -> list[Result]:
+    ops = p.at_least("mvp")
+    results: list[Result]
+    if p.kind in ("library", "cli"):
+        results = _g5_release(p, ops)
+    elif p.kind == "data":
+        results = [
+            _doc(p, "docs/ops/runbook.md", "Runbook", required=ops),
+            # Recommended, never required: a pipeline may run where no image is built.
+            Result("Dockerfile in infra/", (p.root / "infra" / "Dockerfile").exists() or None),
+        ]
+    else:
+        results = [
+            _doc(p, "docs/ops/runbook.md", "Runbook", required=ops),
+            _doc(p, "docs/ops/slos.md", "SLOs", required=ops),
+            Result("Dockerfile in infra/", (p.root / "infra" / "Dockerfile").exists()),
+        ]
+    results.append(_dependency_updates(p, ops))
+    if p.kind == "data":
+        n = eval_cases(p.root)
+        results.append(
+            Result(
+                "datasets present in evals/datasets/",
+                (n > 0) if ops else ((n > 0) or None),
+                "no case beyond the examples (cases tagged 'example' do not count)",
+            )
+        )
     if p.llm:
         app = p.root / "src" / p.package / "app"
         instrumented = (app / "budget.py").exists() and (app / "telemetry.py").exists()

@@ -18,6 +18,9 @@ uv run python scripts/rumbo_check.py
 make check                                        # the Makefile alias still works where make exists
 uv run --project "$ROOT" rumbo check --dir .      # the CLI runs the same module
 uv run --project "$ROOT" rumbo doctor
+# ADR-0010: a fresh library or cli project passes G5 (its ops items are all generated); a service
+# or data project cannot yet: its runbook and SLOs still carry the template mark from mvp on.
+if echo "$FLAGS" | grep -Eq -- "--kind (library|cli)"; then uv run --project "$ROOT" rumbo gate G5 --no-run; fi
 git add -A
 git commit -qm "chore: initial RUMBO harness"
 uv run python scripts/check_tests_not_weakened.py --base HEAD
