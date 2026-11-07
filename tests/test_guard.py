@@ -88,6 +88,10 @@ def test_template_mark_cannot_be_removed_by_edit_or_write(tmp_path: Path) -> Non
         "git -c core.hooksPath=/dev/null commit -m x",
         "uv run pre-commit uninstall",
         "rm .git/hooks/pre-commit",
+        "git config rumbo.human true",
+        "git config --unset rumbo.human",
+        "git config --global rumbo.human false",
+        "git -c rumbo.human=true commit -m x",
         "rm -rf /",
         "rm -rf ~",
         "rm -rf ~/",
@@ -140,6 +144,8 @@ def test_dangerous_commands_are_blocked(command: str) -> None:
         "git stash list -n 3",
         "git push -n origin feature",
         "git commit -uno -m x",
+        "git config --get user.email",
+        "git config user.name rumbo",
     ],
 )
 def test_ordinary_commands_are_allowed(command: str) -> None:
@@ -357,3 +363,214 @@ def test_generated_project_wires_the_guard() -> None:
     assert "Bash(uv run python scripts/rumbo_check.py *)" in settings["permissions"]["allow"]
     assert "Bash(rumbo check *)" in settings["permissions"]["allow"]
     assert "Edit(./.claude/**)" in settings["permissions"]["deny"]
+
+
+# ------------------------------------------------------------- git hooks (ADR-0008)
+def _git(root: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout
+
+
+def _quiet_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No agent marker (this suite may itself run inside an agent shell) and no user git config."""
+    for name in guard.DEFAULT_AGENT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+@pytest.fixture
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A tmp git repository with one commit: a protected file and a document with the mark."""
+    _quiet_env(monkeypatch, tmp_path)
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.email", "t@x")
+    _git(root, "config", "user.name", "t")
+    (root / "Makefile").write_text("check: ; echo\n", encoding="utf-8")
+    (root / "docs").mkdir()
+    (root / "docs" / "brief.md").write_text(
+        f"{guard.TEMPLATE_MARK} -->\n# Brief\n", encoding="utf-8"
+    )
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "init")
+    return root
+
+
+@pytest.mark.parametrize("marker", guard.DEFAULT_AGENT_ENV)
+def test_actor_is_an_agent_when_a_marker_is_set(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, marker: str
+) -> None:
+    assert guard.actor(repo) == "unknown"
+    monkeypatch.setenv(marker, "1")
+    assert guard.actor(repo) == "agent"
+    _git(repo, "config", "rumbo.human", "true")
+    assert guard.actor(repo) == "agent"  # the marker wins over the clone's declaration
+
+
+def test_actor_is_the_human_who_declared_rumbo_human(repo: Path) -> None:
+    assert guard.actor(repo) == "unknown"
+    _git(repo, "config", "rumbo.human", "true")
+    assert guard.actor(repo) == "human"
+    _git(repo, "config", "rumbo.human", "false")
+    assert guard.actor(repo) == "unknown"
+
+
+def test_agent_markers_come_from_pyproject_when_declared(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert guard.agent_env_names(repo) == guard.DEFAULT_AGENT_ENV  # no pyproject.toml
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text('[tool.rumbo]\nagent_env = ["MY_AGENT"]\n', encoding="utf-8")
+    assert guard.agent_env_names(repo) == ("MY_AGENT",)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert guard.actor(repo) == "unknown"  # the list replaces the default, it does not extend it
+    monkeypatch.setenv("MY_AGENT", "1")
+    assert guard.actor(repo) == "agent"
+    pyproject.write_text('[tool.rumbo]\nagent_env = "MY_AGENT"\n', encoding="utf-8")
+    assert guard.agent_env_names(repo) == guard.DEFAULT_AGENT_ENV  # not a list: ignored
+    pyproject.write_text("not toml [", encoding="utf-8")
+    assert guard.agent_env_names(repo) == guard.DEFAULT_AGENT_ENV
+
+
+def test_pre_commit_refuses_a_staged_protected_file_from_an_agent(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (repo / "Makefile").write_text("check: ; echo changed\n", encoding="utf-8")
+    _git(repo, "add", "Makefile")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    reason = guard.check_pre_commit(repo) or ""
+    assert "Makefile" in reason and "protected" in reason and "ask the human" in reason
+    assert "rumbo.human" not in reason  # a known agent is not told how to declare itself human
+    monkeypatch.chdir(repo)
+    assert guard.main(["pre-commit"]) == guard.GIT_BLOCK == 1
+    err = capsys.readouterr().err
+    assert err.startswith("blocked by scripts/rumbo_guard.py:") and "Makefile" in err
+    # An unknown actor is treated as an agent and learns how a human declares themself.
+    monkeypatch.delenv("CLAUDECODE")
+    reason = guard.check_pre_commit(repo) or ""
+    assert "Makefile" in reason and "git config rumbo.human true" in reason
+    # The human's own commit goes through, silently.
+    _git(repo, "config", "rumbo.human", "true")
+    assert guard.check_pre_commit(repo) is None
+    assert guard.main(["pre-commit"]) == 0
+    assert capsys.readouterr() == ("", "")
+
+
+def test_pre_commit_allows_uv_writes_and_lists_every_other_protected_file(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GEMINI_CLI", "1")
+    (repo / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    assert guard.check_pre_commit(repo) is None
+    workflows = repo / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text("on: push\n", encoding="utf-8")
+    (repo / ".env").write_text("KEY=v\n", encoding="utf-8")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "rumbo_guard.py").write_text("# tampered\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    reason = guard.check_pre_commit(repo) or ""
+    listed = reason.split("protected file(s) staged: ", 1)[1].split(". They are", 1)[0]
+    assert listed == ".env, .github/workflows/ci.yml, scripts/rumbo_guard.py"
+
+
+def test_pre_commit_refuses_removing_the_template_mark(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CURSOR_AGENT", "1")
+    brief = repo / "docs" / "brief.md"
+    brief.write_text(f"{guard.TEMPLATE_MARK} -->\n# Brief\nmore\n", encoding="utf-8")
+    _git(repo, "add", "docs")
+    assert guard.check_pre_commit(repo) is None  # editing under the mark is fine
+    brief.write_text("# Brief\nfinished\n", encoding="utf-8")
+    _git(repo, "add", "docs")
+    reason = guard.check_pre_commit(repo) or ""
+    assert reason.startswith("docs/brief.md:") and "human" in reason
+    # Only HEAD and the index count: restoring the mark in the working tree without staging
+    # does not help, staging it does.
+    brief.write_text(f"{guard.TEMPLATE_MARK} -->\n# Brief\nfinished\n", encoding="utf-8")
+    assert guard.check_pre_commit(repo)
+    _git(repo, "add", "docs")
+    assert guard.check_pre_commit(repo) is None
+    # A new document without the mark and a deleted document are not "removing the mark".
+    (repo / "docs" / "new.md").write_text("# New\n", encoding="utf-8")
+    _git(repo, "add", "docs")
+    _git(repo, "rm", "-qf", "docs/brief.md")
+    assert guard.check_pre_commit(repo) is None
+
+
+def test_pre_commit_tolerates_a_repository_without_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _quiet_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    root = tmp_path / "fresh"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    (root / "notes.md").write_text("# Notes\n", encoding="utf-8")
+    _git(root, "add", "notes.md")
+    assert guard.check_pre_commit(root) is None
+    (root / "Makefile").write_text("check: ; echo\n", encoding="utf-8")
+    _git(root, "add", "Makefile")
+    assert "Makefile" in (guard.check_pre_commit(root) or "")
+
+
+def test_pre_commit_passes_silently_with_nothing_staged(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("CLAUDECODE", "1")
+    (repo / "Makefile").write_text("unstaged change\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    assert guard.main(["pre-commit"]) == 0  # what `pre-commit run --all-files` sees in CI
+    assert capsys.readouterr() == ("", "")
+
+
+def test_commit_msg_refuses_the_approval_mark_from_an_agent(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    message = tmp_path / "COMMIT_EDITMSG"
+    message.write_text("test: widen the cases [tests-change-approved]\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_SANDBOX_NETWORK_DISABLED", "1")
+    reason = guard.check_commit_msg(repo, str(message)) or ""
+    assert "only the human writes [tests-change-approved]" in reason
+    monkeypatch.chdir(repo)
+    assert guard.main(["commit-msg", str(message)]) == guard.GIT_BLOCK
+    assert "only the human writes" in capsys.readouterr().err
+    message.write_text("feat: ordinary message\n", encoding="utf-8")
+    assert guard.main(["commit-msg", str(message)]) == 0
+    assert capsys.readouterr() == ("", "")
+    message.write_text("x [tests-change-approved]\n", encoding="utf-8")
+    monkeypatch.delenv("CODEX_SANDBOX_NETWORK_DISABLED")
+    assert "git config rumbo.human true" in (guard.check_commit_msg(repo, str(message)) or "")
+    _git(repo, "config", "rumbo.human", "true")
+    assert guard.check_commit_msg(repo, str(message)) is None
+    # A missing message file is a wiring error, reported to the agent rather than ignored.
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert guard.main(["commit-msg"]) == guard.GIT_BLOCK
+    assert "usage" in capsys.readouterr().err
+
+
+def test_git_hooks_without_git_never_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_git(cmd: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError("git")
+
+    _quiet_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(guard.subprocess, "run", no_git)
+    assert guard.actor(tmp_path) == "unknown"
+    assert guard.staged_files(tmp_path) == []
+    assert guard.check_pre_commit(tmp_path) is None
