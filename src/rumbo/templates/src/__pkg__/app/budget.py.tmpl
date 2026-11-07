@@ -7,8 +7,10 @@ can tighten them without a deploy (see .env.example); a blank variable means the
 value of 0 makes every request abstain (kill switch), a negative value is a configuration error.
 
 Tokens and cost are enforced on every `charge()`. Time is enforced *between* calls: pass
-`meter.remaining_seconds` as the SDK/HTTP timeout so a single call cannot overrun it. A Meter
-belongs to one request; it is not thread-safe.
+`meter.remaining_seconds` as the SDK/HTTP timeout so a single call cannot overrun it, and when
+several calls run concurrently (`asyncio.gather`) pass it to each of them. A Meter belongs to
+one request: it is safe to share between the concurrent calls of that request (one thread, no
+`await` inside `charge`), not between threads.
 """
 
 from __future__ import annotations

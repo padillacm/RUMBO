@@ -5,6 +5,11 @@ Attribute names follow the OpenTelemetry GenAI semantic conventions (`gen_ai.ope
 shipped as they are to Langfuse, Phoenix or any OTLP collector. When you reach production,
 `uv add opentelemetry-sdk` (verify it first) and attach a real tracer in an adapter: the
 call sites in app/ do not change. The weekly trace-review ritual reads these records.
+
+The request id travels in a context variable (ADR-0012): the outermost span of a request sets
+it, nested spans and everything awaited inside inherit it, and concurrent requests never see
+each other's (asyncio copies the context into every task). Nothing is threaded through
+signatures; `current_request_id()` reads it anywhere, e.g. to tag a log line.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +29,13 @@ from {{package}}.app.budget import Meter
 
 LOGGER_NAME = "{{package}}.telemetry"
 log = logging.getLogger(LOGGER_NAME)
+
+REQUEST_ID: ContextVar[str | None] = ContextVar("request_id", default=None)
+
+
+def current_request_id() -> str | None:
+    """The id of the request being served, or None outside any span."""
+    return REQUEST_ID.get()
 
 
 @dataclass
@@ -75,9 +88,17 @@ def span(
     meter: Meter | None = None,
     **attributes: Any,
 ) -> Iterator[Span]:
-    """Times a GenAI operation and logs it with OTel attribute names, cost and outcome."""
+    """Times a GenAI operation and logs it with OTel attribute names, cost and outcome.
+
+    Synchronous on purpose, so it wraps sync and async code alike. An explicit `request_id`
+    becomes the current one for the span's duration; otherwise the span joins the current
+    request and, outside any, starts one with a fresh id.
+    """
     current = Span(operation, {"gen_ai.operation.name": operation, **attributes})
-    current.set(**{"request.id": request_id or uuid.uuid4().hex})
+    token = None
+    if request_id or REQUEST_ID.get() is None:
+        token = REQUEST_ID.set(request_id or uuid.uuid4().hex)
+    current.set(**{"request.id": REQUEST_ID.get()})
     if model:
         current.set(**{"gen_ai.request.model": model})
     start = time.perf_counter()
@@ -93,3 +114,5 @@ def span(
         current.set(**{"duration.ms": round((time.perf_counter() - start) * 1000, 1)})
         level = logging.WARNING if current.attributes.get("status") == "error" else logging.INFO
         log.log(level, operation, extra={"span": current.attributes})
+        if token is not None:
+            REQUEST_ID.reset(token)
