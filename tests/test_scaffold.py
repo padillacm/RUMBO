@@ -2,6 +2,7 @@ import ast
 import importlib.util
 import itertools
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -109,9 +110,118 @@ def test_rigor_controls_nightly_dependabot_and_check() -> None:
     def check_line(plan: dict) -> str:  # type: ignore[type-arg]
         return next(ln for ln in str(plan["Makefile"]).splitlines() if ln.startswith("check:"))
 
-    assert check_line(proto) == "check: lint types test arch"
-    assert check_line(prod) == "check: lint types test arch security evals"
-    assert "--cov-fail-under" not in str(prod["Makefile"])
+    # ADR-0006: `make check` is an alias; what runs is decided by [tool.rumbo.checks].
+    assert check_line(proto) == check_line(prod) == RUNNER_ALIAS.format("check")
+    assert "evals:" not in str(proto["Makefile"]) and "evals:" in str(prod["Makefile"])
+    proto_steps = tomllib.loads(str(proto["pyproject.toml"]))["tool"]["rumbo"]["checks"]
+    prod_steps = tomllib.loads(str(prod["pyproject.toml"]))["tool"]["rumbo"]["checks"]
+    assert proto_steps["test"] == "uv run pytest"
+    assert prod_steps["test"] == "uv run pytest --cov --cov-report=term-missing:skip-covered"
+    assert "evals" not in proto_steps and "evals" in prod_steps
+    assert "--cov-fail-under" not in str(prod["pyproject.toml"])
+
+
+RUNNER = "uv run python scripts/rumbo_check.py"
+RUNNER_ALIAS = "{}:" + " " * 7 + "; " + RUNNER  # `check:       ; uv run python ...`
+CHECK_STEPS = ["lint", "format", "types", "test", "arch", "security", "security-scripts", "audit"]
+
+
+@pytest.mark.parametrize("cfg", COMBINATIONS, ids=lambda c: f"{c.provider or 'no-llm'}-{c.rigor}")
+def test_checks_table_lists_the_steps_in_order(cfg: Config) -> None:
+    """ADR-0006 fitness: every project has [tool.rumbo.checks], same steps, same order."""
+    plan = plan_files(cfg)
+    checks = tomllib.loads(str(plan["pyproject.toml"]))["tool"]["rumbo"]["checks"]
+    expected = [*CHECK_STEPS, *(["evals"] if cfg.llm else []), "sensor"]
+    assert list(checks) == expected  # tomllib keeps file order
+    assert all(isinstance(cmd, str) and cmd.strip() for cmd in checks.values())
+    assert checks["sensor"] == "uv run python scripts/check_tests_not_weakened.py --base {base}"
+    assert ("evals" in checks["security"]) is cfg.llm
+    assert ("--cov" in checks["test"]) is (cfg.rigor != "prototype")
+    # Every alias in the Makefile delegates to the runner; the step names exist in the table.
+    makefile = str(plan["Makefile"])
+    for target, steps in {
+        "check": "",
+        "check-brief": " --brief",
+        "lint": " lint format",
+        "types": " types",
+        "test": " test",
+        "arch": " arch",
+        "security": " security security-scripts audit",
+        "sensor": " sensor",
+    }.items():
+        line = next(ln for ln in makefile.splitlines() if ln.startswith(f"{target}:"))
+        assert line.split(";", 1)[1].strip() == RUNNER + steps
+        assert all(step in checks for step in steps.split() if step != "--brief")
+
+
+@pytest.mark.parametrize("cfg", COMBINATIONS, ids=lambda c: f"{c.provider or 'no-llm'}-{c.rigor}")
+def test_generated_ci_runs_the_runner_on_linux_and_windows_without_make(cfg: Config) -> None:
+    """ADR-0006 fitness: a Windows job runs `python scripts/rumbo_check.py`; no `make` in CI."""
+    plan = plan_files(cfg)
+    ci = str(plan[".github/workflows/ci.yml"])
+    jobs_section = ci.split("\njobs:\n", 1)[1]
+    jobs = [ln.strip().rstrip(":") for ln in jobs_section.splitlines() if re.match(r"^  \S+:$", ln)]
+    assert jobs == ["check", "check-windows", "secrets"]
+    windows = ci.split("  check-windows:", 1)[1].split("\n  secrets:", 1)[0]
+    assert "runs-on: windows-latest" in windows
+    assert "uv sync --locked" in windows
+    assert "run: uv run python scripts/rumbo_check.py" in windows
+    assert ci.count("run: uv run python scripts/rumbo_check.py") == 2  # ubuntu and windows
+    assert not re.search(r"\bmake\b", ci)
+    assert "--strict" in ci  # the separate strict sensor step stays on ubuntu
+    if cfg.rigor == "production":
+        assert "uv export --no-dev --no-emit-project --format cyclonedx1.5" in ci
+    nightly = plan.get(".github/workflows/nightly.yml")
+    if nightly is not None:
+        make_lines = [ln for ln in str(nightly).splitlines() if re.search(r"\bmake\b", ln)]
+        assert make_lines == ["        run: make mutation"]  # mutmut needs os.fork: POSIX only
+        if cfg.llm:
+            assert "run: uv run python evals/run_evals.py --suite all --live" in str(nightly)
+
+
+def test_runner_is_copied_byte_identical_and_protected(simple_project: Path) -> None:
+    from rumbo.scaffold import CHECK_FILE
+    from rumbo.sensors import guard
+
+    runner = simple_project / "scripts" / "rumbo_check.py"
+    assert runner.read_bytes() == CHECK_FILE.read_bytes()
+    assert CHECK_FILE.name == "check.py" and CHECK_FILE.parent.name == "sensors"
+    assert os.name == "nt" or runner.stat().st_mode & 0o111  # no exec bits on Windows
+    assert "scripts/rumbo_check.py" in guard.PROTECTED_FILES
+    attributes = (simple_project / ".gitattributes").read_text(encoding="utf-8")
+    assert attributes.endswith("* text=auto eol=lf\n")
+
+
+def test_update_refreshes_the_runner(llm_project: Path) -> None:
+    from rumbo.scaffold import CHECK_FILE
+
+    runner = llm_project / "scripts" / "rumbo_check.py"
+    runner.write_text("# stale copy\n", encoding="utf-8")
+    rep = update(Project.load(llm_project), llm_project)
+    assert "scripts/rumbo_check.py" in rep.updated
+    assert runner.read_bytes() == CHECK_FILE.read_bytes()
+    runner.unlink()
+    rep = update(Project.load(llm_project), llm_project)
+    assert "scripts/rumbo_check.py" in rep.created and runner.exists()
+
+
+def test_update_adds_the_checks_table_to_an_older_project(llm_project: Path) -> None:
+    pyproject = llm_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    start = original.index("[tool.rumbo.checks]")
+    end = original.index("[tool.ruff]")
+    pyproject.write_text(original[:start] + original[end:], encoding="utf-8")
+    assert "checks" not in tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]
+    try:
+        rep = update(Project.load(llm_project), llm_project)
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        assert list(data["tool"]["rumbo"]["checks"]) == [*CHECK_STEPS, "evals", "sensor"]
+        assert "pyproject.toml (+[tool.rumbo.checks])" in rep.merged
+        # A second update changes nothing: the human's steps are never replaced.
+        rep = update(Project.load(llm_project), llm_project)
+        assert not rep.merged
+    finally:
+        pyproject.write_text(original, encoding="utf-8")
 
 
 def test_provider_sdk_is_forbidden_in_domain() -> None:
