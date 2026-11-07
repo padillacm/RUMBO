@@ -7,7 +7,7 @@ RUMBO is built with RUMBO. Read [AGENTS.md](AGENTS.md) first: it is the map of t
 ```bash
 uv sync
 make check   # lint, types and the test suite of the CLI
-make e2e     # mounts real projects in several configurations and requires their `make check`
+make e2e     # mounts real projects in several configurations and requires their check (`scripts/rumbo_check.py`)
 ```
 
 Python ≥ 3.11, `uv`, `git` and `make`. The CLI itself has **no runtime dependencies**: keep it
@@ -48,5 +48,5 @@ questions they should be able to answer. Update `CHANGELOG.md` under *Unreleased
 ## Architecture decisions
 
 The framework's own decisions are ADRs in `docs/adr/` (stdlib-only CLI, the template engine,
-the offline `make check`, the `claude-code` provider, hooks as sensors). Each has a fitness
+the offline check runner, the `claude-code` provider, hooks as sensors). Each has a fitness
 function in `tests/`; propose a new ADR before changing one of those decisions.

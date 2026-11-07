@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -203,10 +204,63 @@ def test_gate_g4_without_make_is_unmeasured_not_a_traceback(
             raise FileNotFoundError(2, "No such file or directory", "make")
         return real_run(cmd, **kwargs)
 
+    # A project generated before ADR-0006 has no runner: G4 falls back to `make check`.
+    runner = simple_project / "scripts" / "rumbo_check.py"
+    original = runner.read_bytes()
+    runner.unlink()
+    monkeypatch.setattr(gates.subprocess, "run", fake_run)
+    try:
+        _, results = evaluate("G4", Project.load(simple_project), run=True)
+    finally:
+        runner.write_bytes(original)
+    check = next(r for r in results if r.description == "rumbo check green")
+    assert check.ok is None and "not installed" in check.detail
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "ok", "detail"),
+    [(0, True, ""), (1, False, "FAIL lint (exit 1)"), (3, None, "environment broken (exit 3)")],
+)
+def test_gate_g4_runs_the_runner_and_tells_red_from_broken(
+    simple_project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    ok: bool | None,
+    detail: str,
+) -> None:
+    from rumbo import gates
+
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[-1] == "scripts/rumbo_check.py":
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, exit_code, "FAIL lint (exit 1)\n", "")
+        return real_run(cmd, **kwargs)
+
     monkeypatch.setattr(gates.subprocess, "run", fake_run)
     _, results = evaluate("G4", Project.load(simple_project), run=True)
-    check = next(r for r in results if r.description == "make check green")
-    assert check.ok is None and "not installed" in check.detail
+    assert calls == [[sys.executable, "scripts/rumbo_check.py"]]  # ADR-0006: the script, not make
+    check = next(r for r in results if r.description == "rumbo check green")
+    assert check.ok is ok
+    assert detail in check.detail
+    assert not any("make check" in r.description for r in results)
+
+
+def test_gate_g3_requires_ci_to_run_the_runner(llm_project: Path) -> None:
+    ci = llm_project / ".github" / "workflows" / "ci.yml"
+    original = ci.read_text(encoding="utf-8")
+    assert "scripts/rumbo_check.py" in original
+    _, results = evaluate("G3", Project.load(llm_project))
+    assert next(r for r in results if r.description == "CI runs rumbo check").ok is True
+    ci.write_text(original.replace("scripts/rumbo_check.py", "make check"), encoding="utf-8")
+    try:
+        _, results = evaluate("G3", Project.load(llm_project))
+    finally:
+        ci.write_text(original, encoding="utf-8")
+    check = next(r for r in results if r.description == "CI runs rumbo check")
+    assert check.ok is False and "ADR-0006" in check.detail
 
 
 def test_diff_size_is_unmeasured_when_head_is_the_base(tmp_path: Path) -> None:
@@ -625,3 +679,20 @@ def test_tour_falls_back_to_a_known_base(
     assert resolve_base("origin/main", tmp_path) is None
     assert main(["tour", "--dir", str(tmp_path)]) == 2
     assert "Pass one" in capsys.readouterr().err
+
+
+def test_check_subcommand_parses_and_delegates_to_the_runner(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = cli.build_parser().parse_args(
+        ["check", "lint", "test", "--brief", "--keep-going", "--base", "x"]
+    )
+    assert args.steps == ["lint", "test"] and args.brief and args.keep_going and args.base == "x"
+    assert args.dir == "."
+    python = Path(sys.executable).as_posix()
+    (tmp_path / "pyproject.toml").write_text(
+        f'[tool.rumbo.checks]\nok = \'"{python}" -c "import sys; sys.exit(0)"\'\n', encoding="utf-8"
+    )
+    assert main(["check", "--brief", "--dir", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.startswith("rumbo check: green (")
+    assert (tmp_path / ".rumbo-check.log").is_file()

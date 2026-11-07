@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- ADR-0006: `scripts/rumbo_check.py` / `rumbo check`, a standard-library verification runner
+  driven by an ordered `[tool.rumbo.checks]` table in `pyproject.toml`, with `--brief`,
+  `--keep-going` and subsets of steps. Exit 0 green, 1 a verification failed, 3 the environment
+  is broken (the `Stop` hook then tells the agent to report to the human, not to repair it).
+- Windows support: the harness no longer needs `make` or a POSIX shell, and the generated CI runs
+  the check on `ubuntu-latest` and `windows-latest`; a generated `.gitattributes` keeps LF line
+  endings.
+- ADR-0007: the anti-cheat sensor counts `pytest.raises`, unittest and mock assertions, resolves
+  assertion helpers inside the tests directory, and reads the directory from `[tool.rumbo].tests`.
+
+### Changed
+- `make check`, `make check-brief` and the other verification targets are optional one-line
+  aliases of the runner; AGENTS.md, README, hooks, gates and CI call the runner directly.
+- `domain/` may import pure names (`PurePath`, `StringIO`); the architecture test now also
+  forbids the builtin `open()`.
+
 ## [0.3.0] - 2026-11-01
 
 ### Added

@@ -11,7 +11,7 @@ rigor **{{rigor}}**.
 ```bash
 uv sync            # install dependencies from uv.lock
 make hooks         # install the pre-commit hooks
-make check         # the whole harness must be green (offline, no credentials needed)
+uv run python scripts/rumbo_check.py   # the whole harness must be green (offline, no credentials needed)
 ```
 {{#llm}}
 
@@ -22,12 +22,12 @@ Model calls happen only in `make evals-live`{{#claude_code}}, through the `claud
 
 Open Claude Code here and say *"Read AGENTS.md and RUMBO.md; let's start phase R"*, or use
 the commands `/rumbo-r`, `/rumbo-u`, `/rumbo-m`, `/rumbo-ancla`, `/rumbo-review`, `/rumbo-o`,
-`/rumbo-gate` and `/rumbo-tour`. The `rumbo` CLI is available as `make rumbo ARGS="gate G4"`
+`/rumbo-gate` and `/rumbo-tour`. The check runs the same on Windows, macOS and Linux (`make check` is an optional alias). The `rumbo` CLI is available as `make rumbo ARGS="gate G4"`
 (or install it: `uv tool install git+https://github.com/padillacm/RUMBO`).
 
 `.claude/settings.json` pre-approves the harness commands and wires `scripts/rumbo_guard.py`
 as hooks: the agent cannot edit the Makefile, `pyproject.toml`, CI, infra or the sensors,
-cannot remove a template mark or bypass the tests, and cannot finish with `make check` red.
+cannot remove a template mark or bypass the tests, and cannot finish with the check red.
 When it is blocked it asks you; you edit those files by hand. Replace `@your-handle` in
 `.github/CODEOWNERS` and the contact in `SECURITY.md`.
 

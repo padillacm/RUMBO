@@ -24,6 +24,7 @@ def _edit(path: str, old: str = "a", new: str = "b") -> dict[str, object]:
         "infra/Dockerfile",
         "scripts/check_tests_not_weakened.py",
         "scripts/rumbo_guard.py",
+        "scripts/rumbo_check.py",
         ".env",
         ".env.local",
         "evals/run_evals.py",
@@ -204,6 +205,116 @@ def test_stop_runs_make_check_only_when_code_changed(
     assert guard.check_stop({}, tmp_path) == (0, "")
 
 
+FAKE_RUNNER = """\
+import os
+import sys
+from pathlib import Path
+
+Path("ran.txt").write_text(" ".join(sys.argv[1:]), encoding="utf-8")
+code = int(os.environ["FAKE_CHECK_EXIT"])
+print("ok   lint")
+print(f"rumbo check: fake exit {code}")
+print("last line, on stderr", file=sys.stderr)
+sys.exit(code)
+"""
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A project with a fake scripts/rumbo_check.py and one changed code file."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "rumbo_check.py").write_text(FAKE_RUNNER, encoding="utf-8")
+    monkeypatch.setattr(guard, "changed_files", lambda _root: ["src/demo/x.py", "notes.md"])
+    monkeypatch.delenv("RUMBO_GUARD_SKIP_CHECK", raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    return tmp_path
+
+
+def _stop(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object] | None = None) -> int:
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload or {})))
+    return guard.main(["stop"])
+
+
+def test_stop_passes_when_the_runner_is_green(
+    project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "0")
+    assert _stop(monkeypatch) == 0
+    out, err = capsys.readouterr()
+    assert out == "" and err == ""
+    assert (project / "ran.txt").read_text(encoding="utf-8") == "--brief"
+
+
+def test_stop_blocks_with_the_tail_when_the_runner_is_red(
+    project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "1")
+    assert _stop(monkeypatch) == guard.BLOCK
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "rumbo check is red after changing 1 file(s)" in err
+    assert ".rumbo-check.log" in err
+    assert "rumbo check: fake exit 1" in err and "last line, on stderr" in err
+    assert "repair" not in err  # a red check is the agent's to fix
+
+
+@pytest.mark.parametrize("exit_code", ["3", "4"])
+def test_stop_reports_a_broken_environment_to_the_human(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    exit_code: str,
+) -> None:
+    monkeypatch.setenv("FAKE_CHECK_EXIT", exit_code)
+    assert _stop(monkeypatch) == 0
+    out, err = capsys.readouterr()
+    assert err == ""
+    hook = json.loads(out)  # the JSON object is the only thing on stdout
+    assert hook["decision"] == "block"
+    reason, human = hook["reason"], hook["systemMessage"]
+    assert "environment is broken" in reason
+    assert "do NOT try to repair it" in reason and "no installs, no config edits" in reason
+    assert "Report the failing step" in reason and "then stop" in reason
+    assert f"rumbo check: fake exit {exit_code}" in reason and "last line, on stderr" in reason
+    assert "environment is broken" in human and f"exit {exit_code}" in human
+    assert "fake exit" not in human  # the human gets one or two lines, not the log
+
+
+def test_stop_without_runner_or_make_asks_for_rumbo_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[list[str]] = []
+
+    def no_make(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        raise FileNotFoundError("make")
+
+    monkeypatch.setattr(guard, "changed_files", lambda _root: ["src/demo/x.py"])
+    monkeypatch.setattr(guard.subprocess, "run", no_make)
+    monkeypatch.delenv("RUMBO_GUARD_SKIP_CHECK", raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    assert _stop(monkeypatch) == 0
+    out, err = capsys.readouterr()
+    assert err == "" and calls == [["make", "check-brief"]]
+    hook = json.loads(out)
+    assert hook["decision"] == "block"
+    assert "rumbo update" in hook["reason"] and "rumbo update" in hook["systemMessage"]
+    assert "scripts/rumbo_check.py is missing" in hook["reason"]
+    assert "do NOT try to repair it" in hook["reason"]
+
+
+def test_stop_hook_active_and_skip_env_short_circuit_the_runner(
+    project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "3")
+    assert _stop(monkeypatch, {"stop_hook_active": True}) == 0
+    monkeypatch.setenv("RUMBO_GUARD_SKIP_CHECK", "1")
+    assert _stop(monkeypatch) == 0
+    out, err = capsys.readouterr()
+    assert out == "" and err == ""
+    assert not (project / "ran.txt").exists()
+
+
 def test_main_reads_the_event_from_stdin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -243,4 +354,6 @@ def test_generated_project_wires_the_guard() -> None:
     assert all("$CLAUDE_PROJECT_DIR" in c for c in commands)
     assert settings["hooks"]["PostToolUse"][0]["matcher"] == "Bash"
     assert "Bash(make check)" in settings["permissions"]["allow"]
+    assert "Bash(uv run python scripts/rumbo_check.py *)" in settings["permissions"]["allow"]
+    assert "Bash(rumbo check *)" in settings["permissions"]["allow"]
     assert "Edit(./.claude/**)" in settings["permissions"]["deny"]

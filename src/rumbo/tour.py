@@ -210,9 +210,12 @@ def _verify_commands(commit: Commit) -> list[str]:
     if tests:
         cmds.append(f"uv run pytest -q {' '.join(tests[:3])}")
     if commit.kind in ("behavioral", "structural", "mechanical"):
-        cmds.append("make check")
+        cmds.append("uv run python scripts/rumbo_check.py")
     if commit.kind == "behavioral":
-        cmds.append(f"git revert --no-commit {commit.short} && make test; git revert --abort")
+        cmds.append(
+            f"git revert --no-commit {commit.short} && uv run python scripts/rumbo_check.py test; "
+            "git revert --abort"
+        )
     return cmds
 
 

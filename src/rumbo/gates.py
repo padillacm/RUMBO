@@ -21,6 +21,7 @@ from rumbo.project import Project, is_template, numbered_documents, section
 from rumbo.trace import trace, uncovered
 
 MAX_DIFF_LINES = 300
+CHECK_ENV = 3  # scripts/rumbo_check.py: the verification environment is broken (ADR-0006)
 MIN_EVAL_CASES = {"prototype": 20, "mvp": 50, "production": 100}
 EARS = re.compile(r"\bshall\b|\bdeber[áa]n?\b", re.I)
 PLACEHOLDER = re.compile(r"…|\.\.\.|<[^>]+>")
@@ -228,19 +229,32 @@ def _g3(p: Project, _run: bool) -> list[Result]:
         )
     )
     ci = p.read(".github/workflows/ci.yml") or ""
-    results.append(Result("CI runs make check", "make check" in ci))
+    results.append(
+        Result(
+            "CI runs rumbo check",
+            "scripts/rumbo_check.py" in ci,
+            "no workflow step runs scripts/rumbo_check.py (ADR-0006)",
+        )
+    )
     return results
 
 
 # ------------------------------------------------------------- G4 Build (per PR)
-def _run_cmd(cmd: list[str], root: Path) -> tuple[bool | None, str]:
-    """(ok, last lines of output); ok is None when the program is not installed."""
+def _run_cmd(cmd: list[str], root: Path) -> tuple[int | None, str]:
+    """(exit code, last lines of output); the code is None when the program is not installed."""
     try:
         proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         return None, f"'{cmd[0]}' is not installed; could not run {' '.join(cmd)}"
     lines = (proc.stdout + proc.stderr).strip().splitlines()
-    return proc.returncode == 0, "\n".join(lines[-15:])
+    return proc.returncode, "\n".join(lines[-15:])
+
+
+def _check_command(root: Path) -> list[str]:
+    """`scripts/rumbo_check.py` (ADR-0006); `make check` for a project not yet updated."""
+    if (root / "scripts" / "rumbo_check.py").is_file():
+        return [sys.executable, "scripts/rumbo_check.py"]
+    return ["make", "check"]
 
 
 def diff_size(root: Path) -> tuple[int | None, str]:
@@ -307,13 +321,18 @@ def _g4(p: Project, run: bool) -> list[Result]:
             )
         )
     if not run:
-        results.append(Result("sensor and make check", None, "skipped (--no-run)"))
+        results.append(Result("sensor and rumbo check", None, "skipped (--no-run)"))
         return results
     sensor = p.root / "scripts" / "check_tests_not_weakened.py"
-    ok, out = _run_cmd([sys.executable, str(sensor), "--strict"], p.root)
-    results.append(Result("no test weakened", ok, out))
-    ok, out = _run_cmd(["make", "check"], p.root)
-    results.append(Result("make check green", ok, "" if ok else out))  # None = unmeasured
+    code, out = _run_cmd([sys.executable, str(sensor), "--strict"], p.root)
+    results.append(Result("no test weakened", None if code is None else code == 0, out))
+    code, out = _run_cmd(_check_command(p.root), p.root)
+    if code == CHECK_ENV:
+        # A broken environment is not a red check: it is reported, never handed to the agent.
+        results.append(Result("rumbo check green", None, f"environment broken (exit 3):\n{out}"))
+    else:
+        ok = None if code is None else code == 0  # None = unmeasured
+        results.append(Result("rumbo check green", ok, "" if ok else out))
     if p.at_least("production"):
         nightly = (p.root / ".github" / "workflows" / "nightly.yml").exists()
         results.append(Result("nightly workflow present (mutation, evals k=3)", nightly))

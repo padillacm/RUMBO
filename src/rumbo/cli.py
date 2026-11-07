@@ -6,6 +6,7 @@ rumbo new adr|spec|postmortem   create a document from its template
 rumbo decision "title"          log a human decision in docs/decisions.md
 rumbo gate G1..G5               automatic checks + human checklist of a gate
 rumbo doctor                    verify the harness is complete and current
+rumbo check [STEP ...]          run the verification steps of [tool.rumbo.checks]
 rumbo check-tests               anti-cheat sensor (tests not weakened)
 rumbo verify-dep NAME           verify a package on PyPI before adding it
 rumbo tour [BASE]               guided, pedagogical review of a git range
@@ -49,7 +50,7 @@ from rumbo.scaffold import (
     valid_sdk_module,
     valid_sdk_package,
 )
-from rumbo.sensors import check_tests_not_weakened
+from rumbo.sensors import check, check_tests_not_weakened
 from rumbo.tour import load_commits, render_markdown, resolve_base
 from rumbo.trace import render as render_trace
 from rumbo.trace import trace, uncovered
@@ -173,13 +174,13 @@ def cmd_init(args: argparse.Namespace) -> int:
                 if cfg.llm
                 else ""
             )
-            + "\n  2. uv run pre-commit autoupdate && make hooks\n"
-            "  3. make check            # must be green\n"
+            + "\n  2. uv run pre-commit autoupdate && uv run pre-commit install\n"
+            "  3. uv run python scripts/rumbo_check.py    # must be green\n"
         )
     else:
         print(
             "\nNext steps (A8):\n"
-            "  1. make check            # must be green\n"
+            "  1. uv run python scripts/rumbo_check.py    # must be green\n"
             "  2. git add -A && git commit -m 'chore: initial RUMBO harness'\n"
             '  3. Open Claude Code and say: "Read AGENTS.md and RUMBO.md; let\'s start phase R".'
         )
@@ -436,6 +437,17 @@ NETWORK_ERRORS = (
     json.JSONDecodeError,
     http.client.HTTPException,
 )
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    argv = [*args.steps, "--dir", args.dir]
+    if args.brief:
+        argv.append("--brief")
+    if args.keep_going:
+        argv.append("--keep-going")
+    if args.base:
+        argv.extend(["--base", args.base])
+    return check.main(argv)
 
 
 def cmd_verify_dep(args: argparse.Namespace) -> int:
@@ -724,13 +736,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-run",
         action="store_true",
-        help="G4: skip the sensor and 'make check' (reported as unmeasured)",
+        help="G4: skip the sensor and 'rumbo check' (reported as unmeasured)",
     )
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("doctor", help="verify the harness is complete and current")
     add_dir(p)
     p.set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser(
+        "check",
+        help="run the verification steps of [tool.rumbo.checks] (no shell, ADR-0006)",
+        description="Runs each step of [tool.rumbo.checks] in table order without a shell. "
+        "Exit 0 green, 1 a step failed, 3 the environment is broken.",
+    )
+    p.add_argument("steps", nargs="*", metavar="STEP", help="steps to run (default: all)")
+    p.add_argument("--brief", action="store_true", help="log to .rumbo-check.log, print a verdict")
+    p.add_argument("--keep-going", action="store_true", help="do not stop at the first failure")
+    p.add_argument("--base", help="value of {base} (default: origin/main if it exists, else main)")
+    p.add_argument("--dir", default=".", help="project root (default: current directory)")
+    p.set_defaults(func=cmd_check)
 
     sub.add_parser(
         "check-tests",
