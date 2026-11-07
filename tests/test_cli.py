@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -625,3 +626,20 @@ def test_tour_falls_back_to_a_known_base(
     assert resolve_base("origin/main", tmp_path) is None
     assert main(["tour", "--dir", str(tmp_path)]) == 2
     assert "Pass one" in capsys.readouterr().err
+
+
+def test_check_subcommand_parses_and_delegates_to_the_runner(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = cli.build_parser().parse_args(
+        ["check", "lint", "test", "--brief", "--keep-going", "--base", "x"]
+    )
+    assert args.steps == ["lint", "test"] and args.brief and args.keep_going and args.base == "x"
+    assert args.dir == "."
+    python = Path(sys.executable).as_posix()
+    (tmp_path / "pyproject.toml").write_text(
+        f'[tool.rumbo.checks]\nok = \'"{python}" -c "import sys; sys.exit(0)"\'\n', encoding="utf-8"
+    )
+    assert main(["check", "--brief", "--dir", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.startswith("rumbo check: green (")
+    assert (tmp_path / ".rumbo-check.log").is_file()
