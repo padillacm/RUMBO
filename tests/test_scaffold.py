@@ -1,8 +1,10 @@
 import ast
+import importlib.util
 import itertools
 import os
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -310,3 +312,84 @@ def test_pre_commit_rev_bumps_are_not_drift(llm_project: Path) -> None:
     rep = update(Project.load(llm_project), llm_project)
     assert ".pre-commit-config.yaml" not in rep.differs
     config.write_text(original)
+
+
+ARCH_TEST = "tests/architecture/test_architecture.py"
+
+
+def _load_arch_test(root: Path) -> Any:
+    """Render the architecture test into a tmp project and import it from there."""
+    cfg = Config(name="Demo", package="demo", llm=False, rigor="prototype")
+    arch = root / ARCH_TEST
+    arch.parent.mkdir(parents=True, exist_ok=True)
+    arch.write_text(str(plan_files(cfg)[ARCH_TEST]), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("generated_arch_test", arch)
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+def _domain_module(root: Path, source: str) -> Path:
+    domain = root / "src" / "demo" / "domain"
+    domain.mkdir(parents=True, exist_ok=True)
+    module = domain / "sample.py"
+    module.write_text(source, encoding="utf-8")
+    return module
+
+
+def _domain_check(root: Path, source: str) -> list[str]:
+    """Violations the generated architecture test finds in one domain module of a tmp project."""
+    loaded = _load_arch_test(root)
+    return loaded._domain_violations(_domain_module(root, source))
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from pathlib import PurePath\n",
+        "from pathlib import PurePosixPath as P, PureWindowsPath\n",
+        "from io import StringIO\n",
+        "from io import BytesIO, StringIO\n",
+        "def open(name):\n    return name\n\n\nopen('x')\n",
+        "open = print\nopen('x')\n",
+        "from codecs import open\n\nopen('x')\n",
+        "import codecs as open\n\nopen.lookup('x')\n",
+        "class Door:\n    def open(self) -> None: ...\n\n\nDoor().open()\n",
+    ],
+)
+def test_architecture_domain_allows_pure_code(tmp_path: Path, source: str) -> None:
+    assert _domain_check(tmp_path, source) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("import pathlib\n", "imports pathlib"),
+        ("import io\n", "imports io"),
+        ("from pathlib import Path\n", "imports pathlib.Path"),
+        ("from pathlib import PurePath, Path as P\n", "imports pathlib.Path"),
+        ("from io import open_code\n", "imports io.open_code"),
+        ("from io import *\n", "imports io.*"),
+        ("import os\n", "imports os"),
+        ("open('x')\n", "calls the builtin open()"),
+        ("def f() -> None:\n    with open('x') as fh:\n        fh.read()\n", "open()"),
+        ("import builtins\n\nbuiltins.open('x')\n", "calls the builtin open()"),
+        ("import pathlib\n\npathlib.Path('x').open()\n", "imports pathlib"),
+        # a method named open does not shadow the builtin at module level
+        ("class Door:\n    def open(self) -> None: ...\n\n\nopen('x')\n", "open()"),
+    ],
+)
+def test_architecture_domain_rejects_io(tmp_path: Path, source: str, expected: str) -> None:
+    assert any(expected in v for v in _domain_check(tmp_path, source))
+
+
+def test_architecture_failure_names_file_and_offender(tmp_path: Path) -> None:
+    loaded = _load_arch_test(tmp_path)
+    _domain_module(tmp_path, "from pathlib import Path\nopen('x')\n")
+    with pytest.raises(AssertionError) as err:
+        loaded.test_domain_has_no_io()
+    message = str(err.value)
+    assert "sample.py" in message
+    assert "pathlib.Path" in message
+    assert "open()" in message
