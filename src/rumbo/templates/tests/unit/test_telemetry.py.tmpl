@@ -1,12 +1,23 @@
-"""Spans are logged as structured records with OTel GenAI attribute names."""
+"""Spans are logged as structured records with OTel GenAI attribute names.
 
+The request id lives in a context variable (ADR-0012): nested spans share it, concurrent
+tasks each get their own, an explicit id wins and is restored when its span closes.
+"""
+
+import asyncio
 import json
 import logging
 
 import pytest
 
 from {{package}}.app.budget import Meter
-from {{package}}.app.telemetry import LOGGER_NAME, JsonFormatter, configure_json_logging, span
+from {{package}}.app.telemetry import (
+    LOGGER_NAME,
+    JsonFormatter,
+    configure_json_logging,
+    current_request_id,
+    span,
+)
 
 
 def test_span_logs_attributes_cost_and_status(caplog: pytest.LogCaptureFixture) -> None:
@@ -55,3 +66,34 @@ def test_span_records_errors_and_reraises(caplog: pytest.LogCaptureFixture) -> N
     assert record.levelno == logging.WARNING
     assert attrs["status"] == "error" and attrs["error.type"] == "ValueError"
     assert len(attrs["request.id"]) == 32  # generated when the caller has none
+
+
+def test_nested_spans_share_the_request_id() -> None:
+    assert current_request_id() is None
+    with span("answer") as outer, span("model_call") as inner:
+        assert inner.attributes["request.id"] == outer.attributes["request.id"]
+        assert current_request_id() == outer.attributes["request.id"]
+    assert current_request_id() is None  # the outermost span started the request and ends it
+
+
+def test_concurrent_tasks_get_their_own_request_id() -> None:
+    async def one_request() -> str:
+        with span("answer"):
+            await asyncio.sleep(0)  # both spans are open at the same time
+            inner = current_request_id()
+            assert inner is not None
+            return inner
+
+    async def two_requests() -> tuple[str, str]:
+        return await asyncio.gather(one_request(), one_request())
+
+    first, second = asyncio.run(two_requests())
+    assert first != second
+
+
+def test_an_explicit_request_id_wins_and_is_restored() -> None:
+    with span("answer") as outer:
+        with span("replay", request_id="given") as inner:
+            assert inner.attributes["request.id"] == "given"
+            assert current_request_id() == "given"
+        assert current_request_id() == outer.attributes["request.id"]

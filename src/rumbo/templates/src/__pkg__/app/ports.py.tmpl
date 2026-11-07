@@ -4,6 +4,9 @@ The check (`scripts/rumbo_check.py`) must stay offline: the smoke evals call the
 RUMBO_EVALS_LIVE unset, and any adapter that would reach the network raises `OfflineError`
 instead. Record real responses as fixtures for the smoke suite; call the model only in
 `make evals-live`. Adapters implement these ports; the domain never imports them.
+
+The ports are async (ADR-0012): every current model SDK and web framework is async-native, so
+the skeleton is written that way from day one instead of being migrated under real code later.
 """
 
 from __future__ import annotations
@@ -26,6 +29,6 @@ def require_live(what: str = "the model") -> None:
 
 
 class Completion(Protocol):
-    """Minimal LLM port: one prompt in, one text out."""
+    """Minimal LLM port: one prompt in, one text out; awaited by the use cases."""
 
-    def __call__(self, prompt: str, *, max_tokens: int = 1024) -> str: ...
+    async def __call__(self, prompt: str, *, max_tokens: int = 1024) -> str: ...

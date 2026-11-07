@@ -1,15 +1,81 @@
 """The Claude Code adapter never reaches the network offline and parses bounded results."""
 
+import asyncio
+import shutil
+from typing import Any
+
 import pytest
 
 from {{package}}.adapters.claude_code import complete, parse_result
 from {{package}}.app.ports import OfflineError
 
 
+class FakeProcess:
+    """Stands in for the `claude -p` subprocess: no CLI is spawned in tests."""
+
+    def __init__(self, stdout: bytes, returncode: int = 0, hang: bool = False) -> None:
+        self.stdout, self.returncode, self.hang = stdout, returncode, hang
+        self.killed = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        if self.hang:
+            await asyncio.sleep(3600)
+        return self.stdout, b"stderr text"
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+def _spawn(process: FakeProcess, calls: list[tuple[str, ...]]) -> Any:
+    async def fake_exec(*args: str, **_: Any) -> FakeProcess:
+        calls.append(args)
+        return process
+
+    return fake_exec
+
+
+@pytest.fixture
+def live(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RUMBO_EVALS_LIVE", "1")
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/claude")
+
+
 def test_offline_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
     with pytest.raises(OfflineError):
-        complete("hello")
+        asyncio.run(complete("hello"))
+
+
+def test_runs_the_cli_without_a_shell_and_parses_its_json(
+    live: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    process = FakeProcess(b'{"result": "pong!"}')
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn(process, calls))
+    assert asyncio.run(complete("ping", max_tokens=1)) == "pong"  # bounded: 1 token ~ 4 chars
+    assert calls == [
+        ("/usr/bin/claude", "-p", "ping", "--output-format", "json", "--max-turns", "1")
+    ]
+
+
+def test_a_failing_cli_raises_with_its_stderr(live: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    process = FakeProcess(b"", returncode=1)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn(process, []))
+    with pytest.raises(RuntimeError, match="stderr text"):
+        asyncio.run(complete("ping"))
+
+
+def test_a_hanging_cli_is_killed_at_the_timeout(
+    live: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = FakeProcess(b"", hang=True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn(process, []))
+    with pytest.raises(TimeoutError):
+        asyncio.run(complete("ping", timeout_s=0.01))
+    assert process.killed
 
 
 def test_parse_result_is_bounded() -> None:

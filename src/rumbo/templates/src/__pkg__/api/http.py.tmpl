@@ -15,5 +15,14 @@ app = FastAPI(title={{name_py}}, version=__version__)
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
     return {"status": "ok", "version": __version__}
+{{#llm}}
+
+
+# A route awaits the use case (ADR-0012):
+#     from {{package}}.app.entrypoint import answer
+#     @app.post("/answer")
+#     async def answer_route(request: dict[str, Any]) -> dict[str, Any]:
+#         return await answer(request)
+{{/llm}}
