@@ -7,7 +7,8 @@ Instructions for projects: RUMBO.md · Contributing rules: CONTRIBUTING.md.
 - CLI: src/rumbo/cli.py · scaffold/update: src/rumbo/scaffold.py · template engine: src/rumbo/render.py
 - Gates: src/rumbo/gates.py · project state: src/rumbo/project.py · guided review: src/rumbo/tour.py
 - Traceability: src/rumbo/trace.py · process metrics: src/rumbo/metrics.py
-- Canonical sensors copied into every project: src/rumbo/sensors/check_tests_not_weakened.py (anti-cheat) and
+- Canonical sensors copied into every project: src/rumbo/sensors/check.py (verification runner, becomes scripts/rumbo_check.py),
+  src/rumbo/sensors/check_tests_not_weakened.py (anti-cheat) and
   src/rumbo/sensors/guard.py (Claude Code hook, becomes scripts/rumbo_guard.py)
 - Decisions about this framework: docs/adr/ (each with a fitness function in tests/)
 - Templates: src/rumbo/templates/ (`.tmpl` is rendered, `__pkg__` → package, `dot_` → `.`)

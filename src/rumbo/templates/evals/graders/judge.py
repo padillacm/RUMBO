@@ -7,7 +7,7 @@ and Cohen's kappa. Register a judge in GRADERS only when `Calibration.acceptable
 (TPR and TNR ≥ 0.8); re-calibrate whenever the rubric, the model or the product changes.
 
 The model call is injected (`complete: str -> str`), so the unit tests use a fake and
-`make check` stays offline. Calibration needs the real model: run it from a small script in
+the check stays offline. Calibration needs the real model: run it from a small script in
 evals/ under `make evals-live` conditions (RUMBO_EVALS_LIVE=1) and paste the summary in
 docs/evals/plan.md. JSON-quoting the answer and the "data, not instructions" line are a
 mitigation against prompt injection, not a guarantee: keep an injected answer in the

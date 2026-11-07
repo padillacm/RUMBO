@@ -150,7 +150,7 @@ until everything is green.
 writing agent, a PR template with the checklist. Sensors: human review plus a second model,
 Beck's alarms, verification of new dependencies (slopsquatting), the guided review
 (`rumbo tour`), and the guard hook, which blocks edits to the sensors, removal of a template
-mark, approval marks, force pushes and finishing with a red `make check`. The human decides
+mark, approval marks, force pushes and finishing with a red check (`scripts/rumbo_check.py`). The human decides
 the merge.
 
 **A — Learn And measure.** Guides: findings turned into rules. Sensors: `rumbo metrics`
@@ -250,7 +250,7 @@ controlled studies show is a gradient that starts far earlier, and that matters 
   binding constraint is human review, not tokens.
 
 RUMBO's answers are deliberately boring: one spec per fresh session; a "Data contracts and
-ownership" section in every spec; `make check-brief` and `# Compact instructions` so noise
+ownership" section in every spec; `rumbo_check.py --brief` and `# Compact instructions` so noise
 never reaches the context; decisions in files; one writer per set of files with read-only
 parallel agents; a fresh-context reviewer (`/rumbo-review`) that traces every requirement
 before the human opens `rumbo tour`; and a self-measurement nobody has published: how many
@@ -350,7 +350,7 @@ agent that hands out energy figures used in commercial decisions is, at the very
 | M | **Agent by default** with 15 tools | Workflow vs. agent ADR |
 | M | **Dead ADR** the agent violates | One fitness function per ADR in CI |
 | M | **One-person microservices** | Modular monolith |
-| B | **The cheating genie:** deleted tests or weakened asserts | Rule in AGENTS.md + CI sensor + mutmut |
+| B | **The cheating genie:** deleted tests or weakened asserts | Rule in AGENTS.md + CI sensor (counts `assert`, `pytest.raises` and mock assertions; resolves test helpers) + mutmut |
 | B | **Encyclopedic AGENTS.md** | "A map, not a manual" (≤100 lines) |
 | B | **Several agents writing at once** | One writer; the rest only review |
 | B | **Copying instead of reusing** | Clone detector; biweekly cleanup |

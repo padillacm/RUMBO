@@ -2,7 +2,7 @@
 
 No API key lives on the machine: the CLI handles authentication. In CI, the nightly job sets
 CLAUDE_CODE_OAUTH_TOKEN. Every call is bounded (timeout, max_tokens) and goes through the
-offline guard so `make check` never reaches the network. subprocess is used with a fixed
+offline guard so the check never reaches the network. subprocess is used with a fixed
 binary, list arguments and no shell (hence the bandit `nosec` markers).
 """
 
