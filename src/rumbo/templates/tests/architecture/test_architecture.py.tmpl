@@ -1,6 +1,7 @@
 """Architecture fitness functions (they complement the import-linter contracts).
 
-- domain/ imports no I/O or infrastructure modules (standard library included).
+- domain/ stays pure: no I/O or infrastructure imports (standard library included) and no call to
+  the builtin open(). Pure in-memory types (PurePath, StringIO...) are allowed by exact name.
 - Nothing in src/ imports spikes/.
 """
 
@@ -14,6 +15,11 @@ CONTRACT_MODULES = ({{forbidden_py}})
 # …plus standard-library I/O, which import-linter does not cover.
 STDLIB_IO = ("socket", "subprocess", "urllib", "http", "sqlite3", "shutil", "os", "pathlib", "io")
 FORBIDDEN_IN_DOMAIN = {*CONTRACT_MODULES, *STDLIB_IO}
+# Names that touch no disk, network or process, so `from <module> import <name>` is fine.
+PURE_NAMES = {
+    "pathlib": {"PurePath", "PurePosixPath", "PureWindowsPath"},
+    "io": {"StringIO", "BytesIO"},
+}
 
 
 def _imports(path: Path) -> set[str]:
@@ -27,13 +33,75 @@ def _imports(path: Path) -> set[str]:
     return names
 
 
+def _forbidden_imports(tree: ast.AST) -> list[str]:
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.update(a.name for a in node.names if a.name.split(".")[0] in FORBIDDEN_IN_DOMAIN)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            if node.module.split(".")[0] not in FORBIDDEN_IN_DOMAIN:
+                continue
+            allowed = PURE_NAMES.get(node.module, set())
+            # An alias (`as`) never changes the name that is checked.
+            found.update(f"{node.module}.{a.name}" for a in node.names if a.name not in allowed)
+    return sorted(found)
+
+
+def _binds_open(node: ast.AST, in_class: bool = False) -> bool:
+    """True if `open` is defined, assigned or imported in this module (class attributes aside)."""
+    if not in_class:
+        if (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+            and node.name == "open"
+        ):
+            return True
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == "open":
+            return True
+        if isinstance(node, ast.alias) and (node.asname or node.name.split(".")[0]) == "open":
+            return True
+    if isinstance(node, ast.ClassDef):
+        child_in_class = True
+    elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+        child_in_class = False
+    else:
+        child_in_class = in_class
+    return any(_binds_open(child, child_in_class) for child in ast.iter_child_nodes(node))
+
+
+def _calls_builtin_open(tree: ast.AST) -> bool:
+    if _binds_open(tree):
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "open":
+            return True
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "open"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "builtins"
+        ):
+            return True
+    return False
+
+
+def _domain_violations(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = [f"imports {name}" for name in _forbidden_imports(tree)]
+    if _calls_builtin_open(tree):
+        found.append("calls the builtin open()")
+    return found
+
+
 def test_domain_has_no_io() -> None:
     violations = {
-        str(f.relative_to(ROOT)): sorted(_imports(f) & FORBIDDEN_IN_DOMAIN)
+        str(f.relative_to(ROOT)): found
         for f in (SRC / "domain").rglob("*.py")
-        if _imports(f) & FORBIDDEN_IN_DOMAIN
+        if (found := _domain_violations(f))
     }
-    assert violations == {}
+    assert violations == {}, f"domain/ is not pure: {violations}"
 
 
 def test_src_does_not_import_spikes() -> None:
