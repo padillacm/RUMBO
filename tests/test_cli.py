@@ -910,6 +910,8 @@ def template_context(**overrides: object) -> dict[str, object]:
         "library": False,
         "cli": False,
         "data": False,
+        "packaged": False,
+        "deployable": False,
         "hexagonal": False,
         "layered": False,
         "flat": False,
@@ -1139,7 +1141,9 @@ def test_changelog_template_starts_with_an_unreleased_section() -> None:
 def test_ci_template_runs_a_python_matrix_only_for_packages(kind: str, versions: int) -> None:
     from rumbo.gates import _python_matrix
 
-    text = _render_template("dot_github/workflows/ci.yml.tmpl", **{kind: True})
+    packaged = kind in ("library", "cli")  # the flag Config.context() derives from the kind
+    flags: dict[str, object] = {kind: True, "packaged": packaged}
+    text = _render_template("dot_github/workflows/ci.yml.tmpl", **flags)
     assert _python_matrix(text) == versions
     assert ("UV_PYTHON: ${{ matrix.python }}" in text) is (versions > 0)
     assert text.count("runs-on: windows-latest") == 1 and "matrix.os" not in text
