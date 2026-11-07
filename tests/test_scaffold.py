@@ -1,6 +1,7 @@
 import ast
 import importlib.util
 import itertools
+import json
 import os
 import re
 import subprocess
@@ -13,17 +14,20 @@ import pytest
 from rumbo import __version__
 from rumbo.project import HEXAGONAL_LAYERS, KINDS, Project
 from rumbo.scaffold import (
-    DEV_DEPS,
     PROVIDERS,
     Config,
     Report,
     _included,
+    check_steps,
+    dependency_name,
     dev_dependencies,
     merge_lines,
     merge_pyproject,
+    missing_dev_dependencies,
     plan_files,
     runtime_dependencies,
     scaffold,
+    set_rigor,
     target_path,
     to_package,
     update,
@@ -129,7 +133,22 @@ def test_rigor_controls_nightly_dependabot_and_check() -> None:
 
 RUNNER = "uv run python scripts/rumbo_check.py"
 RUNNER_ALIAS = "{}:" + " " * 7 + "; " + RUNNER  # `check:       ; uv run python ...`
-CHECK_STEPS = ["lint", "format", "types", "test", "arch", "security", "security-scripts", "audit"]
+SECURITY_STEPS = ["security", "security-scripts", "audit"]
+CHECK_STEPS = ["lint", "format", "types", "test", "arch", *SECURITY_STEPS]  # mvp and above
+
+
+def expected_steps(cfg: Config) -> list[str]:
+    """ADR-0006 order, scaled by rigor, kind and layout (ADR-0010, ADR-0011)."""
+    return [
+        "lint",
+        "format",
+        "types",
+        "test",
+        *(["arch"] if cfg.arch else []),
+        *(SECURITY_STEPS if cfg.rigor != "prototype" else []),
+        *(["evals"] if cfg.evals else []),
+        "sensor",
+    ]
 
 
 @pytest.mark.parametrize("cfg", COMBINATIONS, ids=lambda c: f"{c.provider or 'no-llm'}-{c.rigor}")
@@ -137,11 +156,11 @@ def test_checks_table_lists_the_steps_in_order(cfg: Config) -> None:
     """ADR-0006 fitness: every project has [tool.rumbo.checks], same steps, same order."""
     plan = plan_files(cfg)
     checks = tomllib.loads(str(plan["pyproject.toml"]))["tool"]["rumbo"]["checks"]
-    expected = [*CHECK_STEPS, *(["evals"] if cfg.llm else []), "sensor"]
-    assert list(checks) == expected  # tomllib keeps file order
+    assert list(checks) == expected_steps(cfg) == check_steps(cfg)  # tomllib keeps file order
     assert all(isinstance(cmd, str) and cmd.strip() for cmd in checks.values())
     assert checks["sensor"] == "uv run python scripts/check_tests_not_weakened.py --base {base}"
-    assert ("evals" in checks["security"]) is cfg.llm
+    if cfg.rigor != "prototype":
+        assert ("evals" in checks["security"]) is cfg.llm
     assert ("--cov" in checks["test"]) is (cfg.rigor != "prototype")
     # Every alias in the Makefile delegates to the runner; the step names exist in the table.
     makefile = str(plan["Makefile"])
@@ -157,6 +176,8 @@ def test_checks_table_lists_the_steps_in_order(cfg: Config) -> None:
     }.items():
         line = next(ln for ln in makefile.splitlines() if ln.startswith(f"{target}:"))
         assert line.split(";", 1)[1].strip() == RUNNER + steps
+        if target == "security" and cfg.rigor == "prototype":
+            continue  # ADR-0011: a prototype has no security steps; the alias waits for promote
         assert all(step in checks for step in steps.split() if step != "--brief")
 
 
@@ -774,7 +795,7 @@ def test_service_dependencies_do_not_depend_on_llm() -> None:
     assert runtime_dependencies(_axes("library")) == []
     assert "import-linter" in dev_dependencies(_axes("service"))
     assert "import-linter" not in dev_dependencies(_axes("cli"))
-    assert dev_dependencies(_axes("cli", layout="hexagonal")) == DEV_DEPS
+    assert dev_dependencies(_axes("cli", layout="hexagonal")) == dev_dependencies(_axes("service"))
 
 
 def test_project_load_infers_service_hexagonal_and_update_writes_the_keys(
@@ -840,3 +861,165 @@ def test_config_round_trips_the_axes_through_project(tmp_path: Path) -> None:
     loaded = Config.from_project(Project.load(tmp_path))
     assert (loaded.kind, loaded.layout, loaded.layers, loaded.llm) == ("cli", "hexagonal", (), True)
     assert plan_files(loaded).keys() == plan_files(cfg).keys()
+
+
+# --------------------------------------------------------------------------- ADR-0011
+BASE_TOOLS = ["ruff", "pyright", "pytest", "hypothesis", "pre-commit"]
+MVP_TOOLS = ["pytest-cov", "bandit", "pip-audit"]
+
+
+def _rigor(rigor: str, kind: str = "service", layout: str = "", llm: bool = False) -> Config:
+    return Config(
+        name="x",
+        package="x",
+        llm=llm,
+        provider="anthropic" if llm else "",
+        rigor=rigor,
+        kind=kind,
+        layout=layout,
+    )
+
+
+def test_dev_dependencies_scale_with_rigor_kind_and_layout() -> None:
+    """ADR-0011 fitness: a prototype installs what a prototype verifies; nothing is pinned."""
+    assert dev_dependencies(_rigor("prototype")) == [*BASE_TOOLS, "import-linter"]
+    assert dev_dependencies(_rigor("prototype", kind="cli")) == BASE_TOOLS  # flat: no contracts
+    assert dev_dependencies(_rigor("mvp")) == [*BASE_TOOLS, "import-linter", *MVP_TOOLS]
+    assert dev_dependencies(_rigor("mvp", kind="library")) == [*BASE_TOOLS, *MVP_TOOLS]
+    assert dev_dependencies(_rigor("production")) == [
+        *BASE_TOOLS,
+        "import-linter",
+        *MVP_TOOLS,
+        "mutmut",
+    ]
+    assert dev_dependencies(_rigor("production", kind="data", layout="flat")) == [
+        *BASE_TOOLS,
+        *MVP_TOOLS,
+        "mutmut",
+    ]
+    for rigor in ("prototype", "mvp", "production"):
+        for kind in KINDS:
+            deps = dev_dependencies(_rigor(rigor, kind=kind))
+            assert len(deps) == len(set(deps)) and "pre-commit" in deps  # the guard's git hooks
+            assert ("pytest-cov" in deps) is (rigor != "prototype")
+            assert ("mutmut" in deps) is (rigor == "production")
+            assert all(not re.search(r"[<>=!~]", dep) for dep in deps)  # `uv add` resolves
+    # The LLM capability adds nothing to the development tools; the kind decides the runtime.
+    assert dev_dependencies(_rigor("mvp", llm=True)) == dev_dependencies(_rigor("mvp"))
+    assert runtime_dependencies(_rigor("prototype")) == ["fastapi", "uvicorn", "httpx"]
+    assert runtime_dependencies(_rigor("production", kind="library")) == []
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_check_steps_per_rigor(kind: str) -> None:
+    """ADR-0011 fitness: security, security-scripts and audit arrive with mvp, in ADR-0006 order."""
+    proto, mvp, prod = (
+        check_steps(_rigor(r, kind=kind)) for r in ("prototype", "mvp", "production")
+    )
+    assert not set(SECURITY_STEPS) & set(proto)
+    assert set(SECURITY_STEPS) <= set(mvp) and mvp == prod
+    assert [s for s in mvp if s not in SECURITY_STEPS] == proto  # the rest is unchanged
+    assert mvp == expected_steps(_rigor("mvp", kind=kind))
+    assert mvp.index("audit") < mvp.index("sensor")
+    if kind == "data":
+        assert mvp.index("audit") < mvp.index("evals") < mvp.index("sensor")
+
+
+def _dev_group(pyproject: Path, deps: list[str]) -> None:
+    group = "\n[dependency-groups]\ndev = [" + ", ".join(json.dumps(d) for d in deps) + "]\n"
+    pyproject.write_text(pyproject.read_text(encoding="utf-8") + group, encoding="utf-8")
+
+
+def test_update_appends_the_steps_of_a_raised_rigor_once(simple_project: Path) -> None:
+    """ADR-0011 fitness: a hand-raised rigor gets its steps appended once, plus the uv line."""
+    pyproject = simple_project / "pyproject.toml"
+    before = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]["checks"]
+    assert list(before) == ["lint", "format", "types", "test", "arch", "sensor"]
+    _dev_group(
+        pyproject, ["ruff>=0.5", "Pyright", "pytest", "hypothesis", "pre_commit", "import-linter"]
+    )
+    pyproject.write_text(set_rigor(pyproject.read_text(encoding="utf-8"), "mvp"), encoding="utf-8")
+    assert Project.load(simple_project).rigor == "mvp"
+    assert not (simple_project / ".github" / "workflows" / "nightly.yml").exists()
+
+    rep = update(Project.load(simple_project), simple_project)
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    checks = data["tool"]["rumbo"]["checks"]
+    # Appended at the end of the table, in template order; the existing steps are untouched.
+    assert list(checks) == [*before, *SECURITY_STEPS]
+    assert {k: checks[k] for k in before} == before  # `test` keeps "uv run pytest": never replaced
+    template = tomllib.loads(str(plan_files(_rigor("mvp"))["pyproject.toml"]))
+    assert {k: checks[k] for k in SECURITY_STEPS} == {
+        k: template["tool"]["rumbo"]["checks"][k] for k in SECURITY_STEPS
+    }
+    assert "pyproject.toml (+checks: security, security-scripts, audit)" in rep.merged
+    assert data["tool"]["ruff"]["line-length"] == 100  # the rest of the file is intact
+    # The level's files are rendered; the tools it needs are suggested (versions ignored).
+    assert (
+        ".github/workflows/nightly.yml" in rep.created and ".github/dependabot.yml" in rep.created
+    )
+    assert rep.suggested == ["uv add --dev pytest-cov bandit pip-audit"]
+    assert (
+        "Run to complete the update:\n  uv add --dev pytest-cov bandit pip-audit" in rep.summary()
+    )
+    # Idempotent: the second update adds and suggests nothing new once the tools are listed.
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(
+        text.replace(
+            '"import-linter"]', '"import-linter", "pytest-cov>=5", "bandit[toml]", "pip-audit"]'
+        ),
+        encoding="utf-8",
+    )
+    rep = update(Project.load(simple_project), simple_project)
+    assert not rep.merged and not rep.suggested and not rep.created
+    assert list(
+        tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]["checks"]
+    ) == [
+        *before,
+        *SECURITY_STEPS,
+    ]
+
+
+def test_missing_dev_dependencies_reads_both_groups_and_ignores_versions() -> None:
+    cfg = _rigor("production", kind="library")  # flat: no import-linter
+    base = 'name = "x"\n[tool.rumbo]\npackage = "x"\n'
+    assert missing_dev_dependencies(cfg, base) == dev_dependencies(cfg)
+    pep735 = base + '[dependency-groups]\ndev = ["Ruff==0.8", "pyright", "PyTest", "mutmut"]\n'
+    assert missing_dev_dependencies(cfg, pep735) == ["hypothesis", "pre-commit", *MVP_TOOLS]
+    legacy = base + '[tool.uv]\ndev-dependencies = ["pre_commit>=3", "hypothesis", "pip_audit"]\n'
+    assert missing_dev_dependencies(cfg, legacy) == [
+        "ruff",
+        "pyright",
+        "pytest",
+        "pytest-cov",
+        "bandit",
+        "mutmut",
+    ]
+    assert dependency_name("Foo_Bar.baz[extra] >= 1.0; python_version > '3'") == "foo-bar-baz"
+    assert dependency_name("") == ""
+
+
+def test_set_rigor_rewrites_only_the_key() -> None:
+    cfg = Config(
+        name="x",
+        package="x",
+        llm=False,
+        rigor="prototype",
+        kind="library",
+        layout="layered",
+        layers=("web", "core"),
+    )
+    text = str(plan_files(cfg)["pyproject.toml"])
+    assert 'layers = ["web", "core"]' in text and 'rigor = "prototype"' in text  # `[` before rigor
+    new = set_rigor(text, "production")
+    assert new == text.replace('rigor = "prototype"', 'rigor = "production"')  # one line changed
+    assert tomllib.loads(new)["tool"]["rumbo"]["rigor"] == "production"
+    # A project without the key (defaults to mvp when loading) gets it added inside [tool.rumbo].
+    without = text.replace('rigor = "prototype"\n', "")
+    added = set_rigor(without, "mvp")
+    assert tomllib.loads(added)["tool"]["rumbo"]["rigor"] == "mvp"
+    assert added.index('rigor = "mvp"') < added.index("[tool.rumbo.checks]")
+    with pytest.raises(ValueError, match="invalid rigor"):
+        set_rigor(text, "ultimate")
+    with pytest.raises(ValueError, match=re.escape("has no [tool.rumbo] section")):
+        set_rigor('[project]\nname = "x"\n', "mvp")

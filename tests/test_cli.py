@@ -915,6 +915,8 @@ def template_context(**overrides: object) -> dict[str, object]:
         "flat": False,
         "evals": False,
         "arch": False,
+        "packaged": False,  # library or cli (released to a package index)
+        "deployable": False,  # service or data (shipped as an image)
     }
     ctx.update(overrides)
     return ctx
@@ -938,6 +940,8 @@ def _kind_project(
     (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0.1.0"\n')
     flags = {
         kind: True,
+        "packaged": kind in ("library", "cli"),
+        "deployable": kind in ("service", "data"),
         "production": rigor == "production",
         "mvp_or_more": rigor != "prototype",
     }
@@ -1139,7 +1143,110 @@ def test_changelog_template_starts_with_an_unreleased_section() -> None:
 def test_ci_template_runs_a_python_matrix_only_for_packages(kind: str, versions: int) -> None:
     from rumbo.gates import _python_matrix
 
-    text = _render_template("dot_github/workflows/ci.yml.tmpl", **{kind: True})
+    flags = {kind: True, "packaged": kind in ("library", "cli")}
+    text = _render_template("dot_github/workflows/ci.yml.tmpl", **flags)
     assert _python_matrix(text) == versions
     assert ("UV_PYTHON: ${{ matrix.python }}" in text) is (versions > 0)
     assert text.count("runs-on: windows-latest") == 1 and "matrix.os" not in text
+
+
+# --------------------------------------------------------------------------- ADR-0011
+def _checks(root: Path) -> dict[str, str]:
+    import tomllib
+
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    return data["tool"]["rumbo"]["checks"]
+
+
+def _list_dev_tools(root: Path, tools: list[str]) -> None:
+    """What `uv add --dev` would have written had the project been installed."""
+    pyproject = root / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    group = "\n[dependency-groups]\ndev = [" + ", ".join(f'"{t}"' for t in tools) + "]\n"
+    if "[dependency-groups]" in text:
+        text = text[: text.index("\n[dependency-groups]")]
+    pyproject.write_text(text + group, encoding="utf-8")
+
+
+PROTOTYPE_TOOLS = ["ruff", "pyright", "pytest", "hypothesis", "pre-commit", "import-linter"]
+
+
+def test_promote_refuses_equal_and_lower_rigor(
+    llm_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0011 fitness: promote only raises; lowering is a hand edit, by design."""
+    before = (llm_project / "pyproject.toml").read_text(encoding="utf-8")
+    assert main(["promote", "mvp", "--dir", str(llm_project), "--no-install"]) == 1
+    assert "already at rigor 'mvp'" in capsys.readouterr().err
+    assert main(["promote", "prototype", "--dir", str(llm_project), "--no-install"]) == 1
+    err = capsys.readouterr().err
+    assert "cannot lower the rigor from 'mvp' to 'prototype'" in err and "hand edit" in err
+    assert (llm_project / "pyproject.toml").read_text(encoding="utf-8") == before
+    assert main(["promote", "mvp", "--dir", str(llm_project / "nowhere")]) == 2  # usage error
+
+
+def test_promote_prototype_to_mvp_then_production(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0011 fitness: rigor written, steps appended, nightly and dependabot rendered, uv line."""
+    nightly = simple_project / ".github" / "workflows" / "nightly.yml"
+    dependabot = simple_project / ".github" / "dependabot.yml"
+    untouched = {p: (simple_project / p).read_bytes() for p in ("AGENTS.md", "Makefile")}
+    assert Project.load(simple_project).rigor == "prototype"
+    assert not nightly.exists() and not dependabot.exists()
+    assert list(_checks(simple_project)) == ["lint", "format", "types", "test", "arch", "sensor"]
+    _list_dev_tools(simple_project, PROTOTYPE_TOOLS)
+
+    assert main(["promote", "mvp", "--dir", str(simple_project), "--no-install"]) == 0
+    out = capsys.readouterr().out
+    assert "Promoting Demo from prototype to mvp" in out
+    assert "Run to complete the update:\n  uv add --dev pytest-cov bandit pip-audit" in out
+    assert "rumbo gate" in out
+    project = Project.load(simple_project)
+    assert project.rigor == "mvp" and project.package == "demo"  # the other keys are intact
+    assert nightly.exists() and dependabot.exists()
+    checks = _checks(simple_project)
+    assert list(checks) == [
+        "lint",
+        "format",
+        "types",
+        "test",
+        "arch",
+        "sensor",
+        "security",
+        "security-scripts",
+        "audit",
+    ]
+    assert checks["test"] == "uv run pytest"  # existing steps are never replaced
+    assert checks["audit"] == "uv run pip-audit --skip-editable"
+
+    # mvp → production: no new steps (the table is the same), mutmut is the new tool.
+    _list_dev_tools(simple_project, [*PROTOTYPE_TOOLS, "pytest-cov", "bandit", "pip-audit"])
+    assert main(["promote", "production", "--dir", str(simple_project), "--no-install"]) == 0
+    out = capsys.readouterr().out
+    assert "Promoting Demo from mvp to production" in out
+    assert "Run to complete the update:\n  uv add --dev mutmut" in out
+    assert Project.load(simple_project).rigor == "production"
+    assert list(_checks(simple_project)) == list(checks)
+    # Promote never touches AGENTS.md or the Makefile (ADR-0011); `update` only reports them.
+    assert {p: (simple_project / p).read_bytes() for p in untouched} == untouched
+    assert "AGENTS.md" in out  # listed under "Differ from the current template"
+
+
+def test_promote_runs_uv_add_unless_no_install(
+    simple_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path, report: Any) -> int:
+        calls.append(cmd)
+        report.commands.append((" ".join(cmd), 0))
+        return 0
+
+    from rumbo import scaffold as scaffold_module
+
+    monkeypatch.setattr(scaffold_module, "_run", fake_run)
+    monkeypatch.setattr(scaffold_module.shutil, "which", lambda name: "/usr/bin/uv")
+    _list_dev_tools(simple_project, PROTOTYPE_TOOLS)
+    assert main(["promote", "mvp", "--dir", str(simple_project)]) == 0
+    assert calls == [["uv", "add", "--dev", "pytest-cov", "bandit", "pip-audit"]]
