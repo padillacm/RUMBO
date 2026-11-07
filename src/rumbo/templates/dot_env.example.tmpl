@@ -1,0 +1,16 @@
+# Copy to .env (git-ignored) for local development. Never commit real values.
+{{#claude_code}}
+# Provider claude-code: the `claude` CLI uses your own login; no API key is needed locally.
+# CI (nightly evals) uses the CLAUDE_CODE_OAUTH_TOKEN secret instead.
+{{/claude_code}}
+{{^claude_code}}
+# Use a DEVELOPMENT key with a spending limit, never the production one.
+{{sdk_env_key}}=
+{{/claude_code}}
+# Set to 1 to let evals call the real model (make evals-live does this for you).
+RUMBO_EVALS_LIVE=
+# Per-request limits (app/budget.py). Blank = default; 0 = every request abstains (kill switch).
+RUMBO_BUDGET_INPUT_TOKENS=20000
+RUMBO_BUDGET_OUTPUT_TOKENS=4000
+RUMBO_BUDGET_COST_USD=0.05
+RUMBO_BUDGET_SECONDS=30

@@ -1,0 +1,10 @@
+"""Integration tests: adapters against recorded responses, API end to end."""
+
+import runpy
+
+import pytest
+
+
+def test_module_is_executable(capsys: pytest.CaptureFixture[str]) -> None:
+    runpy.run_module("{{package}}", run_name="__main__")
+    assert "{{package}}" in capsys.readouterr().out

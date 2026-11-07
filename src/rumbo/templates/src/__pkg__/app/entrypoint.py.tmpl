@@ -1,0 +1,34 @@
+"""Entry function the evals call (evals/run_evals.py --entry).
+
+SKELETON: replace it in the first ANCLA task with the real workflow. For now it answers only
+the example case of evals/datasets/smoke.jsonl so the harness is green, and it never calls
+the model unless the evals are live (see adapters/llm.py). Every request runs inside a
+telemetry span and a budget meter: keep both when you replace the body.
+"""
+
+from typing import Any
+
+from {{package}}.app.budget import Budget, BudgetExceeded, Meter
+from {{package}}.app.ports import live
+from {{package}}.app.telemetry import span
+
+
+def answer(request: dict[str, Any]) -> dict[str, Any]:
+    with span("answer") as current:
+        meter = Meter(Budget.from_env())  # a misconfigured budget fails loudly, inside the span
+        try:
+            return _answer(request, meter)
+        except BudgetExceeded as exc:
+            current.set(abstain_reason="budget")
+            return {"abstain": True, "reason": f"budget exceeded: {exc}"}
+        finally:
+            current.set(**meter.snapshot())
+
+
+def _answer(request: dict[str, Any], meter: Meter) -> dict[str, Any]:
+    if request.get("question") == "ping":
+        return {"answer": "pong"}
+    if not live():
+        return {"abstain": True, "reason": "offline: no fixture for this question"}
+    meter.check()  # charge every model call: meter.charge(input_tokens=..., cost_usd=...)
+    return {"abstain": True, "reason": "not implemented"}

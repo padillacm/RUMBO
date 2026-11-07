@@ -1,0 +1,45 @@
+# {{name}}
+
+Built with the **RUMBO** framework (Recognize → Unify → Model → Build with ANCLA → Operate),
+rigor **{{rigor}}**.
+
+- Use case: {{case}}
+- Map for agents and humans: [AGENTS.md](AGENTS.md) · Method: [RUMBO.md](RUMBO.md)
+
+## Getting started
+
+```bash
+uv sync            # install dependencies from uv.lock
+make hooks         # install the pre-commit hooks
+make check         # the whole harness must be green (offline, no credentials needed)
+```
+{{#llm}}
+
+Model calls happen only in `make evals-live`{{#claude_code}}, through the `claude` CLI with your own login{{/claude_code}}{{^claude_code}}, which needs `{{sdk_env_key}}` (copy `.env.example` to `.env`; use a development key with a spending limit){{/claude_code}}. In CI, only the nightly workflow holds that credential.
+{{/llm}}
+
+## Working with the agent
+
+Open Claude Code here and say *"Read AGENTS.md and RUMBO.md; let's start phase R"*, or use
+the commands `/rumbo-r`, `/rumbo-u`, `/rumbo-m`, `/rumbo-ancla`, `/rumbo-review`, `/rumbo-o`,
+`/rumbo-gate` and `/rumbo-tour`. The `rumbo` CLI is available as `make rumbo ARGS="gate G4"`
+(or install it: `uv tool install git+https://github.com/padillacm/RUMBO`).
+
+`.claude/settings.json` pre-approves the harness commands and wires `scripts/rumbo_guard.py`
+as hooks: the agent cannot edit the Makefile, `pyproject.toml`, CI, infra or the sensors,
+cannot remove a template mark or bypass the tests, and cannot finish with `make check` red.
+When it is blocked it asks you; you edit those files by hand. Replace `@your-handle` in
+`.github/CODEOWNERS` and the contact in `SECURITY.md`.
+
+## Layout
+
+| Folder | What lives there |
+|---|---|
+| `src/{{package}}/domain` | pure logic (no I/O) |
+| `src/{{package}}/app` | use cases; depends only on `domain` |
+| `src/{{package}}/adapters` | external APIs, databases, LLM |
+| `src/{{package}}/api` | FastAPI / CLI |
+| `tests/{unit,property,integration,architecture}` | sensors |
+| `docs/` | brief, PRD, ADRs, C4, threat model, runbook, SLOs, decisions, reviews |
+| `specs/` | EARS specs per feature |
+| `spikes/` | throwaway code; never imported from `src/` |

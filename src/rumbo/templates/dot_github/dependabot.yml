@@ -1,0 +1,23 @@
+# Automatic dependency updates (phase O). Every PR goes through CI and the human.
+# cooldown: wait a week before adopting a brand-new release (supply-chain hygiene).
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directory: /infra
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

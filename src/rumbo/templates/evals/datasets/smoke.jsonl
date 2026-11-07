@@ -1,0 +1,2 @@
+{"id": "example-001", "input": {"question": "ping"}, "expected": {"answer": "pong"}, "grader": "field_equality", "tags": ["example"]}
+{"id": "example-002", "input": {"question": "data that does not exist"}, "expected": {}, "grader": "abstention", "tags": ["example"]}

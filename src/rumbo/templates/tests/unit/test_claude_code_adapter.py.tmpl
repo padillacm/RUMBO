@@ -1,0 +1,19 @@
+"""The Claude Code adapter never reaches the network offline and parses bounded results."""
+
+import pytest
+
+from {{package}}.adapters.claude_code import complete, parse_result
+from {{package}}.app.ports import OfflineError
+
+
+def test_offline_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
+    with pytest.raises(OfflineError):
+        complete("hello")
+
+
+def test_parse_result_is_bounded() -> None:
+    assert parse_result('{"result": "abcdef"}', max_chars=3) == "abc"
+    assert parse_result("plain text", max_chars=100) == "plain text"
+    with pytest.raises(RuntimeError):
+        parse_result('{"other": 1}', max_chars=10)

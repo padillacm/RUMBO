@@ -1,0 +1,40 @@
+# RUMBO nightly (RUMBO.md, Part A, step A5): mutation testing on domain/{{#llm}} and the full eval suite against the real model{{/llm}}.
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked
+      - name: mutmut on src/{{package}}/domain
+        run: make mutation
+{{#llm}}
+
+  evals-live:
+    # The only workflow that holds a model credential. It never runs on pull requests.
+    # Protect the `evals` environment with required reviewers in the repository settings.
+    runs-on: ubuntu-latest
+    environment: evals
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked
+{{#claude_code}}
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+{{/claude_code}}
+      - name: Full eval suite (k={{#production}}3{{/production}}{{^production}}1{{/production}})
+        run: make evals-live
+        env:
+          {{sdk_env_key}}: ${{ secrets.{{sdk_env_key}} }}
+{{/llm}}

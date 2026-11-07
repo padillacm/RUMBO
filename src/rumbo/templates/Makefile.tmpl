@@ -1,0 +1,33 @@
+# RUMBO Makefile — one verification command: `make check` (offline, no secrets needed).
+# One-line recipes (`target: ; command`) so tabs never bite.
+# Rigor: {{rigor}}{{#llm}} · LLM provider: {{provider}}{{/llm}}
+
+.PHONY: check check-brief test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
+
+# A locally installed `rumbo` is used when present; otherwise uvx fetches it (needs network).
+RUMBO ?= $(shell command -v rumbo >/dev/null 2>&1 && echo rumbo || echo "uvx --from git+https://github.com/padillacm/RUMBO rumbo")
+# Base for the sensor and the review: origin/main when it exists, else main.
+BASE ?= $(shell git rev-parse --verify -q origin/main >/dev/null 2>&1 && echo origin/main || echo main)
+
+lint:       ; uv run ruff check . && uv run ruff format --check .
+fmt:        ; uv run ruff check --fix . && uv run ruff format .
+types:      ; uv run pyright
+test:       ; uv run pytest{{#mvp_or_more}} --cov --cov-report=term-missing:skip-covered{{/mvp_or_more}}
+arch:       ; uv run lint-imports
+security:   ; uv run bandit -q -r src{{#llm}} evals{{/llm}} && uv run bandit -q -r scripts -s B404,B603,B607 && uv run pip-audit --skip-editable
+{{#llm}}
+# Smoke evals run OFFLINE (recorded fixtures); the model is only called with `make evals-live`.
+evals:      ; uv run python evals/run_evals.py --suite smoke
+evals-live: ; uv run python evals/run_evals.py --suite all --live --k {{#production}}3{{/production}}{{^production}}1{{/production}}
+{{/llm}}
+mutation:   ; @if find src/{{package}}/domain -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo 'domain/ is still empty: nothing to mutate'; fi
+sensor:     ; uv run python scripts/check_tests_not_weakened.py --base $(BASE)
+sbom:       ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
+hooks:      ; uv run pre-commit install
+review:     ; $(RUMBO) tour $(BASE) --out docs/reviews/$$(date +%Y-%m-%d)-$$(git rev-parse --short HEAD).md
+rumbo:      ; $(RUMBO) $(ARGS)
+
+# Agent-friendly: only the failing tail reaches the context; the full log stays on disk.
+check-brief: ; @$(MAKE) --no-print-directory check > .rumbo-check.log 2>&1 && echo "make check: green ($$(grep -c . .rumbo-check.log) log lines in .rumbo-check.log)" || (tail -40 .rumbo-check.log; exit 1)
+
+check: lint types test arch{{#mvp_or_more}} security{{/mvp_or_more}}{{#llm}} evals{{/llm}}

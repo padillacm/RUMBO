@@ -1,0 +1,25 @@
+# Immutable image (phase O). Tag images with the commit SHA.
+# Pin the base and uv images by digest before production (Dependabot's docker ecosystem helps).
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim AS build
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --locked --no-dev --no-install-project
+COPY src ./src
+RUN uv sync --locked --no-dev
+
+FROM python:${PYTHON_VERSION}-slim
+RUN useradd --create-home --uid 10001 app
+WORKDIR /app
+COPY --from=build --chown=app:app /app /app
+ENV PATH="/app/.venv/bin:$PATH"
+USER app
+{{#llm}}
+EXPOSE 8000
+CMD ["uvicorn", "{{package}}.api.http:app", "--host", "0.0.0.0", "--port", "8000"]
+{{/llm}}
+{{^llm}}
+CMD ["python", "-m", "{{package}}"]
+{{/llm}}

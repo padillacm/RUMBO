@@ -1,0 +1,59 @@
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
+# Threat model
+
+## Data flow
+
+```mermaid
+flowchart LR
+  u([User]) -- untrusted input --> api
+  api --> app --> adapters --> ext[(External service)]
+```
+
+## Assets
+
+## Trust boundaries
+
+## STRIDE per boundary
+| Boundary | S | T | R | I | D | E |
+|---|---|---|---|---|---|---|
+
+## Lethal trifecta
+<!-- Private data? Untrusted content? External communication? Which leg is removed, and how is that enforced (test/sensor)? -->
+| Leg | Present in this system? | How it is removed or contained | Sensor |
+|---|---|---|---|
+| Private data | | | |
+| Untrusted content | | | |
+| External communication | | | |
+{{#llm}}
+
+## OWASP LLM Top 10 (2025) and Agentic Top 10 (2026)
+<!-- Mark each row: n/a, mitigated (with its test/sensor) or accepted (signed by the human). -->
+| ID | Risk | Applies? | Mitigation | Test / sensor |
+|---|---|---|---|---|
+| LLM01 | Prompt injection (direct and indirect via tool output / retrieved content) | | tool output and retrieved text are DATA; schema-validated model output | |
+| LLM02 | Sensitive information disclosure (secrets/PII in prompts, traces, answers) | | no secrets in system prompts or traces | |
+| LLM03 | Supply chain (models, packages, datasets) | | rumbo verify-dep, pip-audit, pinned versions | |
+| LLM04 | Data and model poisoning | | dataset provenance | |
+| LLM05 | Improper output handling (code, markdown, SQL built from model output) | | output validated by schema; no remote links/images rendered | |
+| LLM06 | Excessive agency (too many / too powerful tools) | | few, typed, read-only tools | |
+| LLM07 | System prompt leakage | | nothing secret in prompts | |
+| LLM08 | Vector and embedding weaknesses | | | |
+| LLM09 | Misinformation (numbers computed by the model) | | deterministic calculation in code | |
+| LLM10 | Unbounded consumption (tokens, cost, time) | | per-request budget, rate limits, alerts | |
+| ASI01 | Agent goal hijack | | | |
+| ASI02 | Tool misuse / privilege abuse | | least agency; parameters validated | |
+| ASI03 | Identity and privilege abuse | | | |
+| ASI04 | Agentic supply chain | | | |
+| ASI05 | Unexpected code execution | | no code execution tools | |
+| ASI06 | Memory and context poisoning | | provenance of memory/RAG content | |
+| ASI07 | Insecure inter-agent communication | | | |
+| ASI08 | Cascading failures | | | |
+| ASI09 | Human-in-the-loop gaps | | human approval for actions with side effects | |
+| ASI10 | Rogue agents | | | |
+{{/llm}}
+
+## Mitigations (each with its test)
+| Threat | Mitigation | Test |
+|---|---|---|
+
+## Accepted risks (signed by the human)

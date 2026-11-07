@@ -1,0 +1,31 @@
+"""Ports the use cases depend on, and the offline guard.
+
+`make check` must stay offline: the smoke evals call the entry point with
+RUMBO_EVALS_LIVE unset, and any adapter that would reach the network raises `OfflineError`
+instead. Record real responses as fixtures for the smoke suite; call the model only in
+`make evals-live`. Adapters implement these ports; the domain never imports them.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Protocol
+
+
+class OfflineError(RuntimeError):
+    """Raised when code tries to call the model while evals are offline."""
+
+
+def live() -> bool:
+    return os.environ.get("RUMBO_EVALS_LIVE") == "1"
+
+
+def require_live(what: str = "the model") -> None:
+    if not live():
+        raise OfflineError(f"{what} cannot be called offline; use `make evals-live` or a fixture")
+
+
+class Completion(Protocol):
+    """Minimal LLM port: one prompt in, one text out."""
+
+    def __call__(self, prompt: str, *, max_tokens: int = 1024) -> str: ...

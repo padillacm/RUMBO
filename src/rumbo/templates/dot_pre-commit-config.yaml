@@ -1,0 +1,35 @@
+# RUMBO hooks: the same sensors for the human and the agent.
+# `rumbo init` runs `pre-commit autoupdate` so the revs below are refreshed on install.
+# Note: the gitleaks hook scans STAGED changes only; CI runs a full gitleaks scan.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+      - id: ruff-check
+      - id: ruff-format
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.13.6
+    hooks:
+      - id: uv-lock
+  - repo: local
+    hooks:
+      - id: lint-imports
+        name: lint-imports (architecture contracts)
+        entry: uv run lint-imports
+        language: system
+        pass_filenames: false
+        types: [python]

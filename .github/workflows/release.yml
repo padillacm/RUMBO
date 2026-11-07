@@ -1,0 +1,77 @@
+# Release of the RUMBO framework: push a tag `vX.Y.Z` that matches pyproject.toml.
+#   git tag -a v0.3.0 -m "v0.3.0" && git push origin v0.3.0
+# 1. verify: make check and tag == version.
+# 2. release: build the wheel and sdist, create the GitHub Release with the CHANGELOG section.
+# 3. pypi (optional): publish with PyPI trusted publishing (OIDC, no token). Enable it by
+#    creating the `pypi` environment, registering this workflow as a trusted publisher on
+#    pypi.org and setting the repository variable PYPI_PUBLISH=true.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked
+      - run: make check
+      - name: Tag matches pyproject.toml and CHANGELOG.md
+        run: |
+          version=$(uv run --no-project python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          module=$(uv run python -c "import rumbo; print(rumbo.__version__)")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != pyproject v$version"; exit 1; }
+          test "$version" = "$module" || { echo "rumbo.__version__ $module != pyproject $version"; exit 1; }
+          grep -q "^## \[$version\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for $version"; exit 1; }
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv build
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { printing = index($0, "[" v "]") > 0; next }
+            /^\[/ { printing = 0 }   # Keep-a-Changelog link references at the end
+            printing { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || echo "See CHANGELOG.md." > notes.md
+      - name: GitHub Release (idempotent on re-run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+          fi
+
+  pypi:
+    # Publishes exactly the files attached to the GitHub Release (no rebuild).
+    needs: release
+    if: vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Download the release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --dir dist
+      - run: uv publish --trusted-publishing always dist/*

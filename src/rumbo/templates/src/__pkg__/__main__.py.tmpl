@@ -1,0 +1,13 @@
+"""Entry point for `python -m {{package}}`."""
+
+from importlib.metadata import version
+{{#llm}}
+
+from {{package}}.app.telemetry import configure_json_logging
+{{/llm}}
+
+if __name__ == "__main__":
+{{#llm}}
+    configure_json_logging()
+{{/llm}}
+    print(f"{{package}} {version('{{package}}')}")

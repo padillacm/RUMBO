@@ -1,0 +1,21 @@
+<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
+# Architecture (C4 levels 1–2)
+
+## Level 1 — Context
+
+```mermaid
+flowchart LR
+  user([User]) --> system[{{name}}]
+  system --> external[(External system)]
+```
+
+## Level 2 — Containers
+
+```mermaid
+flowchart LR
+  api[api/: FastAPI or CLI] --> app[app/: use cases]
+  app --> domain[domain/: pure logic]
+  app --> adapters[adapters/: APIs, DB, LLM]
+```
+
+## Notes

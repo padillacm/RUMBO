@@ -1,0 +1,45 @@
+"""Model access through the Claude Code CLI (`claude -p`), using the developer's own login.
+
+No API key lives on the machine: the CLI handles authentication. In CI, the nightly job sets
+CLAUDE_CODE_OAUTH_TOKEN. Every call is bounded (timeout, max_tokens) and goes through the
+offline guard so `make check` never reaches the network. subprocess is used with a fixed
+binary, list arguments and no shell (hence the bandit `nosec` markers).
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess  # nosec B404
+
+from {{package}}.app.ports import require_live
+
+DEFAULT_TIMEOUT_S = 120
+
+
+def complete(prompt: str, *, max_tokens: int = 1024, timeout_s: int = DEFAULT_TIMEOUT_S) -> str:
+    require_live("Claude Code")
+    binary = shutil.which("claude")
+    if binary is None:
+        raise RuntimeError(
+            "the `claude` CLI is not installed (npm install -g @anthropic-ai/claude-code)"
+        )
+    cmd = [binary, "-p", prompt, "--output-format", "json", "--max-turns", "1"]
+    proc = subprocess.run(  # noqa: S603 # nosec B603
+        cmd, capture_output=True, text=True, timeout=timeout_s, check=False
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude -p failed ({proc.returncode}): {proc.stderr.strip()[:500]}")
+    return parse_result(proc.stdout, max_chars=max_tokens * 4)
+
+
+def parse_result(stdout: str, *, max_chars: int) -> str:
+    """Extracts the text of a `claude -p --output-format json` result, bounded in size."""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout.strip()[:max_chars]
+    text = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(text, str):
+        raise RuntimeError("unexpected claude output: no 'result' field")
+    return text[:max_chars]

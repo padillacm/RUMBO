@@ -1,0 +1,137 @@
+"""RUMBO eval runner (RUMBO.md, Part A, step A7 "Evals skeleton").
+
+Reads JSONL cases ({"id", "input", "expected", "grader", "tags"}) from
+evals/datasets/<suite>.jsonl, runs the real system k times per case, applies deterministic
+graders and reports pass@1 and pass^k. Exits non-zero when pass^k < --min-pass.
+
+Offline by default: the entry point must answer from recorded fixtures. `--live` sets
+RUMBO_EVALS_LIVE=1 so adapters may call the real model (use `make evals-live`).
+
+    uv run python evals/run_evals.py --suite smoke
+    uv run python evals/run_evals.py --suite all --live --k 3 --min-pass 0.9
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from graders import GRADERS
+
+DATASETS = Path(__file__).resolve().parent / "datasets"
+REPORTS = Path(__file__).resolve().parent / "reports"
+
+
+def load_cases(suite: str) -> list[dict[str, Any]]:
+    files = sorted(DATASETS.glob("*.jsonl")) if suite == "all" else [DATASETS / f"{suite}.jsonl"]
+    cases: list[dict[str, Any]] = []
+    for file in files:
+        for n, line in enumerate(file.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            case = json.loads(line)
+            missing = {"id", "input", "expected", "grader"} - case.keys()
+            if missing:
+                raise ValueError(f"{file.name}:{n}: missing fields {sorted(missing)}")
+            if case["grader"] not in GRADERS:
+                raise ValueError(f"{file.name}:{n}: unknown grader {case['grader']!r}")
+            cases.append(case)
+    ids = [c["id"] for c in cases]
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate case ids")
+    return cases
+
+
+def load_entry(ref: str) -> Any:
+    module, _, function = ref.partition(":")
+    return getattr(importlib.import_module(module), function)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run deterministic evals")
+    parser.add_argument("--suite", default="smoke", help="dataset name or 'all'")
+    parser.add_argument("--k", type=int, default=1, help="runs per case (3 = consistency)")
+    parser.add_argument("--min-pass", type=float, default=1.0, help="minimum pass^k")
+    parser.add_argument("--entry", default="{{package}}.app.entrypoint:answer")
+    parser.add_argument("--tag", help="only cases with this tag")
+    parser.add_argument("--live", action="store_true", help="allow calls to the real model")
+    args = parser.parse_args(argv)
+
+    if args.live:
+        os.environ["RUMBO_EVALS_LIVE"] = "1"
+    else:
+        os.environ.pop("RUMBO_EVALS_LIVE", None)
+
+    cases = load_cases(args.suite)
+    if args.tag:
+        cases = [c for c in cases if args.tag in c.get("tags", [])]
+    if not cases:
+        print("No cases to run.")
+        return 1
+    entry = load_entry(args.entry)
+
+    rows = []
+    successes_total = 0
+    for case in cases:
+        runs = []
+        for _ in range(args.k):
+            start = time.perf_counter()
+            try:
+                output = entry(case["input"])
+                verdict = GRADERS[case["grader"]](output, case["expected"])
+                ok, detail = verdict.ok, verdict.detail
+            except Exception as exc:  # a case that blows up is a failed case
+                ok, detail = False, f"exception: {exc!r}"
+            runs.append({"ok": ok, "detail": detail, "seconds": time.perf_counter() - start})
+        successes = sum(r["ok"] for r in runs)
+        successes_total += successes
+        rows.append(
+            {
+                "id": case["id"],
+                "tags": case.get("tags", []),
+                "runs": runs,
+                "passes_all": successes == args.k,
+            }
+        )
+        mark = "PASS" if successes == args.k else "FAIL"
+        detail = next((r["detail"] for r in runs if not r["ok"]), "")
+        print(f"{mark} {case['id']} ({successes}/{args.k}) {detail}")
+
+    pass_at_1 = successes_total / (len(cases) * args.k)
+    pass_hat_k = sum(r["passes_all"] for r in rows) / len(rows)
+    print(
+        f"\ncases={len(cases)} k={args.k}  pass@1={pass_at_1:.3f}  pass^{args.k}={pass_hat_k:.3f}"
+    )
+
+    REPORTS.mkdir(exist_ok=True)
+    report = REPORTS / f"{args.suite}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    report.write_text(
+        json.dumps(
+            {
+                "suite": args.suite,
+                "k": args.k,
+                "live": args.live,
+                "pass@1": pass_at_1,
+                f"pass^{args.k}": pass_hat_k,
+                "cases": rows,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    if pass_hat_k < args.min_pass:
+        print(f"FAIL: pass^{args.k}={pass_hat_k:.3f} < threshold {args.min_pass}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
