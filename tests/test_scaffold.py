@@ -3,6 +3,7 @@ import importlib.util
 import itertools
 import os
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -503,3 +504,74 @@ def test_architecture_failure_names_file_and_offender(tmp_path: Path) -> None:
     assert "sample.py" in message
     assert "pathlib.Path" in message
     assert "open()" in message
+
+
+# ------------------------------------------------------------- git hooks (ADR-0008)
+def test_pre_commit_config_wires_the_guard_as_git_hooks(simple_project: Path) -> None:
+    config = (simple_project / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    assert "default_install_hook_types: [pre-commit, commit-msg]" in config
+    assert "default_stages: [pre-commit]" in config  # file fixers never see the commit message
+    guard_hook = config.split("- id: rumbo-guard\n", 1)[1].split("- id: rumbo-guard-commit-msg")[0]
+    assert "entry: uv run python scripts/rumbo_guard.py pre-commit" in guard_hook
+    for line in (
+        "language: system",
+        "always_run: true",
+        "pass_filenames: false",
+        "stages: [pre-commit]",
+    ):
+        assert line in guard_hook
+    msg_hook = config.split("- id: rumbo-guard-commit-msg\n", 1)[1]
+    assert "entry: uv run python scripts/rumbo_guard.py commit-msg" in msg_hook
+    assert "language: system" in msg_hook and "stages: [commit-msg]" in msg_hook
+    for existing in ("id: ruff-check", "id: gitleaks", "id: uv-lock", "id: lint-imports"):
+        assert existing in config
+
+
+def test_init_declares_the_human_in_the_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rumbo import scaffold as scaffold_module
+    from rumbo.cli import main
+    from rumbo.scaffold import Report
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    commands: list[list[str]] = []
+    real_run = scaffold_module._run
+
+    def fake_run(cmd: list[str], cwd: Path, report: Report) -> int:
+        commands.append(cmd)
+        if cmd[0] == "uv":  # uv add / pre-commit need the network; not under test here
+            report.commands.append((" ".join(cmd), 0))
+            return 0
+        return real_run(cmd, cwd, report)
+
+    monkeypatch.setattr(scaffold_module, "_run", fake_run)
+    monkeypatch.setattr(scaffold_module.shutil, "which", lambda _name: "uv")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    init = ["init", "--yes", "--name", "Demo", "--package", "demo", "--no-llm", "--rigor", "mvp"]
+    assert main([*init, "--dir", str(repo)]) == 0
+    assert commands.index(["uv", "run", "pre-commit", "install"]) < commands.index(
+        ["git", "config", "rumbo.human", "true"]
+    )
+    declared = subprocess.run(
+        ["git", "config", "--get", "rumbo.human"], cwd=repo, capture_output=True, text=True
+    )
+    assert declared.stdout.strip() == "true"
+    capsys.readouterr()
+    # doctor is quiet while the clone declares its human, and says how to fix it otherwise
+    (repo / "uv.lock").write_text("", encoding="utf-8")
+    assert main(["doctor", "--dir", str(repo)]) == 0
+    assert "rumbo.human" not in capsys.readouterr().out
+    subprocess.run(["git", "config", "--unset", "rumbo.human"], cwd=repo, check=True)
+    assert main(["doctor", "--dir", str(repo)]) == 0  # a warning, not a failure
+    assert "git config rumbo.human true" in capsys.readouterr().out
+    # Outside a git repository nothing is declared and the existing warning stays.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    commands.clear()
+    assert main([*init, "--dir", str(plain)]) == 0
+    assert not any(cmd[0] == "git" for cmd in commands)
+    assert "not a git repository" in capsys.readouterr().out

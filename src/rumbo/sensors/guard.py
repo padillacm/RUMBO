@@ -1,10 +1,16 @@
-"""Claude Code hooks for a RUMBO project: the "Hard rules" of AGENTS.md turned into sensors.
+"""Claude Code and git hooks for a RUMBO project: the "Hard rules" of AGENTS.md as sensors.
 
 Wired by `.claude/settings.json` (copied by `rumbo init`, refreshed by `rumbo update`):
 
     PreToolUse   Edit|Write|MultiEdit|NotebookEdit|Bash  ->  rumbo_guard.py pre-tool
     PostToolUse  Bash                                     ->  rumbo_guard.py post-tool
     Stop                                                  ->  rumbo_guard.py stop
+
+and by `.pre-commit-config.yaml` (ADR-0008), so any coding agent meets the same rules when it
+commits, whatever editor or CLI it runs in:
+
+    pre-commit   (git hook)  ->  rumbo_guard.py pre-commit
+    commit-msg   (git hook)  ->  rumbo_guard.py commit-msg <message-file>
 
 Claude Code sends the event as JSON on stdin. Exit code 0 lets the action through; exit code 2
 blocks it and the message printed on stderr is shown to the agent, which then has to ask the
@@ -33,6 +39,15 @@ What it enforces, and how strongly
   failure to the human and stop, and telling the human in one line. Projects generated before
   the runner existed fall back to `make check-brief`; without `make` the same environment route
   asks for `rumbo update`.
+- Git hooks (deterministic, exit 1, the git convention): the actor is an agent when any variable
+  of `[tool.rumbo].agent_env` is set (default: CLAUDECODE, GEMINI_CLI, CURSOR_AGENT,
+  CODEX_SANDBOX_NETWORK_DISABLED), the human when `git config rumbo.human` is `true` in the
+  clone (`rumbo init` sets it), and unknown otherwise, which counts as an agent. For an agent,
+  `pre-commit` refuses a staged protected file (pyproject.toml and uv.lock excepted, as above)
+  and a staged document whose `<!-- rumbo:template` mark was in HEAD and is gone; `commit-msg`
+  refuses `[tests-change-approved]`. The human's commits, and a run with nothing staged
+  (`pre-commit run --all-files` in CI), pass silently. The Bash heuristics also block
+  `git config` on `rumbo.human`, so the agent cannot declare itself human.
 """
 
 from __future__ import annotations
@@ -42,10 +57,12 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
-BLOCK = 2
+BLOCK = 2  # Claude Code hook protocol: the stderr message is shown to the agent
+GIT_BLOCK = 1  # git hook convention
 TEMPLATE_MARK = "<!-- rumbo:template"
 APPROVAL_MARK = "[tests-change-approved]"
 
@@ -64,6 +81,13 @@ PROTECTED_PREFIXES = (".github/", "infra/", ".claude/", ".env")
 BASH_MAY_CHANGE = ("pyproject.toml", "uv.lock")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 CODE_SUFFIXES = (".py", ".toml", ".jsonl")
+# Environment variables that mark a coding agent's shell; `[tool.rumbo].agent_env` overrides.
+DEFAULT_AGENT_ENV = ("CLAUDECODE", "GEMINI_CLI", "CURSOR_AGENT", "CODEX_SANDBOX_NETWORK_DISABLED")
+HUMAN_HINT = (
+    "no agent marker in the environment and rumbo.human is not set in this clone, so the "
+    "commit is treated as an agent's. A human declares themself once per clone with: "
+    "git config rumbo.human true"
+)
 
 # A protected path as a whole shell token (so Makefile.md or pyproject.toml.bak do not match).
 _TARGET = (
@@ -91,6 +115,10 @@ BASH_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (re.compile(r"\bgit\s+reset\s+--hard\b"), "git reset --hard discards work; ask the human"),
     (re.compile(r"\bgit\b[^|;&]*\bcore\.hooksPath\b"), "do not disable the git hooks"),
+    (
+        re.compile(r"\bgit\b[^|;&]*\brumbo\.human\b"),
+        "only the human declares rumbo.human (git config); the agent leaves it alone",
+    ),
     (re.compile(r"\bpre-commit\s+uninstall\b"), "do not disable the git hooks"),
     (re.compile(r"\brm\b[^|;&]*\.git/hooks"), "do not delete the git hooks"),
     (
@@ -298,9 +326,126 @@ def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
     return run_verification(root, len(changed))
 
 
+# ---------------------------------------------------------------- git hooks (ADR-0008)
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes] | None:
+    """Runs git in the project; None when git is not installed."""
+    try:
+        return subprocess.run(["git", *args], cwd=root, capture_output=True, check=False)
+    except FileNotFoundError:
+        return None
+
+
+def agent_env_names(root: Path) -> tuple[str, ...]:
+    """`[tool.rumbo].agent_env` from pyproject.toml, else the default markers."""
+    try:
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return DEFAULT_AGENT_ENV
+    names = data.get("tool", {}).get("rumbo", {}).get("agent_env")
+    if isinstance(names, list) and all(isinstance(n, str) for n in names):
+        return tuple(str(n) for n in names)
+    return DEFAULT_AGENT_ENV
+
+
+def actor(root: Path) -> str:
+    """'agent' (a marker is set), 'human' (`git config rumbo.human` is true) or 'unknown'."""
+    if any(os.environ.get(name) for name in agent_env_names(root)):
+        return "agent"
+    proc = _git(root, "config", "--get", "rumbo.human")
+    if proc is not None and proc.returncode == 0 and proc.stdout.decode().strip() == "true":
+        return "human"
+    return "unknown"
+
+
+def staged_files(root: Path) -> list[str]:
+    proc = _git(root, "diff", "--cached", "--name-only", "--diff-filter=ACMRD")
+    if proc is None or proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.decode("utf-8", "replace").splitlines() if line]
+
+
+def _blob(root: Path, spec: str) -> str | None:
+    """`git show <spec>` as text, or None when the object does not exist (no HEAD, new file)."""
+    proc = _git(root, "show", spec)
+    if proc is None or proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def _unmarked(root: Path, staged: list[str]) -> list[str]:
+    """Staged files whose template mark was in HEAD and is gone from the index."""
+    removed: list[str] = []
+    for rel in staged:
+        head = _blob(root, f"HEAD:{rel}")
+        if head is None or TEMPLATE_MARK not in head:
+            continue
+        index = _blob(root, f":{rel}")
+        if index is not None and TEMPLATE_MARK not in index:
+            removed.append(rel)
+    return removed
+
+
+def check_pre_commit(root: Path) -> str | None:
+    """Reason to refuse the commit (git pre-commit hook), or None to let it through."""
+    who = actor(root)
+    if who == "human":
+        return None
+    staged = staged_files(root)
+    if not staged:
+        return None
+    reason: str | None = None
+    protected = [f for f in staged if is_protected(f) and f not in BASH_MAY_CHANGE]
+    if protected:
+        reason = (
+            "protected file(s) staged: "
+            + ", ".join(protected)
+            + ". They are protected by AGENTS.md (hard rules): the agent does not edit the "
+            "Makefile, pyproject.toml, CI, infra/, hooks, the sensors or .env files. Unstage them "
+            "(git restore --staged <file>) and ask the human to make that change."
+        )
+    elif unmarked := _unmarked(root, staged):
+        reason = (
+            ", ".join(unmarked)
+            + f": the '{TEMPLATE_MARK} ...' mark is removed only by the human, when the "
+            "document is complete. Restore the first line before committing."
+        )
+    if reason and who == "unknown":
+        reason += f"\n({HUMAN_HINT})"
+    return reason
+
+
+def check_commit_msg(root: Path, message_file: str | None) -> str | None:
+    """Reason to refuse the commit message (git commit-msg hook), or None to let it through."""
+    who = actor(root)
+    if who == "human":
+        return None
+    if message_file is None:
+        return "usage: rumbo_guard.py commit-msg <message-file>"
+    try:
+        message = Path(message_file).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"cannot read the commit message file {message_file}: {exc}"
+    if APPROVAL_MARK not in message:
+        return None
+    reason = f"only the human writes {APPROVAL_MARK}; remove it from the commit message"
+    if who == "unknown":
+        reason += f"\n({HUMAN_HINT})"
+    return reason
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     event = argv[0] if argv else "pre-tool"
+    if event in ("pre-commit", "commit-msg"):  # git hooks: cwd is the repository root
+        root = Path.cwd()
+        if event == "pre-commit":
+            refusal = check_pre_commit(root)
+        else:
+            refusal = check_commit_msg(root, argv[1] if len(argv) > 1 else None)
+        if refusal:
+            print(f"blocked by scripts/rumbo_guard.py: {refusal}", file=sys.stderr)
+            return GIT_BLOCK
+        return 0
     try:
         payload: dict[str, Any] = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     except (json.JSONDecodeError, OSError):
