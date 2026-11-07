@@ -34,7 +34,7 @@ jobs:
         run: npm install -g @anthropic-ai/claude-code
 {{/claude_code}}
       - name: Full eval suite (k={{#production}}3{{/production}}{{^production}}1{{/production}})
-        run: make evals-live
+        run: uv run python evals/run_evals.py --suite all --live --k {{#production}}3{{/production}}{{^production}}1{{/production}}
         env:
           {{sdk_env_key}}: ${{ secrets.{{sdk_env_key}} }}
 {{/llm}}
