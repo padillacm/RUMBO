@@ -25,6 +25,9 @@ early ``return`` before the asserts, mocks that empty the behavior, helpers buil
 dynamically or imported from outside the tests directory, and changes to
 ``[tool.pytest.ini_options]``.
 
+The tests directory is ``[tool.rumbo].tests`` in ``pyproject.toml`` (default ``tests``),
+or ``--tests-dir`` on the command line.
+
 The rule can only be bypassed by a HUMAN: either a commit in ``base..HEAD`` whose message
 contains ``[tests-change-approved]`` and whose author is not an agent (no
 ``noreply@anthropic.com`` / ``*[bot]`` author, no ``Co-Authored-By: Claude`` trailer on
@@ -44,6 +47,7 @@ import os
 import posixpath
 import subprocess
 import sys
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -380,8 +384,30 @@ def analyze(files: Mapping[str, str | None]) -> Inventory:
 
 
 # ------------------------------------------------------------------------ inventories
-def base_inventory(base: str, root: Path) -> Inventory:
-    listing = _git(["ls-tree", "-r", "--name-only", base, "--", TESTS_DIR], root)
+def _normalize_dir(value: str) -> str:
+    return value.strip().replace("\\", "/").strip("/")
+
+
+def tests_directory(root: Path, override: str | None = None) -> str:
+    """``--tests-dir`` if given, else ``[tool.rumbo].tests`` in pyproject.toml, else ``tests``."""
+    if override and _normalize_dir(override):
+        return _normalize_dir(override)
+    pyproject = root / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return TESTS_DIR
+        tool = data.get("tool")
+        rumbo = tool.get("rumbo") if isinstance(tool, dict) else None
+        value = rumbo.get("tests") if isinstance(rumbo, dict) else None
+        if isinstance(value, str) and _normalize_dir(value):
+            return _normalize_dir(value)
+    return TESTS_DIR
+
+
+def base_inventory(base: str, root: Path, tests_dir: str = TESTS_DIR) -> Inventory:
+    listing = _git(["ls-tree", "-r", "--name-only", base, "--", tests_dir], root)
     files: dict[str, str | None] = {}
     for path in filter(None, listing.stdout.splitlines()):
         content = None
@@ -392,9 +418,9 @@ def base_inventory(base: str, root: Path) -> Inventory:
     return analyze(files)
 
 
-def worktree_inventory(root: Path) -> Inventory:
+def worktree_inventory(root: Path, tests_dir: str = TESTS_DIR) -> Inventory:
     files: dict[str, str | None] = {}
-    folder = root / TESTS_DIR
+    folder = root / tests_dir
     if folder.is_dir():
         for path in sorted(folder.rglob("*")):
             if path.is_file() and "__pycache__" not in path.parts:
@@ -510,8 +536,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", help="base ref or SHA (default: origin/main or the PR base)")
     parser.add_argument("--root", default=".", help="repository root")
     parser.add_argument("--strict", action="store_true", help="exit 2 when no base can be resolved")
+    parser.add_argument(
+        "--tests-dir",
+        help="tests directory (default: [tool.rumbo].tests in pyproject.toml, or tests)",
+    )
     args = parser.parse_args(argv)
     root = Path(args.root).resolve()
+    tests_dir = tests_directory(root, args.tests_dir)
 
     base, warnings = resolve_base(args.base, root)
     for warning in warnings:
@@ -520,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         print("WARNING: no base to compare against (no origin/main?).")
         return 2 if args.strict else 0
 
-    problems = compare(base_inventory(base, root), worktree_inventory(root))
+    problems = compare(base_inventory(base, root, tests_dir), worktree_inventory(root, tests_dir))
     if not problems:
         print(f"OK: no test weakened relative to {base[:12]}.")
         return 0

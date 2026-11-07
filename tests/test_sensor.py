@@ -336,3 +336,44 @@ def test_skip_inside_a_resolved_helper_counts_as_a_skip() -> None:
     base = {"tests/test_a.py": source}
     skipping = source.replace("    assert x\n", "    pytest.skip('x')\n    assert x\n")
     assert any("skip" in p for p in _problems(base, {"tests/test_a.py": skipping}))
+
+
+# ------------------------------------------------------------ ADR-0007: tests directory
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", *args], cwd=repo, check=True, capture_output=True
+    )
+
+
+def test_tests_directory_defaults_then_pyproject_then_flag(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    assert sensor.tests_directory(tmp_path) == "tests"
+    pyproject.write_text("[tool.rumbo]\ntests = 'spec/'\n", encoding="utf-8")
+    assert sensor.tests_directory(tmp_path) == "spec"
+    assert sensor.tests_directory(tmp_path, "checks\\unit") == "checks/unit"
+    pyproject.write_text("[tool.rumbo\n", encoding="utf-8")
+    assert sensor.tests_directory(tmp_path) == "tests"
+    pyproject.write_text("[tool.other]\nx = 1\n", encoding="utf-8")
+    assert sensor.tests_directory(tmp_path) == "tests"
+
+
+def test_configured_tests_directory_is_honoured_end_to_end(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "human@example.com")
+    _git(tmp_path, "config", "user.name", "Human")
+    (tmp_path / "pyproject.toml").write_text('[tool.rumbo]\ntests = "spec"\n', encoding="utf-8")
+    (tmp_path / "spec").mkdir()
+    (tmp_path / "tests").mkdir()
+    spec_file = tmp_path / "spec" / "test_x.py"
+    spec_file.write_text("def test_x():\n    assert 1\n    assert 2\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_y.py").write_text("def test_y():\n    assert 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    _git(tmp_path, "checkout", "-qb", "feature")
+    spec_file.write_text("def test_x():\n    assert 1\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-qam", "weaken spec")
+
+    root = ["--root", str(tmp_path), "--base", "main"]
+    assert sensor.main(root) == 1
+    assert sensor.main([*root, "--tests-dir", "tests"]) == 0
+    assert sensor.main([*root, "--tests-dir", "spec"]) == 1
