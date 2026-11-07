@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -1250,3 +1251,160 @@ def test_promote_runs_uv_add_unless_no_install(
     _list_dev_tools(simple_project, PROTOTYPE_TOOLS)
     assert main(["promote", "mvp", "--dir", str(simple_project)]) == 0
     assert calls == [["uv", "add", "--dev", "pytest-cov", "bandit", "pip-audit"]]
+
+
+# ------------------------------------------------------------------ ADR-0013: adoption
+LEGACY_PYPROJECT = (
+    '[project]\nname = "legacy-app"\nversion = "0.1.0"\ndependencies = []\n\n'
+    '[project.scripts]\nlegacy = "legacy_app:main"\n'
+)
+ADOPT = ["init", "--adopt", "--yes", "--no-llm", "--rigor", "mvp", "--no-install"]
+
+
+def _legacy_project(root: Path) -> Path:
+    """A project that existed before RUMBO: a cli package under src/, tests in test/, its own CI."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(LEGACY_PYPROJECT, encoding="utf-8")
+    (root / "src" / "legacy_app").mkdir(parents=True)
+    (root / "src" / "legacy_app" / "__init__.py").write_text(
+        "def main() -> None:\n    pass\n", encoding="utf-8"
+    )
+    (root / "test").mkdir()
+    (root / "test" / "test_legacy.py").write_text("def test_ok() -> None:\n    assert 1\n")
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "workflows" / "existing.yml").write_text("name: existing\n")
+    return root
+
+
+def test_init_adopt_detects_the_project_and_writes_only_the_harness(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0013 fitness: `rumbo init --adopt --yes` on a pre-existing project."""
+    root = _legacy_project(tmp_path)
+    assert main([*ADOPT, "--dir", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "package=legacy_app kind=cli layout=flat tests=test" in out
+    assert "ci.yml was not written" in out
+    assert "uv run python scripts/check_tests_not_weakened.py --strict" in out
+    project = Project.load(root)
+    assert (project.package, project.kind, project.layout) == ("legacy_app", "cli", "flat")
+    assert (project.adopted, project.tests_dir, project.rigor) == (True, "test", "mvp")
+    # The harness, not the skeleton.
+    for rel in (
+        "AGENTS.md",
+        "RUMBO.md",
+        "Makefile",
+        "scripts/rumbo_check.py",
+        "scripts/rumbo_guard.py",
+        "test/architecture/test_architecture.py",
+        "test/unit/test_check_tests_not_weakened.py",
+        ".github/workflows/nightly.yml",
+        "CHANGELOG.md",
+    ):
+        assert (root / rel).is_file(), rel
+    for rel in (
+        "src/legacy_app/__main__.py",
+        "tests",
+        "test/unit/test_smoke.py",
+        "test/property",
+        ".github/workflows/ci.yml",
+    ):
+        assert not (root / rel).exists(), rel
+    assert (
+        root / "src" / "legacy_app" / "__init__.py"
+    ).read_text() == "def main() -> None:\n    pass\n"
+    checks = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["rumbo"]
+    assert checks["adopted"] is True and checks["tests"] == "test"
+    assert checks["checks"]["types"] == "uv run pyright {changed}"
+    # Doctor uses the adoption plan: nothing under src/ or tests/ is "missing", nor ci.yml.
+    (root / "uv.lock").write_text("")
+    assert main(["doctor", "--dir", str(root)]) == 0
+    assert "Harness complete" in capsys.readouterr().out
+
+
+def test_init_adopt_flags_win_over_detection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _legacy_project(tmp_path)
+    (root / "src" / "other").mkdir()
+    (root / "src" / "other" / "__init__.py").write_text("")
+    # Two packages (legacy_app by name wins: no ambiguity); --package and --kind still decide.
+    assert main([*ADOPT, "--dir", str(root), "--package", "other", "--kind", "library"]) == 0
+    assert "package=other kind=library" in capsys.readouterr().out.split("Mounting")[1]
+    project = Project.load(root)
+    assert (project.package, project.kind, project.adopted) == ("other", "library", True)
+
+
+def test_init_adopt_ambiguous_package_asks_for_the_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _legacy_project(tmp_path)
+    (root / "pyproject.toml").write_text(LEGACY_PYPROJECT.replace("legacy-app", "renamed"))
+    (root / "src" / "other").mkdir()
+    (root / "src" / "other" / "__init__.py").write_text("")
+    assert main([*ADOPT, "--dir", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "legacy_app, other" in err and "--package" in err
+    assert not (root / "AGENTS.md").exists()
+    assert main([*ADOPT, "--dir", str(root), "--package", "other"]) == 0
+
+
+def test_init_adopt_interactive_defaults_are_the_detected_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0013: in A0 the detected values are the answers in brackets (Enter accepts them)."""
+    root = _legacy_project(tmp_path)
+
+    class Tty:
+        def isatty(self) -> bool:
+            return True
+
+    prompts: list[str] = []
+
+    def accept_default(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr(sys, "stdin", Tty())
+    monkeypatch.setattr("builtins.input", accept_default)
+    assert main(["init", "--adopt", "--no-install", "--dir", str(root)]) == 0
+    assert any("[legacy-app]" in p for p in prompts)
+    assert any("[legacy_app]" in p for p in prompts)
+    assert any("[cli]" in p for p in prompts)
+    assert not any("already has" in p for p in prompts)  # adoption expects an existing tree
+    project = Project.load(root)
+    assert (project.package, project.kind, project.tests_dir, project.rigor) == (
+        "legacy_app",
+        "cli",
+        "test",
+        "mvp",
+    )
+    assert project.adopted and not project.llm
+    assert "package=legacy_app kind=cli layout=flat tests=test" in capsys.readouterr().out
+
+
+def test_init_adopt_needs_an_existing_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([*ADOPT, "--dir", str(tmp_path / "nowhere")]) == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_check_full_is_passed_through_to_the_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0013: `rumbo check --full` hands `--full` to the runner, which expands {changed}."""
+    captured: list[list[str]] = []
+
+    def fake_main(argv: list[str] | None = None) -> int:
+        captured.append(list(argv or []))
+        return 0
+
+    monkeypatch.setattr("rumbo.sensors.check.main", fake_main)
+    assert main(["check", "--full", "--dir", str(tmp_path)]) == 0
+    assert main(["check", "lint", "--brief", "--dir", str(tmp_path)]) == 0
+    assert captured == [
+        ["--dir", str(tmp_path), "--full"],
+        ["lint", "--dir", str(tmp_path), "--brief"],
+    ]
+    assert cli.build_parser().parse_args(["check", "--full"]).full is True
