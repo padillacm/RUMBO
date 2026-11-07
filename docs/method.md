@@ -326,6 +326,13 @@ sensor or the human.
 | Data | **Postgres** (+pgvector) or **DuckDB/Parquet** | SQLite | |
 | Flags | Environment variables; **Unleash/GrowthBook** later | LaunchDarkly | Proportional to size |
 
+A project that already exists adopts the harness with `rumbo init --adopt` (ADR-0013): what
+exists is detected, no skeleton is written, and the strict tools run on the files a change
+touches (`{changed}`) while the nightly measures the whole tree (`--full`). No baseline file of
+accepted findings: such files go stale the moment a file moves. The LLM skeleton is async-first
+(ADR-0012), with the request id in a context variable, because every current model SDK and web
+framework is.
+
 `rumbo init` installs with `uv add` what the rigor verifies (ADR-0011): ruff, pyright, pytest,
 Hypothesis and pre-commit for a prototype (plus import-linter when the layout has layers);
 pytest-cov, bandit and pip-audit from mvp; mutmut at production. `rumbo promote` adds the next
