@@ -12,8 +12,8 @@ Three sentences written by the human after reading the diff, not the agent's sum
 - [ ] Diff ≤ ~300 lines (lockfiles excluded); structural and behavioral commits separated
 - [ ] Only the files owned by the spec were touched; interfaces other specs depend on were updated in their "Data contracts" section
 - [ ] New dependencies verified with `rumbo verify-dep` and listed below
-- [ ] `make rumbo ARGS="trace"` shows no missing requirement
-- [ ] Reviewed with `make review` (guided tour); second review by a fresh session (`/rumbo-review`) for mvp and above
+- [ ] `rumbo trace` shows no missing requirement
+- [ ] Reviewed with `rumbo tour` (guided tour); second review by a fresh session (`/rumbo-review`) for mvp and above
 
 ## New dependencies
 none

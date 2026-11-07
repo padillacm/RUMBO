@@ -240,7 +240,7 @@ agent to report to the human and not to repair the environment. With the CLI ins
 The `Makefile` keeps one-line aliases for people who have `make` (`make check`, `make check-brief`,
 `make lint`, `make types`, `make test`, `make arch`, `make security`, `make sensor`,
 `make evals`) plus `make fmt`, `make evals-live`, `make mutation`, `make sbom`, `make hooks`,
-`make review` and `make rumbo`; the agent does not need `make`.
+`make review` and `make rumbo`; the agent calls `rumbo` and the runner directly and does not need `make`.
 
 **The check is offline**: it never needs a model credential. The real model runs only in
 `make evals-live`. Prototypes drop the security steps.
@@ -443,7 +443,7 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
 - **C**lose the loop: iterate in a sandbox until the check is green.
 - **L**imit: small diff; human review + a second review by a clean session or another model
   (`/rumbo-review`, which starts with a requirement-by-requirement traceability table against
-  the spec). `make review` writes a guided review for the human: risk hotspots first, reading
+  the spec). `rumbo tour origin/main --out docs/reviews/` writes a guided review for the human: risk hotspots first, reading
   order (tests first), verification commands and three explanation-test questions.
 - Learn **A**nd measure: repeated mistakes → a new sensor or a line in AGENTS.md. When a spec
   closes, log how many sessions it took (`rumbo decision "F-000N closed" --why "1 session"`);

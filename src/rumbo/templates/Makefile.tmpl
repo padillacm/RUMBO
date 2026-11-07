@@ -29,5 +29,5 @@ evals-live:  ; uv run python evals/run_evals.py --suite all --live --k {{#produc
 mutation:    ; @if find src/{{package}}/domain -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo 'domain/ is still empty: nothing to mutate'; fi
 sbom:        ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
 hooks:       ; uv run pre-commit install
-review:      ; $(RUMBO) tour $(BASE) --out docs/reviews/$$(date +%Y-%m-%d)-$$(git rev-parse --short HEAD).md
+review:      ; $(RUMBO) tour $(BASE) --out docs/reviews/
 rumbo:       ; $(RUMBO) $(ARGS)

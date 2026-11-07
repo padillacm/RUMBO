@@ -25,10 +25,10 @@ uv run python scripts/rumbo_check.py --brief # same, but prints only the failing
 uv run python scripts/rumbo_check.py lint types   # a subset of the steps in [tool.rumbo.checks]
 uv run python scripts/rumbo_check.py sensor  # did I weaken any test relative to origin/main?
 make fmt       # autoformat (make targets are optional aliases of these commands)
-make rumbo ARGS="gate G4"        # gate checks for this PR
-make rumbo ARGS="trace"          # which spec requirements (F-NNNN.Rk) still lack a test
-make rumbo ARGS="verify-dep X"   # before proposing a new dependency
-make review    # guided review for the human (rumbo tour)
+rumbo gate G4        # gate checks for this PR
+rumbo trace          # which spec requirements (F-NNNN.Rk) still lack a test
+rumbo verify-dep X   # before proposing a new dependency
+rumbo tour origin/main --out docs/reviews/   # guided review for the human
 ```
 
 ## Before declaring a task done
