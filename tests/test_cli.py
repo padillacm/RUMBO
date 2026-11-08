@@ -956,6 +956,10 @@ def template_context(**overrides: object) -> dict[str, object]:
         "arch": False,
         "packaged": False,  # library or cli (released to a package index)
         "deployable": False,  # service or data (shipped as an image)
+        # ADR-0014: the minimum Python and the matrix a package's CI runs on.
+        "python": "3.11",
+        "python_nodot": "311",
+        "python_matrix": '["3.11", "3.12", "3.13"]',
     }
     ctx.update(overrides)
     return ctx

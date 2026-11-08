@@ -1,6 +1,6 @@
 # Immutable image (phase O). Tag images with the commit SHA.
 # Pin the base and uv images by digest before production (Dependabot's docker ecosystem helps).
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION={{python}}
 FROM python:${PYTHON_VERSION}-slim AS build
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 WORKDIR /app

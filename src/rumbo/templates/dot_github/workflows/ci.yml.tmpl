@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13"]
+        python: {{python_matrix}}
     env:
       UV_PYTHON: ${{ matrix.python }}
 {{/packaged}}
