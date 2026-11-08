@@ -6,7 +6,7 @@ RUMBO is built with RUMBO. Read [AGENTS.md](AGENTS.md) first: it is the map of t
 
 ```bash
 uv sync
-make check   # lint, types and the test suite of the CLI
+uv run python scripts/rumbo_check.py   # the harness RUMBO generates, applied to itself (`make check` is its alias)
 make e2e     # mounts real projects in several configurations and requires their check (`scripts/rumbo_check.py`)
 ```
 
@@ -26,6 +26,23 @@ that way (standard library only).
   upstream tags; pre-commit revs are refreshed by `pre-commit autoupdate` at install time.
 - Changes to `RUMBO.md` or the templates must keep `RUMBO.md`, `README.md` and
   `docs/method.md` consistent.
+
+## This repository runs its own harness
+
+RUMBO adopted itself (`rumbo init --adopt --kind cli --layout flat --rigor production`,
+ADR-0013): `[tool.rumbo]` and `[tool.rumbo.checks]` live in `pyproject.toml`, the canonical
+sensors are copied to `scripts/` and the guard runs as Claude Code hooks (`.claude/settings.json`)
+and as git hooks (pre-commit). Three consequences for contributors:
+
+- After changing a sensor in `src/rumbo/sensors/`, run `uv run rumbo update` to refresh the
+  copies in `scripts/`; `rumbo doctor` reports when they drift.
+- The hard rules apply to agents here too: `pyproject.toml`, `Makefile`, `.github/`, `scripts/`
+  and `.claude/` are edited and committed by a human. A maintainer who works on the harness
+  itself from an agent session disables the live hooks for their own clone with a git-ignored
+  `.claude/settings.local.json` containing `{ "disableAllHooks": true }`; the git hooks and CI
+  stay on.
+- Gates G1–G3 ask for the method's documents (brief, PRD, specs, threat model, C4); they are
+  written with `/rumbo-r`, `/rumbo-u` and `/rumbo-m` like in any project and are an open task.
 
 ## Pull requests
 
