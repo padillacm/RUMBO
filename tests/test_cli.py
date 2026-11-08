@@ -1488,3 +1488,29 @@ def test_main_reconfigures_a_legacy_console_to_utf8(
     legacy.flush()
     assert b"Harness" in raw.getvalue() or b"missing" in raw.getvalue()
     assert "utf-8" in (legacy.encoding or "").lower()
+
+
+def test_init_types_mypy_and_refuses_an_unknown_checker(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0015: `--types mypy` is stored, rendered and installed; `--types ty` is refused."""
+    flags = ["--yes", "--no-install", "--kind", "cli", "--no-llm", "--rigor", "prototype"]
+    assert main(["init", "--dir", str(tmp_path / "mypy"), *flags, "--types", "mypy"]) == 0
+    out = capsys.readouterr().out
+    assert "types=mypy" in out
+    assert "uv add --dev ruff mypy pytest hypothesis pre-commit\n" in out
+    project = Project.load(tmp_path / "mypy")
+    assert project.types == "mypy"
+    tool = tomllib.loads((tmp_path / "mypy" / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+    assert "mypy" in tool and "pyright" not in tool
+    assert tool["rumbo"]["checks"]["types"] == "uv run mypy"
+
+    with pytest.raises(SystemExit) as exc:
+        main(["init", "--dir", str(tmp_path / "ty"), *flags, "--types", "ty"])
+    assert exc.value.code == 2
+    assert "invalid choice: 'ty'" in capsys.readouterr().err
+    assert not (tmp_path / "ty").exists()
+
+    assert main(["init", "--dir", str(tmp_path / "default"), *flags]) == 0
+    assert "types=pyright" in capsys.readouterr().out
+    assert Project.load(tmp_path / "default").types == "pyright"
