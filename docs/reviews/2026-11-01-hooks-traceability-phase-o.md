@@ -11,7 +11,7 @@ How to use this: read the risk hotspots first, then the files in the given order
 > scripts/rumbo_guard.py (canonical copy in src/rumbo/sensors/guard.py, refreshed by
 > rumbo update) is wired by .claude/settings.json as a PreToolUse hook on
 > Edit/Write/MultiEdit/NotebookEdit/Bash and as a Stop hook:
-> 
+>
 > - blocks agent edits to the protected files (Makefile, pyproject.toml, CI, infra/,
 >   pre-commit config, the anti-cheat sensor, the guard, the evals runner, .env*);
 > - blocks removing the <!-- rumbo:template mark, writing [tests-change-approved],
@@ -68,7 +68,7 @@ git revert --no-commit 20e01dc633 && make test; git revert --abort
 > a recommendation below production and required in production, measured even with
 > --no-run. The spec template, AGENTS.md (tests name their requirement before the
 > human approves them) and /rumbo-review (start from the generated table) follow.
-> 
+>
 
 **Risk hotspots** (read these first):
 - none detected by path rules (still read the tests)
@@ -119,7 +119,7 @@ git revert --no-commit 1cef3008fe && make test; git revert --abort
 > specs and decisions; binding with branch protection) and SECURITY.md (reporting
 > policy plus what the harness does by design). The framework repository gets its own
 > three files.
-> 
+>
 > Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 > Claude-Session: https://claude.ai/code/session_01Bbtm72LBvaJ7x6iPXUrXMH
 
@@ -288,7 +288,7 @@ git revert --no-commit 5b657d6502 && make test; git revert --abort
 > requires ≥30 cases with TPR and TNR ≥ 0.8 before the judge is registered in GRADERS.
 > Deterministic unit tests with a fake model keep make check offline; the eval plan asks for
 > the calibration numbers and date.
-> 
+>
 > Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 
 **Risk hotspots** (read these first):
@@ -337,7 +337,7 @@ git revert --no-commit 4bc200a09f && make test; git revert --abort
 > Rendered templates were written in text mode, which produces CRLF on Windows and makes
 > the generated repository differ by platform. The executable-bit assertion of the sensor
 > test is skipped on Windows, where st_mode carries no exec bits.
-> 
+>
 > Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 > Claude-Session: https://claude.ai/code/session_01Bbtm72LBvaJ7x6iPXUrXMH
 
@@ -431,7 +431,7 @@ make check
 > CLI, ADR-0005 hard rules enforced by Claude Code hooks. tests/test_fitness.py asserts the
 > empty dependency list and that no module under src/rumbo imports a third-party package, and
 > that every ADR carries a fitness-function section (dogfooding gate G3).
-> 
+>
 > Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 > Claude-Session: https://claude.ai/code/session_01Bbtm72LBvaJ7x6iPXUrXMH
 

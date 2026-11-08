@@ -1,0 +1,86 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run python scripts/rumbo_check.py *)",
+      "Bash(rumbo check *)",
+      "Bash(make check)",
+      "Bash(make check-brief)",
+      "Bash(make fmt)",
+      "Bash(make lint)",
+      "Bash(make types)",
+      "Bash(make test)",
+      "Bash(make arch)",
+      "Bash(make sensor)",
+      "Bash(make review)",
+      "Bash(make rumbo *)",
+      "Bash(rumbo gate *)",
+      "Bash(rumbo trace*)",
+      "Bash(rumbo verify-dep *)",
+      "Bash(rumbo tour *)",
+      "Bash(rumbo doctor*)",
+      "Bash(rumbo new *)",
+      "Bash(rumbo decision *)",
+      "Bash(rumbo eval *)",
+      "Bash(rumbo metrics*)",
+      "Bash(rumbo check-tests*)",
+      "Bash(uv run pytest *)",
+      "Bash(uv run ruff *)",
+      "Bash(uv run pyright *)",
+      "Bash(uv run lint-imports)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch *)"
+    ],
+    "deny": [
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.production)",
+      "Read(./**/*.pem)",
+      "Edit(./.claude/**)",
+      "Write(./.claude/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-sync --project \"$CLAUDE_PROJECT_DIR\" python \"$CLAUDE_PROJECT_DIR/scripts/rumbo_guard.py\" pre-tool",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-sync --project \"$CLAUDE_PROJECT_DIR\" python \"$CLAUDE_PROJECT_DIR/scripts/rumbo_guard.py\" post-tool",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --no-sync --project \"$CLAUDE_PROJECT_DIR\" python \"$CLAUDE_PROJECT_DIR/scripts/rumbo_guard.py\" stop",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

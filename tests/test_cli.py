@@ -1473,3 +1473,18 @@ def test_check_full_is_passed_through_to_the_runner(
         ["lint", "--dir", str(tmp_path), "--brief"],
     ]
     assert cli.build_parser().parse_args(["check", "--full"]).full is True
+
+
+def test_main_reconfigures_a_legacy_console_to_utf8(
+    simple_project: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Windows consoles before Python 3.15 write cp1252: the report marks must not crash."""
+    import io
+
+    raw = io.BytesIO()
+    legacy = io.TextIOWrapper(raw, encoding="cp1252", errors="strict", write_through=True)
+    monkeypatch.setattr(sys, "stdout", legacy)
+    assert main(["doctor", "--dir", str(simple_project)]) in (0, 1)
+    legacy.flush()
+    assert b"Harness" in raw.getvalue() or b"missing" in raw.getvalue()
+    assert "utf-8" in (legacy.encoding or "").lower()

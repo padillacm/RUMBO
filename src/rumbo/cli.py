@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import datetime as dt
 import http.client
 import json
@@ -512,7 +513,7 @@ def _http_json(url: str, payload: dict[str, Any] | None = None) -> dict[str, Any
         url, data=data, headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310 - https only
+        with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310 # nosec B310
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -983,7 +984,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_console() -> None:
+    """Emit UTF-8 whatever the console's code page: the reports use ✅/❌/⚠️ marks.
+
+    Python < 3.15 on Windows writes through cp1252 by default and raises on the first mark.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError, OSError):  # a closed or exotic stream stays
+                reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "check-tests":
         return check_tests_not_weakened.main(argv[1:])
