@@ -42,6 +42,12 @@ All notable changes to this project are documented here. The format follows
   to add); the checks table accepts `{changed}` (changed `.py` files) next to `{base}`, and
   `rumbo check --full` expands it to the whole tree, which the nightly of an adopted project
   runs.
+- ADR-0014: `rumbo verify-dep` checks existence and versions on the project's own index
+  (`--index`, else `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `PIP_INDEX_URL`; PEP 691 JSON with a
+  PEP 503 HTML fallback) and labels the PyPI measurements; credentials in the URL never
+  reach the console. `rumbo init --python X.Y` stores the minimum Python in
+  `[tool.rumbo].python`, which feeds `requires-python`, ruff's `target-version`, the CI
+  matrix, the Dockerfile and a generated `.python-version`; `rumbo update` writes the key.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line
