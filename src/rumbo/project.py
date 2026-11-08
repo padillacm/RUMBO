@@ -15,6 +15,9 @@ KINDS = ("service", "library", "cli", "data")
 LAYOUTS = ("hexagonal", "layered", "flat")
 DEFAULT_LAYOUT = {"service": "hexagonal", "library": "flat", "cli": "flat", "data": "flat"}
 HEXAGONAL_LAYERS = ("api", "adapters", "app", "domain")  # outermost first
+# ADR-0015: the type checker is a setting; `ty` joins when it leaves preview.
+TYPE_CHECKERS = ("pyright", "mypy")
+DEFAULT_TYPE_CHECKER = "pyright"
 _LAYER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -63,6 +66,8 @@ class Project:
     # ADR-0013: mounted on an existing project; its tests directory ([tool.rumbo].tests).
     adopted: bool = False
     tests_dir: str = "tests"
+    # ADR-0015: the type checker ([tool.rumbo].types); older projects use pyright.
+    types: str = DEFAULT_TYPE_CHECKER
 
     @classmethod
     def load(cls, root: Path) -> Project:
@@ -95,6 +100,9 @@ class Project:
             else ()
         )
         validate_axes(kind, layout, layers)
+        types = str(cfg.get("types", DEFAULT_TYPE_CHECKER))
+        if types not in TYPE_CHECKERS:
+            raise ValueError(f"[tool.rumbo].types must be one of {TYPE_CHECKERS}, got {types!r}")
         return cls(
             root=root,
             package=str(package),
@@ -111,6 +119,7 @@ class Project:
             harness_version=str(cfg.get("version", "")),
             adopted=bool(cfg.get("adopted", False)),
             tests_dir=str(cfg.get("tests", "tests")) or "tests",
+            types=types,
         )
 
     def read(self, rel: str) -> str | None:
