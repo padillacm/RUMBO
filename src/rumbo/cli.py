@@ -38,7 +38,16 @@ from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
 from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
-from rumbo.project import KINDS, LAYOUTS, RIGOR_LEVELS, Project, rigor_rank, slug
+from rumbo.project import (
+    DEFAULT_PYTHON,
+    KINDS,
+    LAYOUTS,
+    RIGOR_LEVELS,
+    SUPPORTED_PYTHONS,
+    Project,
+    rigor_rank,
+    slug,
+)
 from rumbo.scaffold import (
     OTHER_PROVIDER,
     PROVIDERS,
@@ -171,6 +180,7 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         layers=layers,
         adopted=detected is not None,
         tests_dir=detected.tests_dir if detected else "tests",
+        python=args.python or DEFAULT_PYTHON,
     )
 
 
@@ -183,7 +193,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"\nMounting the RUMBO harness in {dest}")
     print(
         f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
-        f"provider={cfg.provider or '-'} rigor={cfg.rigor}"
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor} python={cfg.python}"
         + (f" adopted=true tests={cfg.tests_dir}" if cfg.adopted else "")
         + "\n"
     )
@@ -818,6 +828,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sdk-env-key", help="env var holding the API key (provider 'other')")
     p.add_argument("--rigor", choices=RIGOR_LEVELS, help="rigor level (see RUMBO.md Part E)")
     p.add_argument("--case", help="concrete use case (free text)")
+    p.add_argument(
+        "--python",
+        metavar="X.Y",
+        help="minimum Python the project promises (ADR-0014; default {DEFAULT_PYTHON}; one of "
+        f"{', '.join(SUPPORTED_PYTHONS)})",
+    )
     p.add_argument("--yes", "-y", action="store_true", help="do not ask; use flags only")
     p.add_argument(
         "--adopt",
