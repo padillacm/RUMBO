@@ -1,12 +1,16 @@
+import base64
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -956,6 +960,10 @@ def template_context(**overrides: object) -> dict[str, object]:
         "arch": False,
         "packaged": False,  # library or cli (released to a package index)
         "deployable": False,  # service or data (shipped as an image)
+        # ADR-0014: the minimum Python and the matrix a package's CI runs on.
+        "python": "3.11",
+        "python_nodot": "311",
+        "python_matrix": '["3.11", "3.12", "3.13"]',
     }
     ctx.update(overrides)
     return ctx
@@ -1488,3 +1496,237 @@ def test_main_reconfigures_a_legacy_console_to_utf8(
     legacy.flush()
     assert b"Harness" in raw.getvalue() or b"missing" in raw.getvalue()
     assert "utf-8" in (legacy.encoding or "").lower()
+
+
+# --------------------------------------------------------------------------- ADR-0014
+def test_init_python_flag_feeds_every_place(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    flags = ["--yes", "--no-install", "--no-llm", "--rigor", "mvp", "--kind", "library"]
+    assert main(["init", "--dir", str(tmp_path), *flags, "--python", "3.12"]) == 0
+    assert "python=3.12" in capsys.readouterr().out
+    assert Project.load(tmp_path).python == "3.12"
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'requires-python = ">=3.12"' in pyproject and 'target-version = "py312"' in pyproject
+    assert (tmp_path / ".python-version").read_text(encoding="utf-8") == "3.12\n"
+    ci = (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert 'python: ["3.12", "3.13"]' in ci
+
+
+@pytest.mark.parametrize("python", ["3.10", "3.99"])
+def test_init_refuses_an_unsupported_python(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], python: str
+) -> None:
+    flags = ["--yes", "--no-install", "--no-llm", "--rigor", "mvp", "--python", python]
+    assert main(["init", "--dir", str(tmp_path), *flags]) == 2
+    err = capsys.readouterr().err
+    assert f"unsupported Python '{python}'" in err and "3.11, 3.12, 3.13" in err
+    assert not (tmp_path / "pyproject.toml").exists()
+
+
+class _SimpleIndex(BaseHTTPRequestHandler):
+    """A simple-API index: `pages` maps a request path to (content type, body); 404 otherwise."""
+
+    pages: ClassVar[dict[str, tuple[str, str]]] = {}
+    requests: ClassVar[list[tuple[str, str, str]]] = []  # (path, Accept, Authorization)
+
+    def do_GET(self) -> None:
+        self.requests.append(
+            (self.path, self.headers.get("Accept", ""), self.headers.get("Authorization", ""))
+        )
+        page = self.pages.get(self.path)
+        if page is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        content_type, body = page
+        data = body.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+@dataclass
+class _Index:
+    url: str
+    handler: type[_SimpleIndex]
+    port: int
+
+
+@pytest.fixture
+def index(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Index]:
+    """A private index on 127.0.0.1 and no PyPI: `pypi_info` and OSV are stubbed."""
+    handler = type("Handler", (_SimpleIndex,), {"pages": {}, "requests": []})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    monkeypatch.setattr(cli, "pypi_info", lambda name: None)
+    monkeypatch.setattr(cli, "osv_vulnerabilities", lambda name: 0)
+    try:
+        yield _Index(f"http://127.0.0.1:{port}/simple/", handler, port)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture(autouse=True)
+def _no_index_in_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer's own UV_INDEX_URL must not leak into the PyPI-only tests."""
+    for key in cli.INDEX_ENV_VARS:
+        monkeypatch.delenv(key, raising=False)
+
+
+PEP691 = cli.SIMPLE_JSON
+OLD_ON_PYPI: dict[str, Any] = {
+    "info": {"name": "demo-pkg", "version": "1.1", "project_urls": {"Source": "https://x/y"}},
+    "releases": {"1.0": [{"upload_time_iso_8601": "2020-01-01T00:00:00Z"}]},
+}
+
+
+def test_verify_dep_reads_a_pep691_index(
+    index: _Index, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    index.handler.pages["/simple/demo-pkg/"] = (
+        PEP691,
+        json.dumps({"name": "demo-pkg", "versions": ["1.0", "1.1rc1", "0.9", "1.1"], "files": []}),
+    )
+    index.handler.pages["/simple/files-only/"] = (
+        PEP691,
+        json.dumps(
+            {
+                "name": "files-only",
+                "files": [
+                    {"filename": "files_only-2.0-py3-none-any.whl"},
+                    {"filename": "files-only-2.0.tar.gz"},
+                    {"filename": "files_only-1.5.post1-py3-none-any.whl"},
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(cli, "pypi_info", lambda name: OLD_ON_PYPI if name == "Demo_Pkg" else None)
+    assert main(["verify-dep", "--index", index.url, "Demo_Pkg", "files.only"]) == 0
+    out = capsys.readouterr().out
+    host = f"127.0.0.1:{index.port}"
+    assert f"index: http://{host}/simple/" in out
+    assert f"exists on {host}: yes" in out
+    assert f"versions on {host}: 4 (latest 1.1)" in out
+    assert f"versions on {host}: 2 (latest 2.0)" in out
+    # The PyPI lines carry the label; a package absent from PyPI is reported, not failed.
+    assert "first release: 2020-01-01" in out
+    assert out.count(cli.PYPI_LABEL) >= 4
+    assert f"not on PyPI {cli.PYPI_LABEL}" in out
+    assert "does NOT exist" not in out
+    paths = [path for path, _, _ in index.handler.requests]
+    assert paths == ["/simple/demo-pkg/", "/simple/files-only/"]  # PEP 503 normalisation
+    assert all(accept.startswith(PEP691) for _, accept, _ in index.handler.requests)
+
+
+def test_verify_dep_reads_a_pep503_html_index(
+    index: _Index, capsys: pytest.CaptureFixture[str]
+) -> None:
+    index.handler.pages["/simple/demo-pkg/"] = (
+        "text/html; charset=utf-8",
+        "<!DOCTYPE html><html><body><h1>Links for demo-pkg</h1>\n"
+        '<a href="../../packages/demo_pkg-2.0-py3-none-any.whl#sha256=abc">'
+        "demo_pkg-2.0-py3-none-any.whl</a><br/>\n"
+        '<a href="../../packages/demo-pkg-1.0.tar.gz">demo-pkg-1.0.tar.gz</a><br/>\n'
+        '<a href="../../packages/demo_pkg-2.0.tar.gz">demo_pkg-2.0.tar.gz</a><br/>\n'
+        "</body></html>",
+    )
+    assert main(["verify-dep", "--index", index.url, "demo-pkg"]) == 0
+    out = capsys.readouterr().out
+    assert f"exists on 127.0.0.1:{index.port}: yes" in out
+    assert f"versions on 127.0.0.1:{index.port}: 2 (latest 2.0)" in out
+
+
+def test_verify_dep_reports_a_404_as_absent_from_the_index(
+    index: _Index, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["verify-dep", "--index", index.url, "ghost"]) == 1
+    out = capsys.readouterr().out
+    assert f"exists on 127.0.0.1:{index.port}: no" in out
+    assert index.handler.requests[0][0] == "/simple/ghost/"
+
+
+def test_verify_dep_never_prints_the_index_credentials(
+    index: _Index, capsys: pytest.CaptureFixture[str]
+) -> None:
+    index.handler.pages["/simple/demo-pkg/"] = (PEP691, json.dumps({"versions": ["1.0"]}))
+    secret = index.url.replace("http://", "http://alice:s3cret-t0ken@")
+    assert main(["verify-dep", "--index", secret, "demo-pkg"]) == 0
+    captured = capsys.readouterr()
+    assert "alice" not in captured.out + captured.err
+    assert "s3cret-t0ken" not in captured.out + captured.err
+    assert f"index: {index.url}" in captured.out
+    # The credentials travel as a Basic Authorization header, never in the request line.
+    path, _, authorization = index.handler.requests[0]
+    assert path == "/simple/demo-pkg/"
+    assert authorization == "Basic " + base64.b64encode(b"alice:s3cret-t0ken").decode()
+    # A network error is reported with the sanitised URL too (nothing listens on port 1).
+    dead = "http://alice:s3cret-t0ken@127.0.0.1:1/simple/"
+    assert main(["verify-dep", "--index", dead, "demo-pkg"]) == 2
+    captured = capsys.readouterr()
+    assert "could not query 127.0.0.1:1" in captured.out
+    assert "alice" not in captured.out + captured.err
+    assert "s3cret-t0ken" not in captured.out + captured.err
+
+
+def test_index_resolution_order() -> None:
+    assert cli.resolve_index(None, {}) is None
+    assert cli.resolve_index(None, {"PIP_INDEX_URL": "http://p/"}) == "http://p/"
+    env = {"PIP_INDEX_URL": "http://p/", "UV_DEFAULT_INDEX": "http://d/"}
+    assert cli.resolve_index(None, env) == "http://d/"
+    env["UV_INDEX_URL"] = "http://u/"
+    assert cli.resolve_index(None, env) == "http://u/"
+    assert cli.resolve_index("http://flag/", env) == "http://flag/"
+    assert (
+        cli.resolve_index(None, {"UV_INDEX_URL": "", "PIP_INDEX_URL": "http://p/"}) == "http://p/"
+    )
+    # pypi.org, with or without credentials, is today's behaviour: no index lines.
+    assert cli.resolve_index(None, {"UV_INDEX_URL": "https://pypi.org/simple"}) is None
+    assert cli.resolve_index("https://user:pw@pypi.org/simple/", env) is None
+
+
+def test_verify_dep_resolves_the_index_from_the_environment_and_the_flag_wins(
+    index: _Index, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    index.handler.pages["/simple/demo-pkg/"] = (PEP691, json.dumps({"versions": ["1.0"]}))
+    monkeypatch.setenv("UV_INDEX_URL", index.url)
+    assert main(["verify-dep", "demo-pkg"]) == 0
+    assert f"exists on 127.0.0.1:{index.port}: yes" in capsys.readouterr().out
+    # --index beats the variables: the dead index in the flag is what gets queried.
+    monkeypatch.setenv("PIP_INDEX_URL", index.url)
+    assert main(["verify-dep", "--index", "http://127.0.0.1:1/simple/", "demo-pkg"]) == 2
+    assert "could not query 127.0.0.1:1" in capsys.readouterr().out
+    # --index pypi.org switches the private index off: today's PyPI-only output.
+    monkeypatch.setattr(cli, "pypi_info", lambda name: OLD_ON_PYPI)
+    assert main(["verify-dep", "--index", "https://pypi.org/simple/", "demo-pkg"]) == 0
+    out = capsys.readouterr().out
+    assert "index:" not in out and cli.PYPI_LABEL not in out and "demo-pkg 1.1" in out
+    assert len(index.handler.requests) == 1
+
+
+def test_simple_api_helpers() -> None:
+    assert cli.sanitize_index("https://u:p@host.example:8443/api/pypi/simple/?x=1") == (
+        "https://host.example:8443/api/pypi/simple/"
+    )
+    assert cli.sanitize_index("http://[::1]:8080/simple") == "http://[::1]:8080/simple"
+    assert cli._version_from_filename("my_pkg-1.2.3-py3-none-any.whl") == "1.2.3"
+    assert cli._version_from_filename("my_pkg-1.2.3-1-cp311-cp311-win_amd64.whl") == "1.2.3"
+    assert cli._version_from_filename("my-pkg-1.2.3.tar.gz") == "1.2.3"
+    assert cli._version_from_filename("my-pkg-1.2.3.zip") == "1.2.3"
+    assert cli._version_from_filename("README.txt") is None
+    assert cli.latest_version(["1.0rc1", "1.0", "0.9.9", "1.0.1", "10.0", "banana"]) == "10.0"
+    assert cli.latest_version(["1.0rc1", "1.0"]) == "1.0"
+    assert cli.latest_version([]) is None
+    assert cli.parse_simple('{"versions": ["2.0", "1.0"]}', cli.SIMPLE_JSON) == ["2.0", "1.0"]
+    assert cli.parse_simple("<a>pkg-3.0.tar.gz</a>", cli.SIMPLE_JSON) == ["3.0"]  # not JSON: HTML
+    assert cli.parse_simple('{"versions": ["2.0"]}', "text/html") == []  # HTML with no anchors
+    with pytest.raises(ValueError, match="must be http"):
+        cli.index_versions("file:///etc/passwd", "x")

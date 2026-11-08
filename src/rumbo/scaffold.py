@@ -16,13 +16,16 @@ from pathlib import Path
 
 from rumbo import __version__
 from rumbo.project import (
+    DEFAULT_PYTHON,
     HEXAGONAL_LAYERS,
     KINDS,
     LAYOUTS,
     RIGOR_LEVELS,
+    SUPPORTED_PYTHONS,
     Project,
     resolve_layout,
     validate_axes,
+    validate_python,
 )
 from rumbo.render import render
 
@@ -215,9 +218,14 @@ class Config:
     # changed files); `tests_dir` is the detected tests directory ("tests" unless adopted).
     adopted: bool = False
     tests_dir: str = "tests"
+    # ADR-0014: the minimum Python the project promises; every template that names a
+    # version reads it (requires-python, ruff, the CI matrix, the Dockerfile,
+    # .python-version).
+    python: str = DEFAULT_PYTHON
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
+        validate_python(self.python)
         if not valid_name(self.name):
             raise ValueError(
                 f"invalid project name {self.name!r}: no quotes, backslashes or control characters"
@@ -282,6 +290,7 @@ class Config:
             layers=project.layers,
             adopted=project.adopted,
             tests_dir=project.tests_dir,
+            python=project.python,
         )
 
     # Same semantics as the Project properties (ADR-0010).
@@ -307,6 +316,11 @@ class Config:
         """The pure layer (strict types, mutation target, purity contract); '' when flat."""
         names = self.layer_names
         return names[-1] if names else ""
+
+    @property
+    def python_matrix(self) -> tuple[str, ...]:
+        """The supported Pythons from the minimum upwards: what a package's CI runs on."""
+        return SUPPORTED_PYTHONS[SUPPORTED_PYTHONS.index(self.python) :]
 
     def domain_forbidden_modules(self) -> list[str]:
         modules = ["httpx", "requests", "fastapi"]
@@ -355,6 +369,10 @@ class Config:
             "adopted": self.adopted,
             "tests_dir": self.tests_dir,
             "custom_tests_dir": self.tests_dir != "tests",
+            # ADR-0014: one Python setting feeding every place that names a version.
+            "python": self.python,
+            "python_nodot": self.python.replace(".", ""),
+            "python_matrix": json.dumps(list(self.python_matrix)),
             "case": self.case or "(no concrete case yet)",
             "date": dt.date.today().isoformat(),
             "rumbo_version": __version__,
@@ -671,6 +689,7 @@ def update(project: Project, dest: Path) -> Report:
     _add_checks_table(dest / "pyproject.toml", template, report)
     _add_missing_steps(dest / "pyproject.toml", template, report)
     _add_axes_keys(dest / "pyproject.toml", cfg, report)
+    _add_python_key(dest / "pyproject.toml", cfg, report)
     _bump_harness_version(dest / "pyproject.toml")
     missing = missing_dev_dependencies(cfg, (dest / "pyproject.toml").read_text(encoding="utf-8"))
     if missing:
@@ -788,6 +807,25 @@ def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
     `Project.load` inferred them (service, hexagonal); writing them makes the inference explicit.
     Keys that exist are never touched.
     """
+    wanted = {"kind": f'"{cfg.kind}"', "layout": f'"{cfg.layout}"'}
+    if cfg.layout == "layered":
+        wanted["layers"] = str(cfg.context()["layers_toml_list"])
+    _add_rumbo_keys(pyproject, wanted, report)
+
+
+def _add_python_key(pyproject: Path, cfg: Config, report: Report) -> None:
+    """Writes the `python` key a project generated before ADR-0014 lacks.
+
+    `Project.load` defaulted it to 3.11; writing it makes the promise explicit.
+    """
+    _add_rumbo_keys(pyproject, {"python": f'"{cfg.python}"'}, report)
+
+
+def _add_rumbo_keys(pyproject: Path, wanted: dict[str, str], report: Report) -> None:
+    """Appends the `[tool.rumbo]` keys of `wanted` (name -> TOML value) that are missing.
+
+    Keys that exist are never touched; nothing is written when none is missing.
+    """
     current = pyproject.read_text(encoding="utf-8")
     try:
         rumbo = tomllib.loads(current).get("tool", {}).get("rumbo")
@@ -796,9 +834,6 @@ def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
     header = _RUMBO_HEADER.search(current)
     if not isinstance(rumbo, dict) or header is None:
         return
-    wanted = {"kind": f'"{cfg.kind}"', "layout": f'"{cfg.layout}"'}
-    if cfg.layout == "layered":
-        wanted["layers"] = str(cfg.context()["layers_toml_list"])
     missing = [key for key in wanted if key not in rumbo]
     if not missing:
         return

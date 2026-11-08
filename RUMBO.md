@@ -31,8 +31,8 @@
   ≤5 lines and wait for approval.
 - Never delete or weaken tests to make them pass. If a test looks wrong, stop and ask.
 - Do not add dependencies that are not listed here without asking for permission and verifying
-  that the package exists on PyPI (exact name, official repository, age):
-  `rumbo verify-dep <package>`.
+  that the package exists on PyPI, or on the index this project installs from (exact name,
+  official repository, age): `rumbo verify-dep <package>`.
 - Always use the latest stable versions of every tool; do not copy version numbers from
   memory. For pre-commit, run `pre-commit autoupdate` after creating the configuration.
 - Never remove the `<!-- rumbo:template` mark from a document and never write

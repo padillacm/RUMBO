@@ -1352,3 +1352,108 @@ def test_target_path_follows_the_tests_dir() -> None:
 def test_invalid_tests_dir(tests_dir: str) -> None:
     with pytest.raises(ValueError, match="tests directory"):
         Config(name="x", package="x", llm=False, adopted=True, tests_dir=tests_dir)
+
+
+# --------------------------------------------------------------------------- ADR-0014
+def _python_places(cfg: Config) -> dict[str, str]:
+    """What each place that names a Python version renders to."""
+    plan = plan_files(cfg)
+    pyproject = str(plan["pyproject.toml"])
+    requires = re.search(r'(?m)^requires-python = "(.*)"$', pyproject)
+    target = re.search(r'(?m)^target-version = "(.*)"$', pyproject)
+    ci = str(plan.get(".github/workflows/ci.yml", ""))
+    matrix = re.search(r"(?m)^\s+python: (\[.*\])$", ci)
+    dockerfile = re.search(r"(?m)^ARG PYTHON_VERSION=(.*)$", str(plan.get("infra/Dockerfile", "")))
+    assert requires and target
+    return {
+        "requires": requires.group(1),
+        "target": target.group(1),
+        "rumbo": tomllib.loads(pyproject)["tool"]["rumbo"]["python"],
+        "matrix": matrix.group(1) if matrix else "",
+        "dockerfile": dockerfile.group(1) if dockerfile else "",
+        "pin": str(plan[".python-version"]),
+    }
+
+
+def test_python_setting_renders_every_place_that_names_a_version() -> None:
+    library = _python_places(
+        Config(name="x", package="x", llm=False, kind="library", python="3.12")
+    )
+    assert library == {
+        "requires": ">=3.12",
+        "target": "py312",
+        "rumbo": "3.12",
+        "matrix": '["3.12", "3.13"]',
+        "dockerfile": "",  # a library ships no image
+        "pin": "3.12\n",
+    }
+    service = _python_places(
+        Config(name="x", package="x", llm=False, kind="service", python="3.12")
+    )
+    assert service["dockerfile"] == "3.12" and service["matrix"] == ""  # single-version jobs
+    newest = _python_places(Config(name="x", package="x", llm=False, kind="cli", python="3.13"))
+    assert newest["matrix"] == '["3.13"]' and newest["target"] == "py313"
+
+
+def test_python_default_is_unchanged() -> None:
+    cfg = Config(name="x", package="x", llm=False, kind="cli")
+    assert cfg.python == "3.11"
+    places = _python_places(cfg)
+    assert (places["requires"], places["target"], places["rumbo"]) == (">=3.11", "py311", "3.11")
+    assert places["matrix"] == '["3.11", "3.12", "3.13"]' and places["pin"] == "3.11\n"
+    data = _python_places(Config(name="x", package="x", llm=False, kind="data"))
+    assert data["dockerfile"] == "3.11"  # the image builds on the minimum the project promises
+
+
+@pytest.mark.parametrize("python", ["3.10", "3.99", "3", "py311", "3.11.4"])
+def test_unsupported_python_is_refused(python: str) -> None:
+    with pytest.raises(ValueError, match=r"unsupported Python .*3\.11, 3\.12, 3\.13"):
+        Config(name="x", package="x", llm=False, python=python)
+
+
+def test_project_load_reads_the_python_key_and_validates_it(tmp_path: Path) -> None:
+    scaffold(Config(name="x", package="x", llm=False, kind="library", python="3.12"), tmp_path)
+    project = Project.load(tmp_path)
+    assert project.python == "3.12"
+    assert Config.from_project(project).python == "3.12"
+    assert plan_files(Config.from_project(project)) == plan_files(
+        Config(name="x", package="x", llm=False, kind="library", python="3.12")
+    )
+    pyproject = tmp_path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(text.replace('python = "3.12"', 'python = "3.10"'), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"unsupported Python '3.10'"):
+        Project.load(tmp_path)
+
+
+def test_project_load_defaults_python_and_update_writes_the_key_once(simple_project: Path) -> None:
+    """ADR-0014 migration: older projects load as 3.11; `rumbo update` writes the promise."""
+    pyproject = simple_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    assert 'python = "3.11"' in original
+    stripped = re.sub(r"(?m)^python = .*\n", "", original)
+    pyproject.write_text(stripped, encoding="utf-8")
+    assert "python" not in tomllib.loads(stripped)["tool"]["rumbo"]
+    project = Project.load(simple_project)
+    assert project.python == "3.11"
+    rep = update(project, simple_project)
+    assert "pyproject.toml (+python)" in rep.merged
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    assert data["tool"]["rumbo"]["python"] == "3.11"
+    assert data["tool"]["rumbo"]["checks"] and data["tool"]["rumbo"]["package"] == "demo"
+    # Idempotent: a second update adds nothing; the key is written exactly once.
+    rep = update(Project.load(simple_project), simple_project)
+    assert not rep.merged
+    assert pyproject.read_text(encoding="utf-8").count("\npython = ") == 1
+
+
+def test_an_existing_python_version_file_is_kept(tmp_path: Path) -> None:
+    (tmp_path / ".python-version").write_text("3.13\n", encoding="utf-8")
+    rep = scaffold(Config(name="x", package="x", llm=False, python="3.11"), tmp_path)
+    assert ".python-version" in rep.skipped
+    assert (tmp_path / ".python-version").read_text(encoding="utf-8") == "3.13\n"
+    # `update` neither creates nor reports it: the pin is the project's own file.
+    (tmp_path / ".python-version").unlink()
+    rep = update(Project.load(tmp_path), tmp_path)
+    assert not (tmp_path / ".python-version").exists()
+    assert not any(".python-version" in x for x in rep.created + rep.differs)
