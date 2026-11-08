@@ -52,6 +52,9 @@ All notable changes to this project are documented here. The format follows
   the dev tool, the `types` step and the `[tool.pyright]` / `[tool.mypy]` section follow it,
   with the inner layer strict under both. `rumbo update` writes the key. Reminder: add `ty`
   as a third value when it leaves preview.
+- ADR-0016: the eval runner fingerprints the prompts, the judge and the entry (sha256) in
+  every report, records them in `evals/fingerprint.json` on a live run, and warns offline
+  when fixtures or calibration may be stale; the warning never fails the step.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line

@@ -112,6 +112,7 @@ rumbo init --yes --name "XM Agent" --package xm_agent \
 | `--llm` / `--no-llm` | LLM products get `evals/`, `prompts/`, the offline guard, budget and telemetry, and the provider SDK; the skeleton is async-first (an `async` `Completion` port and `answer`, the request id in a context variable) and forces the hexagonal layout |
 | `--provider` | `anthropic`, `openai`, `google`, `mistral`, `claude-code` (the Claude Code CLI with your own login: no API key anywhere), `other` (with `--sdk-package`, `--sdk-module`, `--sdk-env-key`) |
 | `--rigor` | `prototype`, `mvp`, `production` (scales the check, the dev dependencies, CI, nightly, Dependabot and the gates; `rumbo promote` moves up) |
+| `--types` | `pyright` (default) or `mypy`: the dev tool, the `types` step and the `[tool.pyright]`/`[tool.mypy]` section follow it; the inner layer is strict under both (`ty` when it leaves preview) |
 | `--python` | minimum Python the project promises (`3.11` by default, up to the newest rumbo supports); feeds `requires-python`, ruff's `target-version`, the CI matrix, the Dockerfile and `.python-version` |
 | `--no-install` | write files only; skip `uv add` and pre-commit |
 | `--adopt` | existing project: detect package, kind, layout and tests directory; harness only (no skeleton); strict checks on changed files (`{changed}`), `--full` for the whole tree |
@@ -220,7 +221,10 @@ when there is one and `uvx` otherwise (`RUMBO=... make review` overrides it); `B
 - `evals/` (LLM products): JSONL datasets, deterministic graders (numeric with tolerance,
   field equality, tool arguments, abstention), an LLM judge that counts only after calibration
   against human labels (`evals/calibration/`), and `run_evals.py` with pass@1 and pass^k and
-  bounded concurrency (`--concurrency N`; sync and async entries alike),
+  bounded concurrency (`--concurrency N`; sync and async entries alike) and a fingerprint of
+  the prompts and the judge in every report: a live run records it in
+  `evals/fingerprint.json`, and an offline run warns when fixtures or calibration may be
+  stale (ADR-0016),
   offline unless `--live`.
 - Phase O wiring (LLM products): `app/budget.py` (per-request token, cost and time limits from
   `RUMBO_BUDGET_*`; the overrun becomes an abstention) and `app/telemetry.py` (spans with

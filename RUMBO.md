@@ -73,7 +73,8 @@ If `uv` is available, mount the whole harness (A1–A7) with one command, using 
 uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
   --name "<project>" --package <pkg> --kind service|library|cli|data --rigor <rigor> \
   [--llm --provider anthropic|openai|google|mistral|claude-code | --no-llm] [--case "<case>"] \
-  [--layout hexagonal|layered|flat [--layers outer,...,inner]]
+  [--layout hexagonal|layered|flat [--layers outer,...,inner]] \
+  [--python 3.11|3.12|3.13] [--types pyright|mypy] [--adopt]
 ```
 
 `rumbo init` creates the structure, installs the dependencies with `uv add` (latest stable
@@ -351,6 +352,9 @@ marker is breaking a rule, not defeating a sensor: CI remains the binding layer.
   field equality, assertions on tool-call arguments, abstention when the data is missing);
 - reports `pass@1` and `pass^k` (a case passes only if all `k` runs pass) and exits non-zero
   when `pass^k` falls below the threshold (`--min-pass`);
+- fingerprints the prompts and the judge (sha256) in every report; a `--live` run records them
+  in `evals/fingerprint.json` and an offline run warns when they changed since, so stale
+  fixtures or an uncalibrated judge are noticed (ADR-0016; the warning never fails the step);
 - is **offline** unless `--live` is passed: adapters raise `OfflineError` instead of calling the
   model, so the smoke suite must run from recorded fixtures. Cases tagged `example` do not
   count toward the dataset minimum (20 prototype · 50 mvp · 100 production).
