@@ -26,6 +26,7 @@
       "Bash(uv run pytest *)",
       "Bash(uv run ruff *)",
       "Bash(uv run pyright *)",
+      "Bash(uv run mypy *)",
       "Bash(uv run lint-imports)",
       "Bash(git status *)",
       "Bash(git diff *)",

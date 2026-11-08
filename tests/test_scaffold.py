@@ -1,4 +1,5 @@
 import ast
+import dataclasses
 import importlib.util
 import itertools
 import json
@@ -1457,3 +1458,165 @@ def test_an_existing_python_version_file_is_kept(tmp_path: Path) -> None:
     rep = update(Project.load(tmp_path), tmp_path)
     assert not (tmp_path / ".python-version").exists()
     assert not any(".python-version" in x for x in rep.created + rep.differs)
+
+
+# --------------------------------------------------------------- ADR-0015: type checker
+# The flags of mypy --strict that work per module; `strict = true` itself applies globally.
+MYPY_STRICT_FLAGS = {
+    "disallow_any_generics",
+    "disallow_subclassing_any",
+    "disallow_untyped_calls",
+    "disallow_untyped_defs",
+    "disallow_incomplete_defs",
+    "disallow_untyped_decorators",
+    "warn_return_any",
+    "no_implicit_reexport",
+    "strict_equality",
+    "extra_checks",
+}
+
+
+def _types(types: str, kind: str = "service", layout: str = "", llm: bool = False) -> Config:
+    return Config(
+        name="x",
+        package="x",
+        llm=llm,
+        provider="anthropic" if llm else "",
+        rigor="mvp",
+        kind=kind,
+        layout=layout,
+        types=types,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "layout", "llm"),
+    [("service", "", True), ("cli", "flat", False), ("data", "flat", False)],
+)
+def test_types_mypy_renders_the_mypy_configuration(kind: str, layout: str, llm: bool) -> None:
+    """ADR-0015 fitness: [tool.mypy] (with the overrides) instead of [tool.pyright], `mypy` in
+    the dev dependencies and `uv run mypy` as the `types` step."""
+    cfg = _types("mypy", kind=kind, layout=layout, llm=llm)
+    ctx = cfg.context()
+    assert (ctx["types"], ctx["pyright"], ctx["mypy"]) == ("mypy", False, True)
+    plan = plan_files(cfg)
+    text = str(plan["pyproject.toml"])
+    tool = tomllib.loads(text)["tool"]
+    assert tool["rumbo"]["types"] == "mypy"
+    assert tool["rumbo"]["checks"]["types"] == "uv run mypy"
+    assert "uv run pyright" not in text and "pyright" not in tool
+    mypy = tool["mypy"]
+    assert mypy["files"] == ["src", "tests"]
+    assert mypy["python_version"] == "3.11"
+    for key in ("check_untyped_defs", "warn_unused_ignores", "warn_redundant_casts"):
+        assert mypy[key] is True
+    assert mypy["no_implicit_optional"] is True
+    assert mypy.get("mypy_path") == ("evals" if cfg.evals else None)
+    if cfg.arch:
+        [override] = mypy["overrides"]
+        assert override["module"] == f"x.{cfg.inner_layer}.*"
+        assert "strict" not in override  # mypy would apply it to every module
+        assert {k for k, v in override.items() if v is True} == MYPY_STRICT_FLAGS
+    else:
+        assert "overrides" not in mypy
+    deps = dev_dependencies(cfg)
+    assert "mypy" in deps and "pyright" not in deps
+    with_pyright = dev_dependencies(_types("pyright", kind=kind, layout=layout, llm=llm))
+    assert deps == [("mypy" if d == "pyright" else d) for d in with_pyright]
+    assert check_steps(cfg) == check_steps(_types("pyright", kind=kind, layout=layout, llm=llm))
+
+
+def test_types_mypy_adopted_checks_the_changed_files_in_the_tests_dir() -> None:
+    cfg = Config(
+        name="Legacy",
+        package="legacy_app",
+        llm=False,
+        rigor="mvp",
+        kind="cli",
+        adopted=True,
+        tests_dir="test",
+        types="mypy",
+    )
+    tool = tomllib.loads(str(plan_files(cfg)["pyproject.toml"]))["tool"]
+    assert tool["rumbo"]["checks"]["types"] == "uv run mypy {changed}"
+    assert tool["mypy"]["files"] == ["src", "test"]
+
+
+@pytest.mark.parametrize("cfg", COMBINATIONS, ids=lambda c: f"{c.provider or 'no-llm'}-{c.rigor}")
+def test_every_combination_renders_with_mypy(cfg: Config) -> None:
+    with_mypy = dataclasses.replace(cfg, types="mypy")
+    plan = plan_files(with_mypy)
+    tool = tomllib.loads(str(plan["pyproject.toml"]))["tool"]
+    assert "mypy" in tool and "pyright" not in tool
+    assert plan.keys() == plan_files(cfg).keys()  # the setting changes configuration, not files
+
+
+def test_default_type_checker_is_pyright_and_agents_md_does_not_change() -> None:
+    cfg = _axes("service")
+    assert cfg.types == "pyright"
+    ctx = cfg.context()
+    assert (ctx["types"], ctx["pyright"], ctx["mypy"]) == ("pyright", True, False)
+    plan = plan_files(cfg)
+    text = str(plan["pyproject.toml"])
+    tool = tomllib.loads(text)["tool"]
+    assert tool["rumbo"]["types"] == "pyright"
+    assert tool["rumbo"]["checks"]["types"] == "uv run pyright"
+    assert "uv run mypy" not in text and "mypy" not in tool
+    assert tool["pyright"]["strict"] == ["src/x/domain"]
+    assert dev_dependencies(cfg) == [*BASE_TOOLS, "import-linter", *MVP_TOOLS]
+    # AGENTS.md names the checker only through the runner; both checkers are pre-approved.
+    with_mypy = plan_files(_types("mypy"))
+    assert str(plan["AGENTS.md"]) == str(with_mypy["AGENTS.md"])
+    allowed = json.loads(Path(plan[".claude/settings.json"]).read_text(encoding="utf-8"))
+    assert {"Bash(uv run pyright *)", "Bash(uv run mypy *)"} <= set(allowed["permissions"]["allow"])
+
+
+def test_unknown_type_checker_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="type checker 'ty'"):
+        _types("ty")
+    scaffold(_axes("cli"), tmp_path)
+    pyproject = tmp_path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    assert text.count('types = "pyright"') == 1
+    pyproject.write_text(text.replace('types = "pyright"', 'types = "ty"'), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[tool\.rumbo\]\.types must be one of"):
+        Project.load(tmp_path)
+
+
+def test_project_load_defaults_to_pyright_and_update_writes_the_key_once(tmp_path: Path) -> None:
+    """ADR-0015 migration: a project generated before the setting loads as pyright; `rumbo
+    update` writes the key once and never touches the `types` step."""
+    scaffold(_axes("cli"), tmp_path)
+    pyproject = tmp_path / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    stripped = re.sub(r'(?m)^types = "pyright"\n', "", text)
+    assert stripped != text
+    pyproject.write_text(stripped, encoding="utf-8")
+    assert "types" not in tomllib.loads(stripped)["tool"]["rumbo"]
+    project = Project.load(tmp_path)
+    assert project.types == "pyright"
+    assert Config.from_project(project).types == "pyright"
+    rep = update(project, tmp_path)
+    assert "pyproject.toml (+types)" in rep.merged
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    assert data["tool"]["rumbo"]["types"] == "pyright"
+    assert data["tool"]["rumbo"]["checks"]["types"] == "uv run pyright"
+    rep = update(Project.load(tmp_path), tmp_path)
+    assert not rep.merged  # idempotent
+
+
+def test_types_round_trips_through_project(tmp_path: Path) -> None:
+    cfg = _types("mypy", kind="cli", layout="flat")
+    scaffold(cfg, tmp_path)
+    project = Project.load(tmp_path)
+    assert project.types == "mypy"
+    loaded = Config.from_project(project)
+    assert loaded.types == "mypy"
+    assert str(plan_files(loaded)["pyproject.toml"]) == str(plan_files(cfg)["pyproject.toml"])
+    listed = 'name = "x"\n[dependency-groups]\ndev = ["mypy", "ruff"]\n'
+    assert missing_dev_dependencies(cfg, listed) == [
+        "pytest",
+        "hypothesis",
+        "pre-commit",
+        *MVP_TOOLS,
+    ]

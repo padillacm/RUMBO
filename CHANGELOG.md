@@ -48,6 +48,10 @@ All notable changes to this project are documented here. The format follows
   reach the console. `rumbo init --python X.Y` stores the minimum Python in
   `[tool.rumbo].python`, which feeds `requires-python`, ruff's `target-version`, the CI
   matrix, the Dockerfile and a generated `.python-version`; `rumbo update` writes the key.
+- ADR-0015: `rumbo init --types pyright|mypy` (default pyright), stored as `[tool.rumbo].types`:
+  the dev tool, the `types` step and the `[tool.pyright]` / `[tool.mypy]` section follow it,
+  with the inner layer strict under both. `rumbo update` writes the key. Reminder: add `ty`
+  as a third value when it leaves preview.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line

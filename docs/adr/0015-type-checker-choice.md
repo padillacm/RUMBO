@@ -30,7 +30,9 @@ exposes `types` and the flags `pyright` and `mypy`.
 `[tool.mypy]` instead of `[tool.pyright]`: `files = ["src", "tests"]`, `python_version =
 "{{python}}"`, `check_untyped_defs = true`, `warn_unused_ignores = true`,
 `warn_redundant_casts = true`, `no_implicit_optional = true`, and when `arch` is on a
-`[[tool.mypy.overrides]]` for `{{package}}.{{inner_layer}}.*` with `strict = true`. The
+`[[tool.mypy.overrides]]` for `{{package}}.{{inner_layer}}.*` with the per-module flags of
+`--strict` (`disallow_untyped_defs`, `warn_return_any`, `strict_equality`, …): mypy applies
+`strict = true` globally even inside an override, so the override spells the flags out. The
 `extraPaths` entry for `evals/` becomes `mypy_path = "evals"` when `evals` is on. The
 generated `AGENTS.md` names the checker in its command block only through the runner, so it
 does not change.

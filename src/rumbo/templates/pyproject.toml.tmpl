@@ -39,6 +39,9 @@ rigor = "{{rigor}}"
 # ADR-0014: the minimum Python the project promises (requires-python, ruff, CI, Dockerfile,
 # .python-version all read it). `rumbo init --python X.Y`; one of the versions rumbo supports.
 python = "{{python}}"
+# ADR-0015: the type checker (pyright or mypy); it drives the dev tool, the `types` step
+# and the [tool.pyright] / [tool.mypy] section below.
+types = "{{types}}"
 {{#adopted}}
 # ADR-0013: the harness was mounted on an existing project; lint, format and types run on the
 # changed files (`{changed}` below), the nightly measures the whole tree with --full.
@@ -58,12 +61,12 @@ tests = "{{tests_dir}}"
 # check --full` (or `scripts/rumbo_check.py --full`) replaces it with `.`: the whole tree.
 lint = "uv run ruff check {changed}"
 format = "uv run ruff format --check {changed}"
-types = "uv run pyright {changed}"
+types = "uv run {{types}} {changed}"
 {{/adopted}}
 {{^adopted}}
 lint = "uv run ruff check ."
 format = "uv run ruff format --check ."
-types = "uv run pyright"
+types = "uv run {{types}}"
 {{/adopted}}
 test = "uv run pytest{{#mvp_or_more}} --cov --cov-report=term-missing:skip-covered{{/mvp_or_more}}"
 {{#arch}}
@@ -93,6 +96,7 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
 "evals/**" = ["S101"]
 "scripts/**" = ["S603", "S607"]
 
+{{#pyright}}
 [tool.pyright]
 include = ["src", "{{tests_dir}}"]
 typeCheckingMode = "standard"
@@ -102,6 +106,38 @@ strict = ["src/{{package}}/{{inner_layer}}"]
 {{#evals}}
 extraPaths = ["evals"]
 {{/evals}}
+{{/pyright}}
+{{#mypy}}
+[tool.mypy]
+# ADR-0015: the same contract as [tool.pyright]: src and {{tests_dir}} checked{{#arch}}, the
+# {{inner_layer}} layer strict{{/arch}}.
+files = ["src", "{{tests_dir}}"]
+python_version = "{{python}}"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+{{#evals}}
+mypy_path = "evals"
+{{/evals}}
+{{#arch}}
+
+[[tool.mypy.overrides]]
+# The {{inner_layer}} layer is strict. mypy applies `strict = true` globally even inside an
+# override, so the flags of --strict that work per module are listed one by one.
+module = "{{package}}.{{inner_layer}}.*"
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+extra_checks = true
+{{/arch}}
+{{/mypy}}
 
 [tool.pytest.ini_options]
 testpaths = ["{{tests_dir}}"]

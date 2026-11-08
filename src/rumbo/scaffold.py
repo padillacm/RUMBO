@@ -17,11 +17,13 @@ from pathlib import Path
 from rumbo import __version__
 from rumbo.project import (
     DEFAULT_PYTHON,
+    DEFAULT_TYPE_CHECKER,
     HEXAGONAL_LAYERS,
     KINDS,
     LAYOUTS,
     RIGOR_LEVELS,
     SUPPORTED_PYTHONS,
+    TYPE_CHECKERS,
     Project,
     resolve_layout,
     validate_axes,
@@ -59,7 +61,8 @@ OTHER_PROVIDER = "other"
 
 # ADR-0011: the development tools scale with rigor; `import-linter` with the layout. `uv add`
 # resolves the versions, nothing is pinned here. `pre-commit` carries the guard's git hooks.
-BASE_DEV_DEPS = ["ruff", "pyright", "pytest", "hypothesis", "pre-commit"]
+# ADR-0015: the type-checker slot holds `pyright` or `mypy` (`Config.types`).
+BASE_DEV_DEPS = ["ruff", DEFAULT_TYPE_CHECKER, "pytest", "hypothesis", "pre-commit"]
 ARCH_DEV_DEPS = ["import-linter"]
 MVP_DEV_DEPS = ["pytest-cov", "bandit", "pip-audit"]
 PRODUCTION_DEV_DEPS = ["mutmut"]
@@ -222,6 +225,8 @@ class Config:
     # version reads it (requires-python, ruff, the CI matrix, the Dockerfile,
     # .python-version).
     python: str = DEFAULT_PYTHON
+    # ADR-0015: the type checker (`pyright` or `mypy`): dependency, `types` step, config.
+    types: str = DEFAULT_TYPE_CHECKER
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
@@ -236,6 +241,8 @@ class Config:
             raise ValueError(f"invalid tests directory (a plain folder name): {self.tests_dir!r}")
         if self.rigor not in RIGOR_LEVELS:
             raise ValueError(f"invalid rigor {self.rigor!r}; use one of {RIGOR_LEVELS}")
+        if self.types not in TYPE_CHECKERS:
+            raise ValueError(f"invalid type checker {self.types!r}; use one of {TYPE_CHECKERS}")
         if self.kind not in KINDS:
             raise ValueError(f"invalid kind {self.kind!r}; use one of {KINDS}")
         if self.layout and self.layout not in LAYOUTS:
@@ -291,6 +298,7 @@ class Config:
             adopted=project.adopted,
             tests_dir=project.tests_dir,
             python=project.python,
+            types=project.types,
         )
 
     # Same semantics as the Project properties (ADR-0010).
@@ -373,6 +381,10 @@ class Config:
             "python": self.python,
             "python_nodot": self.python.replace(".", ""),
             "python_matrix": json.dumps(list(self.python_matrix)),
+            # ADR-0015: the type checker, as a name and as flags.
+            "types": self.types,
+            "pyright": self.types == "pyright",
+            "mypy": self.types == "mypy",
             "case": self.case or "(no concrete case yet)",
             "date": dt.date.today().isoformat(),
             "rumbo_version": __version__,
@@ -516,7 +528,7 @@ def _layer_module(cfg: Config, layer: str) -> str:
     names = list(cfg.layers)
     below = names[names.index(layer) + 1 :]
     if not below:
-        return f'"""Layer {layer}: the innermost one, kept pure (no I/O; pyright strict)."""\n'
+        return f'"""Layer {layer}: the innermost one, kept pure (no I/O; strict types)."""\n'
     return f'"""Layer {layer}: may import only {", ".join(below)}."""\n'
 
 
@@ -802,14 +814,16 @@ def set_rigor(text: str, rigor: str) -> str:
 
 
 def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
-    """Writes the `kind`, `layout` (and `layers`) keys a project generated before ADR-0010 lacks.
+    """Writes the `kind`, `layout` (and `layers`) keys a project generated before ADR-0010
+    lacks, and the `types` key of ADR-0015.
 
-    `Project.load` inferred them (service, hexagonal); writing them makes the inference explicit.
-    Keys that exist are never touched.
+    `Project.load` inferred them (service, hexagonal, pyright); writing them makes the
+    inference explicit. Keys that exist are never touched.
     """
     wanted = {"kind": f'"{cfg.kind}"', "layout": f'"{cfg.layout}"'}
     if cfg.layout == "layered":
         wanted["layers"] = str(cfg.context()["layers_toml_list"])
+    wanted["types"] = f'"{cfg.types}"'  # ADR-0015
     _add_rumbo_keys(pyproject, wanted, report)
 
 
@@ -900,12 +914,13 @@ def _run(cmd: list[str], cwd: Path, report: Report) -> int:
 
 
 def dev_dependencies(cfg: Config) -> list[str]:
-    """The development tools by rigor and layout (ADR-0011), in a stable order.
+    """The development tools by rigor, layout and type checker, in a stable order.
 
-    Every project gets the base; `import-linter` when the layout has layers to contract;
-    coverage, bandit and pip-audit from `mvp`; mutation testing at `production`.
+    Every project gets the base with its type checker (ADR-0015: `pyright` or `mypy`);
+    `import-linter` when the layout has layers to contract; coverage, bandit and pip-audit
+    from `mvp`; mutation testing at `production` (ADR-0011).
     """
-    deps = [*BASE_DEV_DEPS]
+    deps = [cfg.types if dep == DEFAULT_TYPE_CHECKER else dep for dep in BASE_DEV_DEPS]
     if cfg.arch:
         deps += ARCH_DEV_DEPS
     if cfg.rigor != "prototype":

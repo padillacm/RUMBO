@@ -44,10 +44,12 @@ from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
 from rumbo.project import (
     DEFAULT_PYTHON,
+    DEFAULT_TYPE_CHECKER,
     KINDS,
     LAYOUTS,
     RIGOR_LEVELS,
     SUPPORTED_PYTHONS,
+    TYPE_CHECKERS,
     Project,
     rigor_rank,
     slug,
@@ -185,6 +187,8 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         adopted=detected is not None,
         tests_dir=detected.tests_dir if detected else "tests",
         python=args.python or DEFAULT_PYTHON,
+        # ADR-0015: the type checker is a flag, never an A0 question.
+        types=getattr(args, "types", None) or DEFAULT_TYPE_CHECKER,
     )
 
 
@@ -198,6 +202,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(
         f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
         f"provider={cfg.provider or '-'} rigor={cfg.rigor} python={cfg.python}"
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor} types={cfg.types}"
         + (f" adopted=true tests={cfg.tests_dir}" if cfg.adopted else "")
         + "\n"
     )
@@ -1018,6 +1023,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sdk-module", help="importable module of the SDK (provider 'other')")
     p.add_argument("--sdk-env-key", help="env var holding the API key (provider 'other')")
     p.add_argument("--rigor", choices=RIGOR_LEVELS, help="rigor level (see RUMBO.md Part E)")
+    p.add_argument(
+        "--types",
+        choices=TYPE_CHECKERS,
+        help=f"type checker (ADR-0015; default: {DEFAULT_TYPE_CHECKER})",
+    )
     p.add_argument("--case", help="concrete use case (free text)")
     p.add_argument(
         "--python",

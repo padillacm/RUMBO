@@ -20,6 +20,9 @@ HEXAGONAL_LAYERS = ("api", "adapters", "app", "domain")  # outermost first
 # Python to exist, never a version copied from memory.
 SUPPORTED_PYTHONS = ("3.11", "3.12", "3.13")
 DEFAULT_PYTHON = SUPPORTED_PYTHONS[0]
+# ADR-0015: the type checker is a setting; `ty` joins when it leaves preview.
+TYPE_CHECKERS = ("pyright", "mypy")
+DEFAULT_TYPE_CHECKER = "pyright"
 _LAYER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -79,6 +82,8 @@ class Project:
     tests_dir: str = "tests"
     # ADR-0014: the minimum Python the project promises ([tool.rumbo].python).
     python: str = DEFAULT_PYTHON
+    # ADR-0015: the type checker ([tool.rumbo].types); older projects use pyright.
+    types: str = DEFAULT_TYPE_CHECKER
 
     @classmethod
     def load(cls, root: Path) -> Project:
@@ -113,6 +118,9 @@ class Project:
         validate_axes(kind, layout, layers)
         python = str(cfg.get("python", DEFAULT_PYTHON))
         validate_python(python)
+        types = str(cfg.get("types", DEFAULT_TYPE_CHECKER))
+        if types not in TYPE_CHECKERS:
+            raise ValueError(f"[tool.rumbo].types must be one of {TYPE_CHECKERS}, got {types!r}")
         return cls(
             root=root,
             package=str(package),
@@ -130,6 +138,7 @@ class Project:
             adopted=bool(cfg.get("adopted", False)),
             tests_dir=str(cfg.get("tests", "tests")) or "tests",
             python=python,
+            types=types,
         )
 
     def read(self, rel: str) -> str | None:
