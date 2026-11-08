@@ -42,6 +42,10 @@ All notable changes to this project are documented here. The format follows
   to add); the checks table accepts `{changed}` (changed `.py` files) next to `{base}`, and
   `rumbo check --full` expands it to the whole tree, which the nightly of an adopted project
   runs.
+- ADR-0015: `rumbo init --types pyright|mypy` (default pyright), stored as `[tool.rumbo].types`:
+  the dev tool, the `types` step and the `[tool.pyright]` / `[tool.mypy]` section follow it,
+  with the inner layer strict under both. `rumbo update` writes the key. Reminder: add `ty`
+  as a third value when it leaves preview.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line
