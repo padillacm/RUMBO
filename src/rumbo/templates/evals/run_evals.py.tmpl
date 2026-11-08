@@ -11,6 +11,13 @@ The entry may be a coroutine function (awaited) or a plain function (run in a wo
 `--concurrency N` bounds how many entry calls are in flight (ADR-0012). The report keeps the
 case order whatever the concurrency, and with the default N=1 it is identical to a serial run.
 
+Every report carries a fingerprint (ADR-0016): sha256 digests of the prompts under
+src/{{package}}/prompts/, of evals/graders/judge.py and of the --entry reference. A `--live`
+run records them in evals/fingerprint.json (commit it with the fixtures it describes); an
+offline run that finds the file prints one warning per changed part after the summary line:
+the prompts changed (the recorded fixtures may be stale: re-record with --live) or the judge
+changed (re-calibrate, see evals/calibration/). The exit code is not affected by the warnings.
+
     uv run python evals/run_evals.py --suite smoke
     uv run python evals/run_evals.py --suite all --live --k 3 --min-pass 0.9 --concurrency 4
 """
@@ -19,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import importlib
 import inspect
 import json
@@ -26,6 +34,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +43,8 @@ from graders import GRADERS
 
 DATASETS = Path(__file__).resolve().parent / "datasets"
 REPORTS = Path(__file__).resolve().parent / "reports"
+ROOT = Path(__file__).resolve().parents[1]
+FINGERPRINT = Path(__file__).resolve().parent / "fingerprint.json"
 
 Entry = Callable[[Any], Any]
 
@@ -56,6 +67,58 @@ def load_cases(suite: str) -> list[dict[str, Any]]:
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate case ids")
     return cases
+
+
+def _sha256(*parts: bytes) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(part)
+    return digest.hexdigest()
+
+
+def _normalized(file: Path) -> bytes:
+    """File content with CRLF folded to LF, so a checkout on any platform hashes the same."""
+    return file.read_bytes().replace(b"\r\n", b"\n")
+
+
+def fingerprint(root: Path, entry: str) -> dict[str, str]:
+    """sha256 digests of what a recorded fixture or a calibration depends on (ADR-0016)."""
+    prompts = root / "src" / "{{package}}" / "prompts"
+    files = sorted(
+        (f.relative_to(prompts).as_posix(), f)
+        for f in prompts.rglob("*")
+        if f.is_file() and "__pycache__" not in f.parts
+    )
+    parts: list[bytes] = []
+    for name, file in files:
+        parts += [name.encode(), b"\x00", _normalized(file), b"\x00"]
+    judge = root / "evals" / "graders" / "judge.py"
+    return {
+        "prompts": _sha256(*parts),
+        "judge": _sha256(_normalized(judge) if judge.is_file() else b""),
+        "entry": _sha256(entry.encode()),
+    }
+
+
+def drift_warnings(current: dict[str, str]) -> list[str]:
+    """One warning per part that changed since the last live run; none without the record."""
+    try:
+        recorded = json.loads(FINGERPRINT.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    when = recorded.get("recorded", "unknown date")
+    warnings: list[str] = []
+    if recorded.get("prompts") != current["prompts"]:
+        warnings.append(
+            f"WARNING: prompts changed since the last live run ({when}): "
+            "the recorded fixtures may be stale; re-record with --live"
+        )
+    if recorded.get("judge") != current["judge"]:
+        warnings.append(
+            f"WARNING: the judge changed since the last live run ({when}): "
+            "re-calibrate before trusting its verdicts (see evals/calibration/)"
+        )
+    return warnings
 
 
 def load_entry(ref: str) -> Entry:
@@ -161,6 +224,14 @@ def main(argv: list[str] | None = None) -> int:
         f"\ncases={len(cases)} k={args.k}  pass@1={pass_at_1:.3f}  pass^{args.k}={pass_hat_k:.3f}"
     )
 
+    current = fingerprint(ROOT, args.entry)
+    if args.live:
+        record = {**current, "recorded": date.today().isoformat(), "suite": args.suite}
+        FINGERPRINT.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    else:
+        for warning in drift_warnings(current):
+            print(warning)
+
     REPORTS.mkdir(exist_ok=True)
     report = REPORTS / f"{args.suite}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     report.write_text(
@@ -170,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
                 "k": args.k,
                 "live": args.live,
                 "concurrency": args.concurrency,
+                "fingerprint": current,
                 "pass@1": pass_at_1,
                 f"pass^{args.k}": pass_hat_k,
                 "cases": rows,

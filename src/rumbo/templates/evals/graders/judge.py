@@ -5,6 +5,8 @@ code cannot grade, and it counts only when it agrees with humans: `calibrate()` 
 labeled cases (evals/calibration/*.jsonl, ≥30 rows, both labels present) and reports TPR, TNR
 and Cohen's kappa. Register a judge in GRADERS only when `Calibration.acceptable()` holds
 (TPR and TNR ≥ 0.8); re-calibrate whenever the rubric, the model or the product changes.
+The eval runner fingerprints this file (ADR-0016) and warns offline when it changed since
+the last live run.
 
 The model call is injected (`complete: str -> str`), so the unit tests use a fake and
 the check stays offline. Calibration needs the real model: run it from a small script in
