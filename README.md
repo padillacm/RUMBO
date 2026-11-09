@@ -15,8 +15,8 @@ Learn **A**nd measure.
 
 ```bash
 mkdir my-project && cd my-project && git init -b main
-uvx --from git+https://github.com/padillacm/RUMBO rumbo init   # four questions, then the harness
-uv run python scripts/rumbo_check.py                           # green, offline
+uvx rumbo init                          # four questions, then the harness
+uv run python scripts/rumbo_check.py    # green, offline
 ```
 
 Just want the sensors, not the method? Answer `rumbo init` with `--no-llm --rigor prototype`:
@@ -91,8 +91,8 @@ Windows, macOS and Linux are supported natively: the harness needs no `make` and
 
 ```bash
 mkdir my-project && cd my-project && git init -b main
-uvx --from git+https://github.com/padillacm/RUMBO rumbo init      # asks the four A0 questions
-uv run python scripts/rumbo_check.py                              # must be green (offline)
+uvx rumbo init                          # asks the four A0 questions
+uv run python scripts/rumbo_check.py    # must be green (offline)
 git add -A && git commit -m "chore: initial RUMBO harness"
 ```
 
@@ -130,8 +130,9 @@ into `.gitignore`, and everything skipped is reported. The adoption commit touch
 files, so you make it yourself. Two more things only you can do: replace `@your-handle` in
 `.github/CODEOWNERS` and the contact in `SECURITY.md`.
 
-Permanent install: `uv tool install git+https://github.com/padillacm/RUMBO`. Pin a release tag:
-`…/RUMBO@v0.4.0`. Inside a generated project the agent calls it directly
+Permanent install from PyPI: `uv tool install rumbo` (published by Trusted Publishing from the
+release workflow, no token anywhere). Pin a version: `rumbo==0.4.0`. The unreleased `main`:
+`uv tool install git+https://github.com/padillacm/RUMBO`. Inside a generated project the agent calls it directly
 (`rumbo gate G4`, `rumbo trace`, `rumbo tour origin/main --out docs/reviews/`); nothing needs `make`.
 
 ### What happens right after `rumbo init`

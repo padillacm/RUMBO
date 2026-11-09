@@ -57,10 +57,12 @@ questions they should be able to answer. Update `CHANGELOG.md` under *Unreleased
 2. Tag: `git tag -a vX.Y.Z -m "vX.Y.Z"` and push the tag. `.github/workflows/release.yml`
    verifies tag == version == CHANGELOG section, runs `make check`, builds with `uv build` and
    creates the GitHub Release with that CHANGELOG section as notes.
-3. Optional PyPI: create the `pypi` environment, register the workflow as a trusted publisher
-   on pypi.org and set the repository variable `PYPI_PUBLISH=true`; the `pypi` job then
-   publishes with `uv publish --trusted-publishing always` (no token stored anywhere).
-4. Users pin the tag: `uvx --from git+https://github.com/padillacm/RUMBO@vX.Y.Z rumbo`.
+3. PyPI (in place since v0.4.0): the `pypi` environment exists, `release.yml` is registered as
+   a trusted publisher of `rumbo` on pypi.org and the repository variable `PYPI_PUBLISH` is
+   `true`; the `pypi` job publishes the files attached to the GitHub Release with
+   `uv publish --trusted-publishing always` (no token stored anywhere).
+4. Users install from PyPI: `uv tool install rumbo==X.Y.Z` (or `uvx rumbo@X.Y.Z`); the tag
+   remains the source of the build (`git+https://github.com/padillacm/RUMBO@vX.Y.Z`).
 
 ## Architecture decisions
 
