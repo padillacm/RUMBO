@@ -261,7 +261,12 @@ They refuse a staged protected file, a removed template mark and the approval ma
 actor is an agent (an environment marker from `[tool.rumbo].agent_env` is set, or nobody has
 declared the clone human). You declare yourself once per clone with
 `git config rumbo.human true`; `rumbo init` does it where it runs and `rumbo doctor` reminds
-you elsewhere.
+you elsewhere. **On a fresh clone, run that command before your first commit**: until you do,
+the hooks treat a hand-made commit of a harness file as an agent's and refuse it with that hint.
+
+**Your signature is the template mark.** Once you remove it from an ADR or a spec and commit,
+the document is read-only for the agent (ADR-0017): it proposes changes or writes a new
+document that supersedes it; drafts and documents still under the mark stay editable.
 
 You are never blocked: edits by hand skip the Claude Code hook, and your commits pass the git
 hooks once the clone is declared. To relax a rule for yourself, keep the

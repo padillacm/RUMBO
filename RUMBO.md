@@ -338,6 +338,12 @@ file, a staged document whose template mark is gone, and a commit message carryi
 `[tests-change-approved]`. The block is late (at commit) and an agent that unsets its own
 marker is breaking a rule, not defeating a sensor: CI remains the binding layer.
 
+**The mark is the signature** (ADR-0017). A numbered ADR or spec committed without the
+template mark is signed by the human and read-only for the agent: an edit is blocked, a change
+through the shell is reported after the command together with any removed mark, and the git
+hook refuses it. New documents and documents still under the mark stay editable; to change a
+signed one, propose it to the human or write a document that supersedes it.
+
 ### A7. Evals skeleton (LLM products only)
 
 `evals/run_evals.py`:

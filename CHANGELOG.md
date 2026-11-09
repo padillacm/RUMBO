@@ -52,6 +52,10 @@ All notable changes to this project are documented here. The format follows
   the dev tool, the `types` step and the `[tool.pyright]` / `[tool.mypy]` section follow it,
   with the inner layer strict under both. `rumbo update` writes the key. Reminder: add `ty`
   as a third value when it leaves preview.
+- ADR-0017: a numbered ADR or spec committed without the template mark is signed and
+  read-only for the agent (edit blocked, shell change reported, commit refused); a template
+  mark removed through the shell is reported after the command. RUMBO's own brief, PRD and
+  spec F-0001 (the guard, twelve requirements traced to tests) are written.
 - ADR-0016: the eval runner fingerprints the prompts, the judge and the entry (sha256) in
   every report, records them in `evals/fingerprint.json` on a live run, and warns offline
   when fixtures or calibration may be stale; the warning never fails the step.
