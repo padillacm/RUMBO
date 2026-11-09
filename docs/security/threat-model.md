@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # Threat model
 
 Scope: the `rumbo` CLI and the harness it writes into a project. One-hour model (2026-11-09),
