@@ -92,6 +92,8 @@ rigor = "production"
 # ADR-0013: the harness was mounted on an existing project; lint, format and types run on the
 # changed files (`{changed}` below), the nightly measures the whole tree with --full.
 adopted = true
+types = "pyright"
+python = "3.11"
 
 [tool.rumbo.checks]
 # Verification steps in execution order, read by `scripts/rumbo_check.py` (`rumbo check`).

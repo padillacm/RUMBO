@@ -81,6 +81,7 @@ Most of these are enforced by the guard hook (`scripts/rumbo_guard.py`, wired in
 - No new dependency without approval and PyPI verification (`rumbo verify-dep`).
 - Do not touch {{#deployable}}infra/, {{/deployable}}secrets, the Makefile, pyproject.toml (except through `uv add`; it holds `[tool.rumbo.checks]`), CI workflows{{#evals}}, evals/run_evals.py{{/evals}} or the guard hook: the human edits them.
 - Nothing in spikes/ is imported from src/.
+- An ADR or spec without the template mark is signed by the human: do not edit it; propose the change or write one that supersedes it.
 - If you make the same mistake twice, propose a test, lint rule or contract that catches it.
 
 ## Context and parallel work (one writer)

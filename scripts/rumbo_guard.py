@@ -49,6 +49,10 @@ What it enforces, and how strongly
   harness itself, nothing to protect yet) and a run with nothing staged (`pre-commit run
   --all-files` in CI) pass silently. The Bash heuristics also block
   `git config` on `rumbo.human`, so the agent cannot declare itself human.
+- Signed documents (ADR-0017): a numbered ADR or spec committed without the template mark is
+  signed by the human and read-only for the agent: an edit is blocked, a change or deletion
+  through the shell is reported after the command (with any removed template mark), and the
+  git hook refuses it. New documents and documents still under the mark stay editable.
 """
 
 from __future__ import annotations
@@ -81,6 +85,9 @@ PROTECTED_PREFIXES = (".github/", "infra/", ".claude/", ".env")
 # Bash may change these (uv add / uv lock); Edit/Write may not.
 BASH_MAY_CHANGE = ("pyproject.toml", "uv.lock")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+# ADR-0017: a numbered ADR or spec committed without the template mark is signed by the human
+# and read-only for the agent; the 0000 templates and documents under the mark are not.
+SIGNED_DOC = re.compile(r"^(?:specs|docs/adr)/(?!0000-)\d{4}-[^/]+\.md$")
 CODE_SUFFIXES = (".py", ".toml", ".jsonl")
 # Environment variables that mark a coding agent's shell; `[tool.rumbo].agent_env` overrides.
 DEFAULT_AGENT_ENV = ("CLAUDECODE", "GEMINI_CLI", "CURSOR_AGENT", "CODEX_SANDBOX_NETWORK_DISABLED")
@@ -155,6 +162,26 @@ def is_protected(rel: str) -> bool:
     return rel in PROTECTED_FILES or rel.startswith(PROTECTED_PREFIXES)
 
 
+def is_signed(root: Path, rel: str) -> bool:
+    """A numbered ADR or spec whose committed version no longer carries the mark (ADR-0017).
+
+    One `git show`, and only for paths that match the pattern: ordinary edits stay free of
+    subprocesses. A new document (absent from HEAD) is not signed.
+    """
+    if not SIGNED_DOC.match(rel):
+        return False
+    head = _blob(root, f"HEAD:{rel}")
+    return head is not None and TEMPLATE_MARK not in head
+
+
+def _signed_reason(files: str) -> str:
+    return (
+        f"{files}: signed by the human (committed without the template mark), so read-only "
+        "for the agent. Propose the change to the human, or write a new document that "
+        "supersedes it (rumbo new adr|spec)."
+    )
+
+
 def _removes_mark(tool_name: str, tool_input: dict[str, Any], target: Path) -> bool:
     if tool_name == "Write":
         content = str(tool_input.get("content", ""))
@@ -190,6 +217,8 @@ def check_edit(tool_name: str, tool_input: dict[str, Any], root: Path) -> str | 
             "Explain the change you need and ask the human to make it (why: README.md, "
             "section 'Working with the agent')."
         )
+    if is_signed(root, rel):
+        return _signed_reason(rel)
     if _removes_mark(tool_name, tool_input, root / rel):
         return (
             f"{rel}: the '{TEMPLATE_MARK} ...' mark is removed only by the human, when the "
@@ -232,16 +261,58 @@ def changed_protected_files(root: Path) -> list[str]:
     return [f for f in changed_files(root) if is_protected(f) and f not in BASH_MAY_CHANGE]
 
 
+def changed_documents(root: Path, changed: list[str]) -> tuple[list[str], list[str]]:
+    """(documents whose mark was in HEAD and is gone, signed ADRs/specs changed or deleted).
+
+    ADR-0017: the deterministic check behind what a shell command can do to a document.
+    """
+    unmarked: list[str] = []
+    signed: list[str] = []
+    for rel in changed:
+        if not rel.endswith(".md"):
+            continue
+        head = _blob(root, f"HEAD:{rel}")
+        if head is None:
+            continue  # a new (untracked) document: nothing in HEAD to compare with
+        if TEMPLATE_MARK not in head:
+            if SIGNED_DOC.match(rel):
+                signed.append(rel)
+            continue
+        try:
+            current = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue  # deleted or unreadable: not a removed mark
+        if TEMPLATE_MARK not in current:
+            unmarked.append(rel)
+    return unmarked, signed
+
+
 def check_post_bash(root: Path) -> str | None:
-    touched = changed_protected_files(root)
-    if not touched:
-        return None
-    return (
-        "protected file(s) changed since the last commit: "
-        + ", ".join(touched)
-        + ". Revert them (git checkout -- <file>, or delete the new file) and ask the human to "
-        "make that change; the agent does not modify the harness."
-    )
+    changed = changed_files(root)
+    touched = [f for f in changed if is_protected(f) and f not in BASH_MAY_CHANGE]
+    unmarked, signed = changed_documents(root, changed)
+    reasons: list[str] = []
+    if touched:
+        reasons.append(
+            "protected file(s) changed since the last commit: "
+            + ", ".join(touched)
+            + ". Revert them (git checkout -- <file>, or delete the new file) and ask the human "
+            "to make that change; the agent does not modify the harness."
+        )
+    if unmarked:
+        reasons.append(
+            "the template mark was removed since the last commit from: "
+            + ", ".join(unmarked)
+            + ". Only the human removes it; restore the first line (git checkout -- <file>), or "
+            "ask the human to commit the signature if they made it."
+        )
+    if signed:
+        reasons.append(
+            _signed_reason(", ".join(signed))
+            + " Revert the change (git checkout -- <file>), or ask the human to commit it if "
+            "they made it."
+        )
+    return " ".join(reasons) or None
 
 
 def _tail(proc: subprocess.CompletedProcess[str]) -> str:
@@ -328,10 +399,18 @@ def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------- git hooks (ADR-0008)
-def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes] | None:
-    """Runs git in the project; None when git is not installed."""
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """Runs git in the project (output decoded as UTF-8); None when git is not installed."""
     try:
-        return subprocess.run(["git", *args], cwd=root, capture_output=True, check=False)
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
     except FileNotFoundError:
         return None
 
@@ -353,7 +432,7 @@ def actor(root: Path) -> str:
     if any(os.environ.get(name) for name in agent_env_names(root)):
         return "agent"
     proc = _git(root, "config", "--get", "rumbo.human")
-    if proc is not None and proc.returncode == 0 and proc.stdout.decode().strip() == "true":
+    if proc is not None and proc.returncode == 0 and proc.stdout.strip() == "true":
         return "human"
     return "unknown"
 
@@ -368,7 +447,7 @@ def staged_files(root: Path) -> list[str]:
     proc = _git(root, "diff", "--cached", "--name-only", "--diff-filter=ACMRD")
     if proc is None or proc.returncode != 0:
         return []
-    return [line.strip() for line in proc.stdout.decode("utf-8", "replace").splitlines() if line]
+    return [line.strip() for line in proc.stdout.splitlines() if line]
 
 
 def _blob(root: Path, spec: str) -> str | None:
@@ -376,7 +455,7 @@ def _blob(root: Path, spec: str) -> str | None:
     proc = _git(root, "show", spec)
     if proc is None or proc.returncode != 0:
         return None
-    return proc.stdout.decode("utf-8", "replace")
+    return proc.stdout
 
 
 def _unmarked(root: Path, staged: list[str]) -> list[str]:
@@ -414,6 +493,8 @@ def check_pre_commit(root: Path) -> str | None:
             "Makefile, pyproject.toml, CI, infra/, hooks, the sensors or .env files. Unstage them "
             "(git restore --staged <file>) and ask the human to make that change."
         )
+    elif signed := [f for f in staged if is_signed(root, f)]:
+        reason = _signed_reason(", ".join(signed))
     elif unmarked := _unmarked(root, staged):
         reason = (
             ", ".join(unmarked)

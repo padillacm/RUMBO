@@ -47,6 +47,13 @@ env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY -u GEMINI_API_KEY -u MISTRAL_API_KEY 
 uv run --project "$ROOT" rumbo gate G4 --no-run >/dev/null
 # ADR-0012: the eval runner bounds concurrency; the offline smoke suite must pass the same with 2 in flight.
 if echo "$FLAGS" | grep -q -- "--llm"; then uv run python evals/run_evals.py --suite smoke --concurrency 2; fi
+# ADR-0016: a live run records the fingerprint; touching a prompt makes the next offline run warn.
+if echo "$FLAGS" | grep -q -- "--llm"; then
+  uv run python evals/run_evals.py --suite smoke --live && test -f evals/fingerprint.json
+  echo "# touched" >> src/demo_e2e/prompts/__init__.py
+  uv run python evals/run_evals.py --suite smoke | grep -q "WARNING: prompts changed since the last live run"
+  git checkout -- src/demo_e2e/prompts/__init__.py
+fi
 uv run --project "$ROOT" rumbo update
 # ADR-0011: a prototype grows into an mvp with one command (new steps appended, their tools added
 # with `uv add --dev`); the runner must stay green with the whole mvp table.
