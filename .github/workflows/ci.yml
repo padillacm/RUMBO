@@ -15,7 +15,8 @@ concurrency:
 
 jobs:
   check:
-    # The CLI is stdlib-only and promises Python >= 3.11 on Linux and macOS.
+    # The CLI is stdlib-only and promises Python >= 3.11 on Linux, macOS and Windows; it is
+    # verified through the runner it generates (ADR-0013: RUMBO adopted its own harness).
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,13 +26,29 @@ jobs:
         include:
           - os: macos-latest
             python: "3.12"
+          - os: windows-latest
+            python: "3.13"
     env:
       UV_PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - run: uv sync --locked
-      - run: make check
+      - run: uv run python scripts/rumbo_check.py
+
+  sbom:
+    # Rigor production (G5): a CycloneDX SBOM of the runtime dependencies from uv.lock.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked
+      - name: SBOM (CycloneDX, runtime dependencies from uv.lock)
+        run: uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom.cdx.json
 
   sensor:
     # Anti-cheat sensor on the framework's own tests (the canonical copy every project gets).

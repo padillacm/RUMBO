@@ -33,6 +33,15 @@ All notable changes to this project are documented here. The format follows
   what it can have. Older projects load as service/hexagonal; `rumbo update` writes the keys.
 - ADR-0011: development dependencies and the checks table scale with rigor (five tools for a
   prototype); `rumbo promote mvp|production` raises the level without removing anything.
+- ADR-0012: the LLM skeleton is async-first (`async` `Completion` port, `answer` and adapters;
+  the Claude Code adapter uses `asyncio.create_subprocess_exec`), the request id travels in a
+  context variable shared by nested spans, and `run_evals.py --concurrency N` bounds the
+  calls in flight while keeping the case order.
+- ADR-0013: `rumbo init --adopt` mounts the harness on an existing project (detects package,
+  kind, layout and tests directory; no `src/`/tests skeleton; existing CI kept with the steps
+  to add); the checks table accepts `{changed}` (changed `.py` files) next to `{base}`, and
+  `rumbo check --full` expands it to the whole tree, which the nightly of an adopted project
+  runs.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line

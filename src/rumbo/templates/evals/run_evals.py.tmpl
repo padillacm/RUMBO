@@ -7,18 +7,25 @@ graders and reports pass@1 and pass^k. Exits non-zero when pass^k < --min-pass.
 Offline by default: the entry point must answer from recorded fixtures.{{#llm}} `--live` sets
 RUMBO_EVALS_LIVE=1 so adapters may call the real model (use `make evals-live`).{{/llm}}
 
+The entry may be a coroutine function (awaited) or a plain function (run in a worker thread);
+`--concurrency N` bounds how many entry calls are in flight (ADR-0012). The report keeps the
+case order whatever the concurrency, and with the default N=1 it is identical to a serial run.
+
     uv run python evals/run_evals.py --suite smoke
-    uv run python evals/run_evals.py --suite all --live --k 3 --min-pass 0.9
+    uv run python evals/run_evals.py --suite all --live --k 3 --min-pass 0.9 --concurrency 4
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib
+import inspect
 import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +34,8 @@ from graders import GRADERS
 
 DATASETS = Path(__file__).resolve().parent / "datasets"
 REPORTS = Path(__file__).resolve().parent / "reports"
+
+Entry = Callable[[Any], Any]
 
 
 def load_cases(suite: str) -> list[dict[str, Any]]:
@@ -49,9 +58,67 @@ def load_cases(suite: str) -> list[dict[str, Any]]:
     return cases
 
 
-def load_entry(ref: str) -> Any:
+def load_entry(ref: str) -> Entry:
     module, _, function = ref.partition(":")
     return getattr(importlib.import_module(module), function)
+
+
+async def call_entry(entry: Entry, payload: Any) -> Any:
+    """Awaits a coroutine entry; runs a synchronous one in a thread so the loop stays free."""
+    if inspect.iscoroutinefunction(entry):
+        return await entry(payload)
+    result = await asyncio.to_thread(entry, payload)
+    return await result if inspect.isawaitable(result) else result
+
+
+async def run_case(
+    entry: Entry, case: dict[str, Any], k: int, slot: asyncio.Semaphore
+) -> dict[str, Any]:
+    runs: list[dict[str, Any]] = []
+    for _ in range(k):
+        async with slot:
+            start = time.perf_counter()
+            try:
+                output = await call_entry(entry, case["input"])
+                verdict = GRADERS[case["grader"]](output, case["expected"])  # grading is sync
+                ok, detail = verdict.ok, verdict.detail
+            except Exception as exc:  # a case that blows up is a failed case
+                ok, detail = False, f"exception: {exc!r}"
+            runs.append({"ok": ok, "detail": detail, "seconds": time.perf_counter() - start})
+    successes = sum(r["ok"] for r in runs)
+    return {
+        "id": case["id"],
+        "tags": case.get("tags", []),
+        "runs": runs,
+        "passes_all": successes == k,
+    }
+
+
+def print_row(row: dict[str, Any], k: int) -> None:
+    successes = sum(r["ok"] for r in row["runs"])
+    mark = "PASS" if row["passes_all"] else "FAIL"
+    detail = next((r["detail"] for r in row["runs"] if not r["ok"]), "")
+    print(f"{mark} {row['id']} ({successes}/{k}) {detail}")
+
+
+async def run_all(
+    entry: Entry, cases: list[dict[str, Any]], k: int, concurrency: int
+) -> list[dict[str, Any]]:
+    """Runs every case with at most `concurrency` entry calls in flight; rows in case order."""
+    slot = asyncio.Semaphore(concurrency)
+    rows: list[dict[str, Any] | None] = [None] * len(cases)
+    printed = 0
+
+    async def one(index: int, case: dict[str, Any]) -> None:
+        nonlocal printed
+        rows[index] = await run_case(entry, case, k, slot)
+        # Print in case order as soon as the next case in line is done (no reordering).
+        while printed < len(rows) and (row := rows[printed]) is not None:
+            print_row(row, k)
+            printed += 1
+
+    await asyncio.gather(*(one(i, case) for i, case in enumerate(cases)))
+    return [row for row in rows if row is not None]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,7 +132,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--tag", help="only cases with this tag")
     parser.add_argument("--live", action="store_true", help="allow calls to the real model")
+    parser.add_argument(
+        "--concurrency", type=int, default=1, help="entry calls in flight at once (default 1)"
+    )
     args = parser.parse_args(argv)
+    if args.concurrency < 1:
+        parser.error("--concurrency must be >= 1")
 
     if args.live:
         os.environ["RUMBO_EVALS_LIVE"] = "1"
@@ -80,32 +152,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     entry = load_entry(args.entry)
 
-    rows = []
-    successes_total = 0
-    for case in cases:
-        runs = []
-        for _ in range(args.k):
-            start = time.perf_counter()
-            try:
-                output = entry(case["input"])
-                verdict = GRADERS[case["grader"]](output, case["expected"])
-                ok, detail = verdict.ok, verdict.detail
-            except Exception as exc:  # a case that blows up is a failed case
-                ok, detail = False, f"exception: {exc!r}"
-            runs.append({"ok": ok, "detail": detail, "seconds": time.perf_counter() - start})
-        successes = sum(r["ok"] for r in runs)
-        successes_total += successes
-        rows.append(
-            {
-                "id": case["id"],
-                "tags": case.get("tags", []),
-                "runs": runs,
-                "passes_all": successes == args.k,
-            }
-        )
-        mark = "PASS" if successes == args.k else "FAIL"
-        detail = next((r["detail"] for r in runs if not r["ok"]), "")
-        print(f"{mark} {case['id']} ({successes}/{args.k}) {detail}")
+    rows = asyncio.run(run_all(entry, cases, args.k, args.concurrency))
+    successes_total = sum(r["ok"] for row in rows for r in row["runs"])
 
     pass_at_1 = successes_total / (len(cases) * args.k)
     pass_hat_k = sum(r["passes_all"] for r in rows) / len(rows)
@@ -121,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
                 "suite": args.suite,
                 "k": args.k,
                 "live": args.live,
+                "concurrency": args.concurrency,
                 "pass@1": pass_at_1,
                 f"pass^{args.k}": pass_hat_k,
                 "cases": rows,

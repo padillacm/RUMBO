@@ -41,7 +41,9 @@ def test_version_is_the_same_everywhere() -> None:
 
 
 def test_every_adr_has_a_fitness_function_section() -> None:
-    adrs = sorted((ROOT / "docs" / "adr").glob("0*.md"))
+    from rumbo.project import numbered_documents
+
+    adrs = numbered_documents(ROOT / "docs" / "adr")  # the 0000 template is not an ADR
     assert len(adrs) >= 5
     for adr in adrs:
         text = adr.read_text(encoding="utf-8")

@@ -1,0 +1,2 @@
+# LF in the repository on every platform: otherwise Windows checkouts turn whole files into CRLF diffs for the Linux runners and the sensor.
+* text=auto eol=lf

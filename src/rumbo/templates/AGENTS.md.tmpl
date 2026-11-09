@@ -39,6 +39,9 @@ uv run python scripts/rumbo_check.py         # the WHOLE harness, offline: lint,
 uv run python scripts/rumbo_check.py --brief # same, but prints only the failing tail (keeps your context small); full log in .rumbo-check.log
 uv run python scripts/rumbo_check.py lint types   # a subset of the steps in [tool.rumbo.checks]
 uv run python scripts/rumbo_check.py sensor  # did I weaken any test relative to origin/main?
+{{#adopted}}
+uv run python scripts/rumbo_check.py --full   # whole tree (legacy debt); CI and the hook check only what you changed
+{{/adopted}}
 make fmt       # autoformat (make targets are optional aliases of these commands)
 rumbo gate G4        # gate checks for this PR
 rumbo trace          # which spec requirements (F-NNNN.Rk) still lack a test

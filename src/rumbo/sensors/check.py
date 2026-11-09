@@ -10,10 +10,19 @@ The steps live in ``pyproject.toml``, one command string per step, in execution 
 Each string is split with ``shlex.split(posix=True)`` and run with ``subprocess.run`` and no
 shell, so the harness behaves identically on Windows, macOS and Linux. Shell operators
 (``&&``, ``|``, ``;``, redirections) and ``$variables`` are configuration errors: a step that
-needs logic becomes a small Python script. The only placeholder is ``{base}``: ``--base`` if
-given, else ``origin/main`` when that ref exists, else ``main``.
+needs logic becomes a small Python script. Two placeholders exist:
 
-Usage: ``python scripts/rumbo_check.py [STEP ...] [--brief] [--keep-going] [--base REF]``.
+* ``{base}``: ``--base`` if given, else ``origin/main`` when that ref exists, else ``main``.
+* ``{changed}`` (ADR-0013): the ``.py`` files that differ from the merge base with ``{base}``
+  (``git diff --name-only --diff-filter=ACMR <base>...HEAD``) plus the uncommitted changes and
+  the untracked files, deduplicated, existing and sorted, one argument per file. It must be an
+  argument of its own (``--files={changed}`` is a configuration error). When the list is empty
+  the step is not run and is reported ``ok   <name> (no changed files)``. When there is no
+  usable git base (not a repository, no commits, unknown ref) it expands to ``.`` and the step
+  line says ``(no git base: whole tree)``. ``--full`` always expands it to ``.``.
+
+Usage: ``python scripts/rumbo_check.py [STEP ...] [--brief] [--keep-going] [--base REF]
+[--full]``.
 Without step names every step runs in table order and the run stops at the first failing step;
 ``--keep-going`` runs them all. Named steps run a subset, still in table order. Without
 ``--brief`` each step streams to the terminal; with it all output goes to ``.rumbo-check.log``
@@ -30,6 +39,7 @@ Standard library only: it is copied verbatim into every RUMBO project (ADR-0006)
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -41,6 +51,8 @@ from typing import IO, NoReturn
 
 GREEN, RED, ENV = 0, 1, 3
 LOG_NAME = ".rumbo-check.log"
+CHANGED = "{changed}"
+WHOLE_TREE = "."
 TAIL_LINES = 40
 SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", ">", "<", ">>", "2>&1"})
 LAUNCHERS = frozenset({"uv", "uvx", "run", "python", "python3", "py", "-m"})
@@ -55,11 +67,12 @@ class StepResult:
     name: str
     status: int  # GREEN, RED or ENV
     detail: str  # "", "exit 1", "pyright exit 3", "ruff: not found"
+    note: str = ""  # shown on green lines: "no changed files", "no git base: whole tree"
 
     @property
     def line(self) -> str:
         if self.status == GREEN:
-            return f"ok   {self.name}"
+            return f"ok   {self.name} ({self.note})" if self.note else f"ok   {self.name}"
         if self.status == RED:
             return f"FAIL {self.name} ({self.detail})"
         return f"ENV  {self.name} ({self.detail})"
@@ -88,7 +101,10 @@ def load_steps(root: Path) -> dict[str, str]:
 
 
 def parse_command(name: str, command: str, base: str) -> list[str]:
-    """Split a step into argv (no shell) and substitute ``{base}``."""
+    """Split a step into argv (no shell) and substitute ``{base}``.
+
+    ``{changed}`` stays a token of its own for :func:`plan_steps` to expand lazily.
+    """
     try:
         argv = shlex.split(command, posix=True)
     except ValueError as exc:
@@ -101,7 +117,11 @@ def parse_command(name: str, command: str, base: str) -> list[str]:
                 f"step {name}: {token!r} needs a shell; steps run without one "
                 "(move the logic into a small Python script)"
             )
-    return [token.replace("{base}", base) for token in argv]
+        if CHANGED in token and token != CHANGED:
+            raise ConfigError(
+                f"step {name}: {CHANGED} must be an argument of its own, not part of {token!r}"
+            )
+    return [token if token == CHANGED else token.replace("{base}", base) for token in argv]
 
 
 def select_steps(steps: dict[str, str], requested: list[str]) -> dict[str, str]:
@@ -133,6 +153,80 @@ def resolve_base(explicit: str | None, root: Path) -> str:
     return "origin/main" if probe.returncode == 0 else "main"
 
 
+@dataclass(frozen=True)
+class Changed:
+    files: list[str]  # what ``{changed}`` expands to
+    note: str = ""  # "no git base: whole tree" when git could not tell
+
+
+def _git_paths(args: list[str], root: Path) -> list[str] | None:
+    """NUL-separated paths printed by ``git <args>`` in ``root``; None when git fails."""
+    try:
+        done = subprocess.run(["git", *args], cwd=root, capture_output=True, check=False)
+    except OSError:
+        return None
+    if done.returncode != 0:
+        return None
+    return [os.fsdecode(raw) for raw in done.stdout.split(b"\0") if raw]
+
+
+def resolve_changed(base: str, root: Path, full: bool) -> Changed:
+    """The files ``{changed}`` stands for: ``.`` with ``--full`` or without a usable git base."""
+    if full:
+        return Changed([WHOLE_TREE])
+    fallback = Changed([WHOLE_TREE], "no git base: whole tree")
+    try:
+        merge_base = subprocess.run(
+            ["git", "merge-base", base, "HEAD"], cwd=root, capture_output=True, check=False
+        )
+    except OSError:
+        return fallback
+    if merge_base.returncode != 0:
+        return fallback
+    diff = ["diff", "-z", "--relative", "--name-only", "--diff-filter=ACMR"]
+    queries = [
+        [*diff, f"{base}...HEAD"],
+        diff,
+        ["ls-files", "-z", "--others", "--exclude-standard"],
+    ]
+    found: set[str] = set()
+    for query in queries:
+        paths = _git_paths(query, root)
+        if paths is None:
+            return fallback
+        found.update(paths)
+    return Changed(sorted(p for p in found if p.endswith(".py") and (root / p).is_file()))
+
+
+@dataclass(frozen=True)
+class Step:
+    argv: list[str]
+    note: str = ""
+    skip: bool = False  # nothing to run: reported green with ``note``
+
+
+def plan_steps(
+    commands: dict[str, list[str]], base: str, root: Path, full: bool
+) -> dict[str, Step]:
+    """Expand ``{changed}``; git is consulted once, and only if some step uses it."""
+    changed: Changed | None = None
+    plan: dict[str, Step] = {}
+    for name, argv in commands.items():
+        if CHANGED not in argv:
+            plan[name] = Step(argv)
+            continue
+        if changed is None:
+            changed = resolve_changed(base, root, full)
+        if not changed.files:
+            plan[name] = Step(argv, "no changed files", skip=True)
+            continue
+        expanded: list[str] = []
+        for token in argv:
+            expanded.extend(changed.files if token == CHANGED else [token])
+        plan[name] = Step(expanded, changed.note)
+    return plan
+
+
 # --------------------------------------------------------------------------- running
 def _tool_name(argv: list[str]) -> str:
     """The program a step really runs: ``pyright`` for ``uv run pyright``."""
@@ -142,7 +236,9 @@ def _tool_name(argv: list[str]) -> str:
     return Path(argv[0]).name
 
 
-def run_step(name: str, argv: list[str], root: Path, log: IO[bytes] | None) -> StepResult:
+def run_step(
+    name: str, argv: list[str], root: Path, log: IO[bytes] | None, note: str = ""
+) -> StepResult:
     """Run one step; its output goes to the terminal, or to ``log`` when given."""
     header = f"--- {name}: {' '.join(argv)}\n"
     if log is None:
@@ -166,18 +262,21 @@ def run_step(name: str, argv: list[str], root: Path, log: IO[bytes] | None) -> S
         return StepResult(name, ENV, f"{Path(argv[0]).name}: {exc.strerror or exc}")
     code = completed.returncode
     if code == 0:
-        return StepResult(name, GREEN, "")
+        return StepResult(name, GREEN, "", note)
     if code == 1:
         return StepResult(name, RED, "exit 1")
     return StepResult(name, ENV, f"{_tool_name(argv)} exit {code}")
 
 
 def run_steps(
-    steps: dict[str, list[str]], root: Path, log: IO[bytes] | None, keep_going: bool
+    steps: dict[str, Step], root: Path, log: IO[bytes] | None, keep_going: bool
 ) -> list[StepResult]:
     results: list[StepResult] = []
-    for name, argv in steps.items():
-        result = run_step(name, argv, root, log)
+    for name, step in steps.items():
+        if step.skip:
+            result = StepResult(name, GREEN, "", step.note)
+        else:
+            result = run_step(name, step.argv, root, log, step.note)
         results.append(result)
         line = result.line + "\n"
         if log is None:
@@ -250,6 +349,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base", help="value of {base} (default: origin/main if it exists, else main)"
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="expand {changed} to the whole tree (.) instead of the changed .py files",
+    )
     parser.add_argument("--dir", default=".", help="project root (default: current directory)")
     return parser
 
@@ -264,16 +368,17 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"rumbo check: environment broken ({exc})")
         return ENV
+    plan = plan_steps(commands, base, root, args.full)
 
     if not args.brief:
-        results = run_steps(commands, root, None, args.keep_going)
+        results = run_steps(plan, root, None, args.keep_going)
         code, summary = verdict(results)
         print(summary)
         return code
 
     log_path = root / LOG_NAME
     with log_path.open("wb") as log:
-        results = run_steps(commands, root, log, args.keep_going)
+        results = run_steps(plan, root, log, args.keep_going)
     code, summary = verdict(results)
     _report_brief(log_path, code, summary)
     return code

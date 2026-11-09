@@ -1,8 +1,26 @@
 """The per-request budget is a hard limit (phase O)."""
 
+import asyncio
+
 import pytest
 
 from {{package}}.app.budget import Budget, BudgetExceeded, Meter
+
+
+def test_one_meter_is_shared_by_the_concurrent_calls_of_a_request() -> None:
+    """ADR-0012: safe under `asyncio.gather` within one request (one thread, no await in charge)."""
+    meter = Meter(Budget(max_input_tokens=100))
+
+    async def model_call(tokens: int) -> None:
+        await asyncio.sleep(0)
+        meter.charge(input_tokens=tokens)
+
+    async def request() -> None:
+        await asyncio.gather(model_call(40), model_call(40), model_call(40))
+
+    with pytest.raises(BudgetExceeded, match="input tokens"):
+        asyncio.run(request())
+    assert meter.input_tokens == 120  # every call was charged; the third crossed the limit
 
 
 def test_charges_accumulate_and_stop_at_the_limit() -> None:

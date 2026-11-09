@@ -15,7 +15,8 @@ Instructions for projects: RUMBO.md · Contributing rules: CONTRIBUTING.md.
 - Tests: tests/ · end-to-end: scripts/e2e.sh (`make e2e`)
 
 ## Before declaring a task done
-`make check` green; if you touched templates, `make e2e` too.
+`uv run python scripts/rumbo_check.py` green (`make check` is its alias); if you touched templates,
+`make e2e` too. After changing a sensor, a human runs `uv run rumbo update` to refresh `scripts/`.
 
 ## Hard rules
 - The CLI uses the standard library only: no runtime dependencies.

@@ -1,4 +1,10 @@
-"""Tests of the evals entry-point skeleton. Replace them together with the real workflow."""
+"""Tests of the evals entry-point skeleton. Replace them together with the real workflow.
+
+`answer` is a coroutine (ADR-0012); the tests drive it with `asyncio.run`, no plugin needed.
+"""
+
+import asyncio
+from typing import Any
 
 import pytest
 
@@ -6,16 +12,25 @@ from {{package}}.app.entrypoint import answer
 
 
 def test_example_case() -> None:
-    assert answer({"question": "ping"}) == {"answer": "pong"}
+    assert asyncio.run(answer({"question": "ping"})) == {"answer": "pong"}
 
 
 def test_abstains_when_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
-    assert answer({"question": "something else"})["abstain"] is True
+    assert asyncio.run(answer({"question": "something else"}))["abstain"] is True
 
 
 def test_abstains_when_the_budget_is_exceeded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RUMBO_EVALS_LIVE", "1")
     monkeypatch.setenv("RUMBO_BUDGET_SECONDS", "0")  # kill switch: every request is over time
-    result = answer({"question": "anything"})
+    result = asyncio.run(answer({"question": "anything"}))
     assert result["abstain"] is True and result["reason"].startswith("budget exceeded")
+
+
+def test_concurrent_requests_do_not_share_state() -> None:
+    async def both() -> tuple[dict[str, Any], dict[str, Any]]:
+        return await asyncio.gather(answer({"question": "ping"}), answer({"question": "other"}))
+
+    first, second = asyncio.run(both())
+    assert first == {"answer": "pong"}
+    assert second["abstain"] is True

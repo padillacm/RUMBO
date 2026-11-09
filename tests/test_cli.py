@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,7 @@ def test_init_non_interactive(tmp_path: Path) -> None:
     assert rc == 0
     project = Project.load(tmp_path)
     assert (project.package, project.llm, project.rigor) == ("my_project", True, "production")
-    assert "provider anthropic" in (tmp_path / "docs" / "decisions.md").read_text()
+    assert "provider anthropic" in (tmp_path / "docs" / "decisions.md").read_text(encoding="utf-8")
 
 
 def test_init_yes_requires_a0_answers(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -72,7 +73,7 @@ def test_init_rejects_bad_package(tmp_path: Path) -> None:
 
 
 def test_doctor(llm_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    (llm_project / "uv.lock").write_text("")
+    (llm_project / "uv.lock").write_text("", encoding="utf-8")
     assert main(["doctor", "--dir", str(llm_project)]) == 0
     (llm_project / ".claude" / "commands" / "rumbo-tour.md").unlink()
     assert main(["doctor", "--dir", str(llm_project)]) == 1
@@ -84,7 +85,7 @@ def test_new_numbers_and_titles(simple_project: Path, capsys: pytest.CaptureFixt
     assert main(["new", "adr", "Use DuckDB", "--dir", d]) == 0
     assert main(["new", "adr", r"Workflow vs agent C:\temp \1", "--dir", d]) == 0
     second = simple_project / "docs" / "adr" / "0002-workflow-vs-agent-c-temp-1.md"
-    text = second.read_text()
+    text = second.read_text(encoding="utf-8")
     assert text.splitlines()[1] == r"# ADR-0002: Workflow vs agent C:\temp \1"
     assert TEMPLATE_MARK in text
     assert main(["new", "spec", "Spot price query", "--dir", d]) == 0
@@ -99,12 +100,14 @@ def test_decision(simple_project: Path) -> None:
     assert (
         main(["decision", "Use DuckDB", "--why", "time series", "--dir", str(simple_project)]) == 0
     )
-    text = (simple_project / "docs" / "decisions.md").read_text()
+    text = (simple_project / "docs" / "decisions.md").read_text(encoding="utf-8")
     assert "Use DuckDB" in text and "Why: time series" in text
 
 
 def _complete(path: Path) -> None:
-    path.write_text("\n".join(path.read_text().splitlines()[1:]) + "\n")
+    path.write_text(
+        "\n".join(path.read_text(encoding="utf-8").splitlines()[1:]) + "\n", encoding="utf-8"
+    )
 
 
 def test_gate_g1(simple_project: Path) -> None:
@@ -114,7 +117,9 @@ def test_gate_g1(simple_project: Path) -> None:
     _complete(simple_project / "docs" / "product" / "brief.md")
     _, results = evaluate("G1", project)
     assert all(r.ok for r in results)
-    (simple_project / "src" / "demo" / "bad.py").write_text("from spikes import proto\n")
+    (simple_project / "src" / "demo" / "bad.py").write_text(
+        "from spikes import proto\n", encoding="utf-8"
+    )
     _, results = evaluate("G1", project)
     assert any(r.ok is False and "spikes" in r.description for r in results)
 
@@ -136,10 +141,11 @@ def test_gate_g2_ears_ignores_template_placeholders(llm_project: Path) -> None:
     ears = next(r for r in results if r.description.endswith("EARS requirements"))
     assert ears.ok is False
     spec.write_text(
-        spec.read_text().replace(
+        spec.read_text(encoding="utf-8").replace(
             "- R1 (event): When …, the system shall …",
             "- R1: When the user asks, the system shall answer with the source.",
-        )
+        ),
+        encoding="utf-8",
     )
     _, results = evaluate("G2", Project.load(llm_project))
     assert next(r for r in results if r.description.endswith("EARS requirements")).ok is True
@@ -149,7 +155,8 @@ def test_gate_g3_workflow_adr_by_title(llm_project: Path) -> None:
     d = str(llm_project)
     assert main(["new", "adr", "CI pipeline", "--dir", d]) == 0
     (llm_project / "docs" / "adr" / "0001-ci-pipeline.md").write_text(
-        "# ADR-0001: CI pipeline\nThe workflow is kept by the agent.\n## Fitness function\nx\n"
+        "# ADR-0001: CI pipeline\nThe workflow is kept by the agent.\n## Fitness function\nx\n",
+        encoding="utf-8",
     )
     _, results = evaluate("G3", Project.load(llm_project))
     assert next(r for r in results if r.description == "ADR 'workflow vs. agent'").ok is False
@@ -161,7 +168,9 @@ def test_gate_g3_workflow_adr_by_title(llm_project: Path) -> None:
 
 def test_gate_g2_skips_malformed_dataset_lines(llm_project: Path) -> None:
     dataset = llm_project / "evals" / "datasets" / "odd.jsonl"
-    dataset.write_text('["a", "b"]\n"text"\n42\nnot json\n{"id": "odd-1", "input": {}}\n')
+    dataset.write_text(
+        '["a", "b"]\n"text"\n42\nnot json\n{"id": "odd-1", "input": {}}\n', encoding="utf-8"
+    )
     try:
         _, results = evaluate("G2", Project.load(llm_project))
     finally:
@@ -172,8 +181,8 @@ def test_gate_g2_skips_malformed_dataset_lines(llm_project: Path) -> None:
 
 def test_gate_g3_tolerates_empty_or_comment_only_adrs(llm_project: Path) -> None:
     adrs = llm_project / "docs" / "adr"
-    (adrs / "0007-empty.md").write_text("")
-    (adrs / "0008-stub.md").write_text("<!-- a one-line comment -->")
+    (adrs / "0007-empty.md").write_text("", encoding="utf-8")
+    (adrs / "0008-stub.md").write_text("<!-- a one-line comment -->", encoding="utf-8")
     try:
         _, results = evaluate("G3", Project.load(llm_project))
     finally:
@@ -269,7 +278,7 @@ def test_diff_size_is_unmeasured_when_head_is_the_base(tmp_path: Path) -> None:
     from rumbo.gates import diff_size
 
     env = {**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig")}
-    (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@x\n")
+    (tmp_path / "gitconfig").write_text("[user]\n\tname = t\n\temail = t@x\n", encoding="utf-8")
 
     def git(cwd: Path, *args: str) -> None:
         subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
@@ -277,7 +286,7 @@ def test_diff_size_is_unmeasured_when_head_is_the_base(tmp_path: Path) -> None:
     origin, clone = tmp_path / "origin", tmp_path / "clone"
     origin.mkdir()
     git(origin, "init", "-q", "-b", "main")
-    (origin / "a.py").write_text("x = 1\n" * 500)
+    (origin / "a.py").write_text("x = 1\n" * 500, encoding="utf-8")
     git(origin, "add", ".")
     git(origin, "commit", "-q", "-m", "big")
     git(tmp_path, "clone", "-q", str(origin), str(clone))
@@ -286,7 +295,7 @@ def test_diff_size_is_unmeasured_when_head_is_the_base(tmp_path: Path) -> None:
     assert size is None and "HEAD is already on 'origin/main'" in info
     # On a branch with one commit the diff is measured against origin/main.
     git(clone, "checkout", "-q", "-b", "feature")
-    (clone / "b.py").write_text("y = 2\n" * 3)
+    (clone / "b.py").write_text("y = 2\n" * 3, encoding="utf-8")
     git(clone, "add", ".")
     git(clone, "commit", "-q", "-m", "small")
     assert diff_size(clone) == (3, "origin/main")
@@ -324,7 +333,7 @@ def test_verify_dep_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_project_load_errors(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[tool.rumbo]\nllm = false\n")
+    (tmp_path / "pyproject.toml").write_text("[tool.rumbo]\nllm = false\n", encoding="utf-8")
     with pytest.raises(ValueError):
         Project.load(tmp_path)
     assert main(["gate", "G1", "--dir", str(tmp_path)]) == 2
@@ -346,12 +355,13 @@ def test_tour(simple_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
     git("commit", "-qm", "chore: harness")
     git("checkout", "-qb", "feature")
     (simple_project / "src" / "demo" / "domain" / "calc.py").write_text(
-        "def avg(xs):\n    return sum(xs) / len(xs)\n"
+        "def avg(xs):\n    return sum(xs) / len(xs)\n", encoding="utf-8"
     )
     (simple_project / "tests" / "unit" / "test_calc.py").write_text(
-        "from demo.domain.calc import avg\n\ndef test_avg():\n    assert avg([2, 4]) == 3\n"
+        "from demo.domain.calc import avg\n\ndef test_avg():\n    assert avg([2, 4]) == 3\n",
+        encoding="utf-8",
     )
-    (simple_project / ".github" / "workflows" / "ci.yml").write_text("name: ci\n")
+    (simple_project / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
     git("add", "-A")
     git("commit", "-qm", "feat: average calculator\n\nNeeded for the weekly report.")
     rc = main(["tour", "main", "--dir", str(simple_project)])
@@ -388,10 +398,11 @@ def test_gate_g2_data_contracts_recommended_then_required(llm_project: Path) -> 
     assert contracts.ok is None  # mvp: recommendation
     spec = llm_project / "specs" / "0001-contracts.md"
     spec.write_text(
-        spec.read_text().replace(
+        spec.read_text(encoding="utf-8").replace(
             "- Types / schemas: <name, fields, invariants>",
             "- Types / schemas: Quote(price: Decimal, at: datetime)",
-        )
+        ),
+        encoding="utf-8",
     )
     _, results = evaluate("G2", Project.load(llm_project))
     assert (
@@ -406,15 +417,18 @@ def test_trace_and_gate_g4_requirements(
     assert main(["new", "spec", "Spot price", "--dir", str(llm_project)]) == 0
     spec = llm_project / "specs" / "0001-spot-price.md"
     spec.write_text(
-        spec.read_text().replace(
+        spec.read_text(encoding="utf-8").replace(
             "- R1 (event): When …, the system shall …\n"
             "- R2 (unwanted): If …, then the system shall …",
             "- R1 (event): When a date is given, the system shall return the spot price\n"
             "- R2 (unwanted): If the date has no data, then the system shall abstain",
-        )
+        ),
+        encoding="utf-8",
     )
     test = llm_project / "tests" / "unit" / "test_spot.py"
-    test.write_text('def test_spot_price() -> None:\n    """F-0001.R1: price for a date."""\n')
+    test.write_text(
+        'def test_spot_price() -> None:\n    """F-0001.R1: price for a date."""\n', encoding="utf-8"
+    )
     assert main(["trace", "--dir", str(llm_project)]) == 0
     out = capsys.readouterr().out
     assert "| F-0001.R1 |" in out and "tests/unit/test_spot.py:2" in out
@@ -422,7 +436,9 @@ def test_trace_and_gate_g4_requirements(
     assert main(["trace", "--dir", str(llm_project), "--strict"]) == 1
     capsys.readouterr()
     # F-0001.R10 must not count as a reference to R1
-    test.write_text('def test_other() -> None:\n    """F-0001.R10 and F-0001.R2."""\n')
+    test.write_text(
+        'def test_other() -> None:\n    """F-0001.R10 and F-0001.R2."""\n', encoding="utf-8"
+    )
     main(["trace", "--dir", str(llm_project)])
     out = capsys.readouterr().out
     assert "| F-0001.R1 | When a date is given, the system shall return the spot price |" in out
@@ -432,10 +448,16 @@ def test_trace_and_gate_g4_requirements(
     _, results = evaluate("G4", Project.load(llm_project), run=False)
     assert next(r for r in results if r.description == row).ok is None  # mvp: recommendation
     pyproject = llm_project / "pyproject.toml"
-    pyproject.write_text(pyproject.read_text().replace('rigor = "mvp"', 'rigor = "production"'))
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace('rigor = "mvp"', 'rigor = "production"'),
+        encoding="utf-8",
+    )
     _, results = evaluate("G4", Project.load(llm_project), run=False)
     assert next(r for r in results if r.description == row).ok is False
-    pyproject.write_text(pyproject.read_text().replace('rigor = "production"', 'rigor = "mvp"'))
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace('rigor = "production"', 'rigor = "mvp"'),
+        encoding="utf-8",
+    )
     test.unlink()
     spec.unlink()
 
@@ -449,11 +471,11 @@ def test_gate_g5_requires_budget_and_telemetry_for_llm_products(
     _, simple_results = evaluate("G5", Project.load(simple_project))
     assert all(r.description != row for r in simple_results)
     entry = llm_project / "src" / "xm_agent" / "app" / "entrypoint.py"
-    original = entry.read_text()
-    entry.write_text(original.replace("Meter(", "object("))
+    original = entry.read_text(encoding="utf-8")
+    entry.write_text(original.replace("Meter(", "object("), encoding="utf-8")
     _, results = evaluate("G5", Project.load(llm_project))
     assert next(r for r in results if r.description == row).ok is False  # mvp: required
-    entry.write_text(original)
+    entry.write_text(original, encoding="utf-8")
 
 
 def test_eval_add_appends_a_case_and_logs_it(
@@ -463,15 +485,17 @@ def test_eval_add_appends_a_case_and_logs_it(
     rc = main([*args, "--input", '{"question": "x"}', "--expected", "{}", "--source", "trace 1"])
     assert rc == 0
     dataset = llm_project / "evals" / "datasets" / "regressions.jsonl"
-    case = json.loads(dataset.read_text().splitlines()[0])
+    case = json.loads(dataset.read_text(encoding="utf-8").splitlines()[0])
     assert case["id"] == "regressions-001" and case["source"] == "trace 1"
-    assert "regressions-001" in (llm_project / "evals" / "error_analysis" / "log.md").read_text()
+    assert "regressions-001" in (llm_project / "evals" / "error_analysis" / "log.md").read_text(
+        encoding="utf-8"
+    )
     # unknown grader, invalid JSON and duplicate ids are usage errors
     assert main([*args[:-2], "--grader", "nope", "--input", "{}", "--expected", "{}"]) == 2
     assert "registered" in capsys.readouterr().err
     assert main([*args, "--input", "not json", "--expected", "{}"]) == 2
     assert main([*args, "--input", "{}", "--expected", "{}", "--id", "regressions-001"]) == 2
-    assert len(dataset.read_text().splitlines()) == 1
+    assert len(dataset.read_text(encoding="utf-8").splitlines()) == 1
     dataset.unlink()
 
 
@@ -500,7 +524,9 @@ def test_metrics_reads_decisions_specs_and_evals(
     main(["decision", "G2 signed", "--dir", str(simple_project)])
     main(["decision", "deploy v0.1", "--who", "ci", "--dir", str(simple_project)])
     main(["decision", "incident: wrong figure", "--dir", str(simple_project)])
-    decisions = parse_decisions((simple_project / "docs" / "decisions.md").read_text())
+    decisions = parse_decisions(
+        (simple_project / "docs" / "decisions.md").read_text(encoding="utf-8")
+    )
     assert [d.title for d in decisions][-2:] == ["deploy v0.1", "incident: wrong figure"]
     assert decisions[-2].who == "ci" and decisions[1].why == "2 sessions"
 
@@ -522,18 +548,18 @@ def test_update_diff_shows_harness_drift_only(
     llm_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     makefile = llm_project / "Makefile"
-    original = makefile.read_text()
-    makefile.write_text(original + "extra: ; echo hi\n")
+    original = makefile.read_text(encoding="utf-8")
+    makefile.write_text(original + "extra: ; echo hi\n", encoding="utf-8")
     brief = llm_project / "docs" / "product" / "brief.md"
-    brief_original = brief.read_text()
-    brief.write_text("# mine\n")
+    brief_original = brief.read_text(encoding="utf-8")
+    brief.write_text("# mine\n", encoding="utf-8")
     assert main(["update", "--diff", "--dir", str(llm_project)]) == 0
     out = capsys.readouterr().out
     assert "### Makefile [merge by hand]" in out and "-extra: ; echo hi" in out
     assert "brief.md" not in out  # human documents are never compared
-    assert makefile.read_text().endswith("extra: ; echo hi\n")  # nothing written
-    makefile.write_text(original)
-    brief.write_text(brief_original)
+    assert makefile.read_text(encoding="utf-8").endswith("extra: ; echo hi\n")  # nothing written
+    makefile.write_text(original, encoding="utf-8")
+    brief.write_text(brief_original, encoding="utf-8")
     assert main(["update", "--diff", "--dir", str(llm_project)]) == 0
     assert "Everything matches" in capsys.readouterr().out
 
@@ -553,25 +579,27 @@ def test_decisions_parsing_tolerates_hand_written_headings(tmp_path: Path) -> No
 
 def test_known_graders_reads_the_dict_with_the_ast(llm_project: Path) -> None:
     graders_file = llm_project / "evals" / "graders" / "__init__.py"
-    original = graders_file.read_text()
+    original = graders_file.read_text(encoding="utf-8")
     assert cli.known_graders(llm_project) == {
         "field_equality",
         "numeric",
         "tool_arguments",
         "abstention",
     }
-    graders_file.write_text('GRADERS: dict[str, object] = {"abstention": object}\n')
+    graders_file.write_text(
+        'GRADERS: dict[str, object] = {"abstention": object}\n', encoding="utf-8"
+    )
     assert cli.known_graders(llm_project) == {"abstention"}
-    graders_file.write_text("GRADERS = build()\n")
+    graders_file.write_text("GRADERS = build()\n", encoding="utf-8")
     assert cli.known_graders(llm_project) is None
-    graders_file.write_text(original)
+    graders_file.write_text(original, encoding="utf-8")
 
 
 def test_eval_add_escapes_the_log_table(llm_project: Path) -> None:
     args = ["eval", "add", "pipes", "--dir", str(llm_project), "--grader", "abstention"]
     rc = main([*args, "--input", "{}", "--expected", "{}", "--note", "a|b\nc", "--source", "x|y"])
     assert rc == 0
-    log = (llm_project / "evals" / "error_analysis" / "log.md").read_text()
+    log = (llm_project / "evals" / "error_analysis" / "log.md").read_text(encoding="utf-8")
     assert "| x\\|y | a\\|b c |" in log
     (llm_project / "evals" / "datasets" / "pipes.jsonl").unlink()
 
@@ -588,10 +616,12 @@ def test_trace_ignores_nested_items_and_lookalikes(simple_project: Path) -> None
         "- R10 (state): While x, the system shall y\n"
         "- R11 (event: login): When z, the system shall w\n"
         "- R12: The system shall v: always\n"
-        "## Acceptance criteria\n"
+        "## Acceptance criteria\n",
+        encoding="utf-8",
     )
     (simple_project / "tests" / "unit" / "test_edge.py").write_text(
-        'def test_x() -> None:\n    """F-0001.R10a is not R10; F-0001.R1. ends a sentence"""\n'
+        'def test_x() -> None:\n    """F-0001.R10a is not R10; F-0001.R1. ends a sentence"""\n',
+        encoding="utf-8",
     )
     reqs = trace(simple_project)
     assert [r.rid for r in reqs] == ["R1", "R10", "R11", "R12"]
@@ -623,12 +653,14 @@ def test_gate_g3_ignores_sections_of_untouched_templates(llm_project: Path) -> N
     assert by_desc["threat model: OWASP LLM/Agentic checklist filled"].ok is False
     assert by_desc["C4 has Mermaid diagrams"].ok is False
     tm = llm_project / "docs" / "security" / "threat-model.md"
-    original = tm.read_text()
-    tm.write_text("\n".join(original.splitlines()[1:]) + "\n")  # human removes the mark
+    original = tm.read_text(encoding="utf-8")
+    tm.write_text(
+        "\n".join(original.splitlines()[1:]) + "\n", encoding="utf-8"
+    )  # human removes the mark
     _, results = evaluate("G3", Project.load(llm_project))
     by_desc = {r.description: r for r in results}
     assert by_desc["threat model: lethal trifecta assessed"].ok is True
-    tm.write_text(original)
+    tm.write_text(original, encoding="utf-8")
 
 
 def test_no_arguments_prints_help_and_a_hint(capsys: pytest.CaptureFixture[str]) -> None:
@@ -640,7 +672,7 @@ def test_no_arguments_prints_help_and_a_hint(capsys: pytest.CaptureFixture[str])
 def test_doctor_warns_about_placeholders(
     simple_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    (simple_project / "uv.lock").write_text("")
+    (simple_project / "uv.lock").write_text("", encoding="utf-8")
     main(["doctor", "--dir", str(simple_project)])
     out = capsys.readouterr().out
     assert "@your-handle placeholder" in out and "<security contact> placeholder" in out
@@ -669,11 +701,11 @@ def test_tour_falls_back_to_a_known_base(
         )
 
     git("init", "-q", "-b", "main")
-    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "a.txt").write_text("a", encoding="utf-8")
     git("add", "a.txt")
     git("commit", "-qm", "chore: a")
     git("checkout", "-qb", "feature")
-    (tmp_path / "b.txt").write_text("b")
+    (tmp_path / "b.txt").write_text("b", encoding="utf-8")
     git("add", "b.txt")
     git("commit", "-qm", "feat: b")
     assert resolve_base("origin/main", tmp_path) == "main"  # no remote: falls back to main
@@ -755,10 +787,10 @@ def test_lane_is_fix_only_when_every_commit_is_a_fix_type(
     """ADR-0009: the lane is recognised from Conventional Commit types in base..HEAD."""
     from rumbo.gates import lane, merge_base
 
-    (tmp_path / "a.txt").write_text("a\n")
+    (tmp_path / "a.txt").write_text("a\n", encoding="utf-8")
     git, base = _branch_repo(tmp_path)
     for n, subject in enumerate(subjects):
-        (tmp_path / f"f{n}.txt").write_text("x\n")
+        (tmp_path / f"f{n}.txt").write_text("x\n", encoding="utf-8")
         git("add", "-A")
         git("commit", "-qm", subject)
     assert lane(tmp_path, base) == expected
@@ -780,11 +812,12 @@ def test_gate_g4_fix_lane_is_green_for_a_tested_small_fix(simple_project: Path) 
 
     git, _ = _branch_repo(simple_project)
     (simple_project / "src" / "demo" / "domain" / "calc.py").write_text(
-        "def avg(xs):\n    return sum(xs) / len(xs) if xs else 0.0\n"
+        "def avg(xs):\n    return sum(xs) / len(xs) if xs else 0.0\n", encoding="utf-8"
     )
     (simple_project / "tests" / "unit" / "test_calc.py").write_text(
         '"""Bug #12: avg([]) raised ZeroDivisionError."""\n'
-        "from demo.domain.calc import avg\n\n\ndef test_avg_empty():\n    assert avg([]) == 0.0\n"
+        "from demo.domain.calc import avg\n\n\ndef test_avg_empty():\n    assert avg([]) == 0.0\n",
+        encoding="utf-8",
     )
     git("add", "-A")
     git("commit", "-qm", "fix: avg of an empty list")
@@ -799,7 +832,9 @@ def test_gate_g4_fix_lane_is_green_for_a_tested_small_fix(simple_project: Path) 
     assert ok and text.splitlines()[0].endswith("· lane: fix")
     assert "  ✅ lane: fix" not in text  # shown in the heading, not as a check
     # One feat commit returns the PR to the normal lane: the extra rules disappear.
-    (simple_project / "src" / "demo" / "domain" / "median.py").write_text("x = 1\n")
+    (simple_project / "src" / "demo" / "domain" / "median.py").write_text(
+        "x = 1\n", encoding="utf-8"
+    )
     git("add", "-A")
     git("commit", "-qm", "feat: median")
     by_desc = _fix_lane_results(simple_project)
@@ -810,7 +845,7 @@ def test_gate_g4_fix_lane_is_green_for_a_tested_small_fix(simple_project: Path) 
 def test_gate_g4_fix_lane_requires_a_regression_test(simple_project: Path) -> None:
     """ADR-0009 rule 1: a fix that adds no line under the tests directory is red."""
     git, _ = _branch_repo(simple_project)
-    (simple_project / "src" / "demo" / "domain" / "calc.py").write_text("x = 2\n")
+    (simple_project / "src" / "demo" / "domain" / "calc.py").write_text("x = 2\n", encoding="utf-8")
     git("add", "-A")
     git("commit", "-qm", "fix: untested patch")
     by_desc = _fix_lane_results(simple_project)
@@ -822,7 +857,9 @@ def test_gate_g4_fix_lane_requires_a_regression_test(simple_project: Path) -> No
 def test_gate_g4_fix_lane_limits_the_diff_to_150_lines(simple_project: Path) -> None:
     """ADR-0009 rule 2: half the normal limit; the normal 300-line rule still passes."""
     git, _ = _branch_repo(simple_project)
-    (simple_project / "tests" / "unit" / "test_big.py").write_text("x = 1\n" * 200)
+    (simple_project / "tests" / "unit" / "test_big.py").write_text(
+        "x = 1\n" * 200, encoding="utf-8"
+    )
     git("add", "-A")
     git("commit", "-qm", "test: a very long regression test")
     by_desc = _fix_lane_results(simple_project)
@@ -842,7 +879,7 @@ def test_gate_g4_fix_lane_forbids_a_new_runtime_dependency(simple_project: Path)
         encoding="utf-8",
     )
     git, _ = _branch_repo(simple_project)
-    (simple_project / "tests" / "unit" / "test_dep.py").write_text("x = 1\n")
+    (simple_project / "tests" / "unit" / "test_dep.py").write_text("x = 1\n", encoding="utf-8")
     # Same distribution, spelled differently and with an extra: not a new dependency.
     pyproject.write_text(
         original.replace("dependencies = []", 'dependencies = ["typing-extensions[x] >= 4.1"]'),
@@ -881,11 +918,13 @@ def test_init_generates_the_fix_command_and_doctor_accepts_it(tmp_path: Path) ->
     text = command.read_text(encoding="utf-8")
     assert text.startswith("---\n") and "argument-hint: <bug>" in text
     assert "regression test" in text and "≤ 150" in text and "/rumbo-ancla" in text
-    assert "/rumbo-fix" in (tmp_path / ".claude" / "commands" / "rumbo-ancla.md").read_text()
+    assert "/rumbo-fix" in (tmp_path / ".claude" / "commands" / "rumbo-ancla.md").read_text(
+        encoding="utf-8"
+    )
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "/rumbo-fix" in agents and len(agents.splitlines()) < 100
     assert "/rumbo-fix" in (tmp_path / "README.md").read_text(encoding="utf-8")
-    (tmp_path / "uv.lock").write_text("")
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
     assert main(["doctor", "--dir", str(tmp_path)]) == 0
 
 
@@ -936,8 +975,10 @@ def _kind_project(
     layout = layout or {"service": "hexagonal"}.get(kind, "flat")
     (root / "src" / "demo").mkdir(parents=True)
     (root / ".github" / "workflows").mkdir(parents=True)
-    (root / ".github" / "dependabot.yml").write_text("version: 2\n")
-    (root / "pyproject.toml").write_text('[project]\nname = "demo"\nversion = "0.1.0"\n')
+    (root / ".github" / "dependabot.yml").write_text("version: 2\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
     flags = {
         kind: True,
         "packaged": kind in ("library", "cli"),
@@ -946,24 +987,29 @@ def _kind_project(
         "mvp_or_more": rigor != "prototype",
     }
     (root / ".github" / "workflows" / "ci.yml").write_text(
-        _render_template("dot_github/workflows/ci.yml.tmpl", **flags)
+        _render_template("dot_github/workflows/ci.yml.tmpl", **flags), encoding="utf-8"
     )
     if kind in ("library", "cli"):
-        (root / "CHANGELOG.md").write_text(_render_template("CHANGELOG.md.tmpl"))
+        (root / "CHANGELOG.md").write_text(_render_template("CHANGELOG.md.tmpl"), encoding="utf-8")
         (root / ".github" / "workflows" / "release.yml").write_text(
-            _render_template("dot_github/workflows/release.yml.tmpl")
+            _render_template("dot_github/workflows/release.yml.tmpl"), encoding="utf-8"
         )
     else:
         (root / "docs" / "ops").mkdir(parents=True)
-        (root / "docs" / "ops" / "runbook.md").write_text("# Runbook\n\nRestart it.\n")
+        (root / "docs" / "ops" / "runbook.md").write_text(
+            "# Runbook\n\nRestart it.\n", encoding="utf-8"
+        )
         if kind == "service":
-            (root / "docs" / "ops" / "slos.md").write_text("# SLOs\n\np95 < 300 ms.\n")
+            (root / "docs" / "ops" / "slos.md").write_text(
+                "# SLOs\n\np95 < 300 ms.\n", encoding="utf-8"
+            )
             (root / "infra").mkdir()
-            (root / "infra" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+            (root / "infra" / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
     if kind == "data":
         (root / "evals" / "datasets").mkdir(parents=True)
         (root / "evals" / "datasets" / "cases.jsonl").write_text(
-            json.dumps({"id": "real-001", "input": {"rows": 3}, "expected": {"rows": 3}}) + "\n"
+            json.dumps({"id": "real-001", "input": {"rows": 3}, "expected": {"rows": 3}}) + "\n",
+            encoding="utf-8",
         )
     return Project(root=root, package="demo", llm=llm, rigor=rigor, kind=kind, layout=layout)
 
@@ -989,7 +1035,9 @@ def test_gate_g3_flat_layout_asks_for_the_architecture_test_not_the_contracts(
     assert "import-linter contracts" not in rows
     assert rows["architecture test present"] is False
     (tmp_path / "tests" / "architecture").mkdir(parents=True)
-    (tmp_path / "tests" / "architecture" / "test_architecture.py").write_text("def test_x(): ...\n")
+    (tmp_path / "tests" / "architecture" / "test_architecture.py").write_text(
+        "def test_x(): ...\n", encoding="utf-8"
+    )
     assert _by_description("G3", project)["architecture test present"] is True
 
 
@@ -1001,7 +1049,8 @@ def test_gate_g3_hexagonal_layout_requires_the_two_contracts(tmp_path: Path) -> 
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "demo"\nversion = "0.1.0"\n'
         '[[tool.importlinter.contracts]]\nname = "layers"\n'
-        '[[tool.importlinter.contracts]]\nname = "pure"\n'
+        '[[tool.importlinter.contracts]]\nname = "pure"\n',
+        encoding="utf-8",
     )
     assert _by_description("G3", project)["import-linter contracts"] is True
 
@@ -1041,32 +1090,43 @@ def test_gate_g5_library_red_cases(tmp_path: Path) -> None:
     _, results = evaluate("G5", project, run=False)
     bad = next(r for r in results if r.description == changelog)
     assert bad.ok is False and "missing CHANGELOG.md" in bad.detail
-    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [0.1.0] - 2026-11-07\n")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [0.1.0] - 2026-11-07\n", encoding="utf-8"
+    )
     assert _by_description("G5", project)[changelog] is False
-    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## Unreleased\n")  # bare heading ok
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## Unreleased\n", encoding="utf-8"
+    )  # bare heading ok
     assert _by_description("G5", project)[changelog] is True
 
     workflow = tmp_path / ".github" / "workflows" / "release.yml"
-    good = workflow.read_text()
-    workflow.write_text(good + "        with:\n          password: ${{ secrets.PYPI_API_TOKEN }}\n")
+    good = workflow.read_text(encoding="utf-8")
+    workflow.write_text(
+        good + "        with:\n          password: ${{ secrets.PYPI_API_TOKEN }}\n",
+        encoding="utf-8",
+    )
     assert _by_description("G5", project)[release] is False
-    workflow.write_text(good.replace("id-token: write", "id-token: none"))
+    workflow.write_text(good.replace("id-token: write", "id-token: none"), encoding="utf-8")
     assert _by_description("G5", project)[release] is False
     workflow.unlink()
     assert _by_description("G5", project)[release] is False
-    workflow.write_text(good)
+    workflow.write_text(good, encoding="utf-8")
 
     ci = tmp_path / ".github" / "workflows" / "ci.yml"
-    ci.write_text(_render_template("dot_github/workflows/ci.yml.tmpl", service=True))
-    assert "matrix:" not in ci.read_text()
+    ci.write_text(
+        _render_template("dot_github/workflows/ci.yml.tmpl", service=True), encoding="utf-8"
+    )
+    assert "matrix:" not in ci.read_text(encoding="utf-8")
     assert _by_description("G5", project)[matrix] is False
     ci.write_text(
         "jobs:\n  check:\n    strategy:\n      matrix:\n        python:\n"
-        "          - '3.12'\n          - '3.13'\n"
+        "          - '3.12'\n          - '3.13'\n",
+        encoding="utf-8",
     )
     assert _by_description("G5", project)[matrix] is True
     ci.write_text(
-        "jobs:\n  check:\n    strategy:\n      matrix:\n        python-version: ['3.13']\n"
+        "jobs:\n  check:\n    strategy:\n      matrix:\n        python-version: ['3.13']\n",
+        encoding="utf-8",
     )
     assert _by_description("G5", project)[matrix] is False
 
@@ -1088,11 +1148,11 @@ def test_gate_g5_data_requires_runbook_and_datasets_but_only_recommends_a_docker
     assert rows["Dockerfile in infra/"] is None  # recommended: missing is not a failure
     assert "SLOs complete" not in rows and "CHANGELOG.md with an 'Unreleased' section" not in rows
     (tmp_path / "infra").mkdir()
-    (tmp_path / "infra" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    (tmp_path / "infra" / "Dockerfile").write_text("FROM python:3.12-slim\n", encoding="utf-8")
     assert _by_description("G5", project)["Dockerfile in infra/"] is True
 
     (tmp_path / "evals" / "datasets" / "cases.jsonl").write_text(
-        json.dumps({"id": "example-001", "tags": ["example"]}) + "\n"
+        json.dumps({"id": "example-001", "tags": ["example"]}) + "\n", encoding="utf-8"
     )
     assert _by_description("G5", project)[datasets] is False
     (tmp_path / "docs" / "ops" / "runbook.md").unlink()
@@ -1250,3 +1310,181 @@ def test_promote_runs_uv_add_unless_no_install(
     _list_dev_tools(simple_project, PROTOTYPE_TOOLS)
     assert main(["promote", "mvp", "--dir", str(simple_project)]) == 0
     assert calls == [["uv", "add", "--dev", "pytest-cov", "bandit", "pip-audit"]]
+
+
+# ------------------------------------------------------------------ ADR-0013: adoption
+LEGACY_PYPROJECT = (
+    '[project]\nname = "legacy-app"\nversion = "0.1.0"\ndependencies = []\n\n'
+    '[project.scripts]\nlegacy = "legacy_app:main"\n'
+)
+ADOPT = ["init", "--adopt", "--yes", "--no-llm", "--rigor", "mvp", "--no-install"]
+
+
+def _legacy_project(root: Path) -> Path:
+    """A project that existed before RUMBO: a cli package under src/, tests in test/, its own CI."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(LEGACY_PYPROJECT, encoding="utf-8")
+    (root / "src" / "legacy_app").mkdir(parents=True)
+    (root / "src" / "legacy_app" / "__init__.py").write_text(
+        "def main() -> None:\n    pass\n", encoding="utf-8"
+    )
+    (root / "test").mkdir()
+    (root / "test" / "test_legacy.py").write_text(
+        "def test_ok() -> None:\n    assert 1\n", encoding="utf-8"
+    )
+    (root / ".github" / "workflows").mkdir(parents=True)
+    (root / ".github" / "workflows" / "existing.yml").write_text(
+        "name: existing\n", encoding="utf-8"
+    )
+    return root
+
+
+def test_init_adopt_detects_the_project_and_writes_only_the_harness(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0013 fitness: `rumbo init --adopt --yes` on a pre-existing project."""
+    root = _legacy_project(tmp_path)
+    assert main([*ADOPT, "--dir", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "package=legacy_app kind=cli layout=flat tests=test" in out
+    assert "ci.yml was not written" in out
+    assert "uv run python scripts/check_tests_not_weakened.py --strict" in out
+    project = Project.load(root)
+    assert (project.package, project.kind, project.layout) == ("legacy_app", "cli", "flat")
+    assert (project.adopted, project.tests_dir, project.rigor) == (True, "test", "mvp")
+    # The harness, not the skeleton.
+    for rel in (
+        "AGENTS.md",
+        "RUMBO.md",
+        "Makefile",
+        "scripts/rumbo_check.py",
+        "scripts/rumbo_guard.py",
+        "test/architecture/test_architecture.py",
+        "test/unit/test_check_tests_not_weakened.py",
+        ".github/workflows/nightly.yml",
+        "CHANGELOG.md",
+    ):
+        assert (root / rel).is_file(), rel
+    for rel in (
+        "src/legacy_app/__main__.py",
+        "tests",
+        "test/unit/test_smoke.py",
+        "test/property",
+        ".github/workflows/ci.yml",
+    ):
+        assert not (root / rel).exists(), rel
+    assert (root / "src" / "legacy_app" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "def main() -> None:\n    pass\n"
+    checks = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["rumbo"]
+    assert checks["adopted"] is True and checks["tests"] == "test"
+    assert checks["checks"]["types"] == "uv run pyright {changed}"
+    # Doctor uses the adoption plan: nothing under src/ or tests/ is "missing", nor ci.yml.
+    (root / "uv.lock").write_text("", encoding="utf-8")
+    assert main(["doctor", "--dir", str(root)]) == 0
+    assert "Harness complete" in capsys.readouterr().out
+
+
+def test_init_adopt_flags_win_over_detection(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _legacy_project(tmp_path)
+    (root / "src" / "other").mkdir()
+    (root / "src" / "other" / "__init__.py").write_text("", encoding="utf-8")
+    # Two packages (legacy_app by name wins: no ambiguity); --package and --kind still decide.
+    assert main([*ADOPT, "--dir", str(root), "--package", "other", "--kind", "library"]) == 0
+    assert "package=other kind=library" in capsys.readouterr().out.split("Mounting")[1]
+    project = Project.load(root)
+    assert (project.package, project.kind, project.adopted) == ("other", "library", True)
+
+
+def test_init_adopt_ambiguous_package_asks_for_the_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _legacy_project(tmp_path)
+    (root / "pyproject.toml").write_text(
+        LEGACY_PYPROJECT.replace("legacy-app", "renamed"), encoding="utf-8"
+    )
+    (root / "src" / "other").mkdir()
+    (root / "src" / "other" / "__init__.py").write_text("", encoding="utf-8")
+    assert main([*ADOPT, "--dir", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "legacy_app, other" in err and "--package" in err
+    assert not (root / "AGENTS.md").exists()
+    assert main([*ADOPT, "--dir", str(root), "--package", "other"]) == 0
+
+
+def test_init_adopt_interactive_defaults_are_the_detected_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0013: in A0 the detected values are the answers in brackets (Enter accepts them)."""
+    root = _legacy_project(tmp_path)
+
+    class Tty:
+        def isatty(self) -> bool:
+            return True
+
+    prompts: list[str] = []
+
+    def accept_default(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr(sys, "stdin", Tty())
+    monkeypatch.setattr("builtins.input", accept_default)
+    assert main(["init", "--adopt", "--no-install", "--dir", str(root)]) == 0
+    assert any("[legacy-app]" in p for p in prompts)
+    assert any("[legacy_app]" in p for p in prompts)
+    assert any("[cli]" in p for p in prompts)
+    assert not any("already has" in p for p in prompts)  # adoption expects an existing tree
+    project = Project.load(root)
+    assert (project.package, project.kind, project.tests_dir, project.rigor) == (
+        "legacy_app",
+        "cli",
+        "test",
+        "mvp",
+    )
+    assert project.adopted and not project.llm
+    assert "package=legacy_app kind=cli layout=flat tests=test" in capsys.readouterr().out
+
+
+def test_init_adopt_needs_an_existing_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main([*ADOPT, "--dir", str(tmp_path / "nowhere")]) == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_check_full_is_passed_through_to_the_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0013: `rumbo check --full` hands `--full` to the runner, which expands {changed}."""
+    captured: list[list[str]] = []
+
+    def fake_main(argv: list[str] | None = None) -> int:
+        captured.append(list(argv or []))
+        return 0
+
+    monkeypatch.setattr("rumbo.sensors.check.main", fake_main)
+    assert main(["check", "--full", "--dir", str(tmp_path)]) == 0
+    assert main(["check", "lint", "--brief", "--dir", str(tmp_path)]) == 0
+    assert captured == [
+        ["--dir", str(tmp_path), "--full"],
+        ["lint", "--dir", str(tmp_path), "--brief"],
+    ]
+    assert cli.build_parser().parse_args(["check", "--full"]).full is True
+
+
+def test_main_reconfigures_a_legacy_console_to_utf8(
+    simple_project: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Windows consoles before Python 3.15 write cp1252: the report marks must not crash."""
+    import io
+
+    raw = io.BytesIO()
+    legacy = io.TextIOWrapper(raw, encoding="cp1252", errors="strict", write_through=True)
+    monkeypatch.setattr(sys, "stdout", legacy)
+    assert main(["doctor", "--dir", str(simple_project)]) in (0, 1)
+    legacy.flush()
+    assert b"Harness" in raw.getvalue() or b"missing" in raw.getvalue()
+    assert "utf-8" in (legacy.encoding or "").lower()

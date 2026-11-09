@@ -8,3 +8,18 @@ build/
 .ruff_cache/
 .hypothesis/
 .coverage
+
+# --- Added by rumbo init ---
+.env
+.env.*
+!.env.example
+coverage.xml
+htmlcov/
+mutants/
+.mutmut-cache
+sbom.cdx.json
+evals/reports/
+*.bak
+.rumbo-check.log
+.DS_Store
+.claude/settings.local.json

@@ -14,17 +14,26 @@ import pytest
 from rumbo import __version__
 from rumbo.project import HEXAGONAL_LAYERS, KINDS, Project
 from rumbo.scaffold import (
+    CI_STEPS_NOTE,
     PROVIDERS,
     Config,
+    Detected,
     Report,
     _included,
     check_steps,
     dependency_name,
+    detect_kind,
+    detect_layout,
+    detect_package,
+    detect_project,
+    detect_tests_dir,
     dev_dependencies,
+    existing_workflows,
     merge_lines,
     merge_pyproject,
     missing_dev_dependencies,
     plan_files,
+    read_pyproject,
     runtime_dependencies,
     scaffold,
     set_rigor,
@@ -342,11 +351,11 @@ def test_other_provider_accepts_extras_and_dotted_modules() -> None:
 
 def test_scaffold_skips_existing_and_reports(simple_project: Path) -> None:
     agents = simple_project / "AGENTS.md"
-    agents.write_text("mine")
+    agents.write_text("mine", encoding="utf-8")
     rep = scaffold(
         Config(name="Demo", package="demo", llm=False, rigor="prototype"), simple_project
     )
-    assert agents.read_text() == "mine"
+    assert agents.read_text(encoding="utf-8") == "mine"
     assert "AGENTS.md" in rep.skipped and "pyproject.toml" in rep.skipped
     assert not rep.created and not rep.merged
 
@@ -354,20 +363,25 @@ def test_scaffold_skips_existing_and_reports(simple_project: Path) -> None:
 def test_force_overwrites_but_merges_pyproject_and_gitignore(simple_project: Path) -> None:
     pyproject = simple_project / "pyproject.toml"
     pyproject.write_text(
-        pyproject.read_text().replace("dependencies = []", 'dependencies = ["requests>=2"]')
+        pyproject.read_text(encoding="utf-8").replace(
+            "dependencies = []", 'dependencies = ["requests>=2"]'
+        ),
+        encoding="utf-8",
     )
-    (simple_project / ".gitignore").write_text("node_modules/\n")
+    (simple_project / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
     brief = simple_project / "docs" / "product" / "brief.md"
-    brief.write_text("# My brief\n")
+    brief.write_text("# My brief\n", encoding="utf-8")
     rep = scaffold(
         Config(name="Demo", package="demo", llm=False, rigor="prototype"),
         simple_project,
         force=True,
     )
-    assert '"requests>=2"' in pyproject.read_text()
-    assert "node_modules/" in (simple_project / ".gitignore").read_text()
-    assert "rumbo:template" in brief.read_text()
-    assert (simple_project / "docs" / "product" / "brief.md.bak").read_text() == "# My brief\n"
+    assert '"requests>=2"' in pyproject.read_text(encoding="utf-8")
+    assert "node_modules/" in (simple_project / ".gitignore").read_text(encoding="utf-8")
+    assert "rumbo:template" in brief.read_text(encoding="utf-8")
+    assert (simple_project / "docs" / "product" / "brief.md.bak").read_text(
+        encoding="utf-8"
+    ) == "# My brief\n"
     assert "docs/product/brief.md" in rep.created
 
 
@@ -399,21 +413,26 @@ def test_merge_lines_without_duplicates() -> None:
 
 def test_update_refreshes_owned_files_only(llm_project: Path) -> None:
     rumbo_md = llm_project / "RUMBO.md"
-    rumbo_md.write_text("old")
+    rumbo_md.write_text("old", encoding="utf-8")
     brief = llm_project / "docs" / "product" / "brief.md"
-    brief.write_text("# written by the human\n")
+    brief.write_text("# written by the human\n", encoding="utf-8")
     makefile = llm_project / "Makefile"
-    makefile.write_text(makefile.read_text() + "\nextra: ; echo hi\n")
+    makefile.write_text(
+        makefile.read_text(encoding="utf-8") + "\nextra: ; echo hi\n", encoding="utf-8"
+    )
     (llm_project / ".claude" / "commands" / "rumbo-r.md").unlink()
     pyproject = llm_project / "pyproject.toml"
     pyproject.write_text(
-        pyproject.read_text().replace(f'version = "{__version__}"', 'version = "0.0.1"')
+        pyproject.read_text(encoding="utf-8").replace(
+            f'version = "{__version__}"', 'version = "0.0.1"'
+        ),
+        encoding="utf-8",
     )
 
     rep = update(Project.load(llm_project), llm_project)
-    assert rumbo_md.read_text() != "old"
-    assert brief.read_text() == "# written by the human\n"
-    assert "extra:" in makefile.read_text()
+    assert rumbo_md.read_text(encoding="utf-8") != "old"
+    assert brief.read_text(encoding="utf-8") == "# written by the human\n"
+    assert "extra:" in makefile.read_text(encoding="utf-8")
     assert (llm_project / ".claude" / "commands" / "rumbo-r.md").exists()
     assert "RUMBO.md" in rep.updated and ".claude/commands/rumbo-r.md" in rep.created
     assert "Makefile" in rep.differs
@@ -441,14 +460,14 @@ def test_pre_commit_rev_bumps_are_not_drift(llm_project: Path) -> None:
     from rumbo.scaffold import update, update_diff
 
     config = llm_project / ".pre-commit-config.yaml"
-    original = config.read_text()
+    original = config.read_text(encoding="utf-8")
     bumped = original.replace("rev: v", "rev: v9.", 1)
     assert bumped != original
-    config.write_text(bumped)
+    config.write_text(bumped, encoding="utf-8")
     assert ".pre-commit-config.yaml" not in update_diff(Project.load(llm_project), llm_project)
     rep = update(Project.load(llm_project), llm_project)
     assert ".pre-commit-config.yaml" not in rep.differs
-    config.write_text(original)
+    config.write_text(original, encoding="utf-8")
 
 
 ARCH_TEST = "tests/architecture/test_architecture.py"
@@ -1023,3 +1042,313 @@ def test_set_rigor_rewrites_only_the_key() -> None:
         set_rigor(text, "ultimate")
     with pytest.raises(ValueError, match=re.escape("has no [tool.rumbo] section")):
         set_rigor('[project]\nname = "x"\n', "mvp")
+
+
+# ------------------------------------------------------------- ADR-0013: adoption
+LEGACY_PYPROJECT = (
+    '[project]\nname = "legacy-app"\nversion = "0.1.0"\ndependencies = []\n\n'
+    '[project.scripts]\nlegacy = "legacy_app:main"\n'
+)
+
+
+def _legacy(root: Path, pyproject: str = LEGACY_PYPROJECT, *files: str) -> Path:
+    """A pre-existing project: a pyproject and empty files at the given relative paths."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    for rel in files:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+    return root
+
+
+def _adopted(
+    tests_dir: str = "test", kind: str = "cli", layout: str = "", llm: bool = False
+) -> Config:
+    return Config(
+        name="Legacy",
+        package="legacy_app",
+        llm=llm,
+        provider="anthropic" if llm else "",
+        rigor="mvp",
+        kind=kind,
+        layout=layout,
+        adopted=True,
+        tests_dir=tests_dir,
+    )
+
+
+def test_detect_package_from_the_project_name(tmp_path: Path) -> None:
+    """ADR-0013: `[project].name` normalised to snake_case when its directory exists."""
+    root = _legacy(tmp_path / "a", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
+    assert detect_package(root, read_pyproject(root)) == "legacy_app"
+    root = _legacy(tmp_path / "b", LEGACY_PYPROJECT, "legacy_app/__init__.py")  # no src/
+    assert detect_package(root, read_pyproject(root)) == "legacy_app"
+    dotted = LEGACY_PYPROJECT.replace("legacy-app", "Legacy.App")
+    root = _legacy(tmp_path / "c", dotted, "src/legacy_app/__init__.py")
+    assert detect_package(root, read_pyproject(root)) == "legacy_app"
+
+
+def test_detect_package_from_the_single_directory(tmp_path: Path) -> None:
+    """ADR-0013: without a matching name, the one directory with an __init__.py that is not a
+    harness folder (tests, test, docs, scripts, spikes, evals, infra, src)."""
+    harness = [f"{d}/__init__.py" for d in ("tests", "test", "docs", "scripts", "spikes", "evals")]
+    root = _legacy(tmp_path / "a", LEGACY_PYPROJECT, "mypkg/__init__.py", *harness)
+    assert detect_package(root, read_pyproject(root)) == "mypkg"
+    root = _legacy(tmp_path / "b", LEGACY_PYPROJECT, "src/other/__init__.py", "src/__init__.py")
+    assert detect_package(root, read_pyproject(root)) == "other"
+    root = _legacy(tmp_path / "c", LEGACY_PYPROJECT, "docs/__init__.py", "plain/module.py")
+    assert detect_package(root, read_pyproject(root)) is None
+    assert detect_package(tmp_path / "d", {}) is None  # no pyproject, no directories
+
+
+def test_detect_package_ambiguity_asks_for_the_flag(tmp_path: Path) -> None:
+    root = _legacy(tmp_path, LEGACY_PYPROJECT, "alpha/__init__.py", "src/beta/__init__.py")
+    with pytest.raises(ValueError, match=r"alpha, beta.*--package"):
+        detect_package(root, read_pyproject(root))
+    # The flag skips the detection (and so the error).
+    assert detect_project(root, "beta").package == "beta"
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "kind"),
+    [
+        (LEGACY_PYPROJECT, "cli"),
+        ('[project]\nname = "x"\ndependencies = ["FastAPI>=0.100"]\n', "service"),
+        ('[project]\nname = "x"\ndependencies = ["requests", "Flask"]\n', "service"),
+        ('[project]\nname = "x"\ndependencies = ["Django>=4,<6"]\n', "service"),
+        (
+            '[project]\nname = "x"\ndependencies = ["starlette[full] ; python_version>\'3\'"]\n',
+            "service",
+        ),
+        (
+            '[project]\nname = "x"\ndependencies = ["fastapi"]\n[project.scripts]\nx = "x:m"\n',
+            "cli",
+        ),
+        ('[project]\nname = "x"\ndependencies = ["requests"]\n', "library"),
+        (
+            '[project]\nname = "x"\ndependencies = []\n\n[project.scripts]\n',
+            "library",
+        ),  # empty table
+        ("", "library"),
+    ],
+    ids=[
+        "scripts",
+        "fastapi",
+        "flask",
+        "django",
+        "starlette",
+        "scripts-win",
+        "plain",
+        "no-scripts",
+        "empty",
+    ],
+)
+def test_detect_kind(pyproject: str, kind: str) -> None:
+    assert detect_kind(tomllib.loads(pyproject)) == kind
+
+
+def test_detect_layout(tmp_path: Path) -> None:
+    hexagonal = _legacy(
+        tmp_path / "hex",
+        LEGACY_PYPROJECT,
+        "src/legacy_app/domain/__init__.py",
+        "src/legacy_app/app/__init__.py",
+    )
+    assert detect_layout(hexagonal, "legacy_app") == "hexagonal"
+    half = _legacy(tmp_path / "half", LEGACY_PYPROJECT, "src/legacy_app/domain/__init__.py")
+    assert detect_layout(half, "legacy_app") == "flat"
+    assert (
+        detect_layout(
+            _legacy(tmp_path / "flat", LEGACY_PYPROJECT, "src/legacy_app/__init__.py"), "legacy_app"
+        )
+        == "flat"
+    )
+
+
+def test_detect_tests_dir(tmp_path: Path) -> None:
+    assert detect_tests_dir(tmp_path) == "tests"  # nothing yet: the default
+    (tmp_path / "test").mkdir()
+    assert detect_tests_dir(tmp_path) == "test"
+    (tmp_path / "tests").mkdir()
+    assert detect_tests_dir(tmp_path) == "tests"  # `tests` wins when both exist
+
+
+def test_detect_project_puts_it_together(tmp_path: Path) -> None:
+    root = _legacy(tmp_path, LEGACY_PYPROJECT, "src/legacy_app/__init__.py", "test/test_x.py")
+    detected = detect_project(root)
+    assert (detected.name, detected.package, detected.kind) == ("legacy-app", "legacy_app", "cli")
+    assert (detected.layout, detected.tests_dir) == ("flat", "test")
+    assert detected.summary() == "package=legacy_app kind=cli layout=flat tests=test"
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert detect_project(bare) == Detected(
+        name="bare", package=None, kind="library", layout="flat", tests_dir="tests"
+    )
+
+
+def test_adoption_plan_writes_the_harness_and_no_skeleton() -> None:
+    """ADR-0013 fitness: nothing under src/, only two test files, `adopted = true`, `{changed}`."""
+    cfg = _adopted()
+    plan = plan_files(cfg)
+    assert not [rel for rel in plan if rel.startswith("src/")]
+    assert not [rel for rel in plan if rel.startswith("tests/")]  # the detected directory is `test`
+    assert sorted(rel for rel in plan if rel.startswith("test/")) == [
+        "test/architecture/test_architecture.py",
+        "test/unit/test_check_tests_not_weakened.py",
+    ]
+    for rel in (
+        "AGENTS.md",
+        "Makefile",
+        "scripts/rumbo_check.py",
+        "RUMBO.md",
+        ".github/workflows/ci.yml",
+    ):
+        assert rel in plan
+    pyproject = str(plan["pyproject.toml"])
+    rumbo = tomllib.loads(pyproject)["tool"]["rumbo"]
+    assert rumbo["adopted"] is True and rumbo["tests"] == "test"
+    checks = rumbo["checks"]
+    assert checks["lint"] == "uv run ruff check {changed}"
+    assert checks["format"] == "uv run ruff format --check {changed}"
+    assert checks["types"] == "uv run pyright {changed}"
+    plain = _rendered_checks_of(
+        Config(name="Legacy", package="legacy_app", llm=False, rigor="mvp", kind="cli")
+    )
+    assert {k: v for k, v in checks.items() if k not in ("lint", "format", "types")} == {
+        k: v for k, v in plain.items() if k not in ("lint", "format", "types")
+    }
+    assert list(checks) == list(plain) == check_steps(cfg)
+    assert "--full" in pyproject and "{changed}` is the changed .py files" in pyproject
+    # The tool tables follow the detected tests directory.
+    tool = tomllib.loads(pyproject)["tool"]
+    assert tool["pytest"]["ini_options"]["testpaths"] == ["test"]
+    assert tool["pyright"]["include"] == ["src", "test"]
+    assert "test/**" in tool["ruff"]["lint"]["per-file-ignores"]
+    # AGENTS.md says it in one line; the nightly measures the whole tree.
+    agents = str(plan["AGENTS.md"])
+    full_lines = [ln for ln in agents.splitlines() if "--full" in ln]
+    assert full_lines == [
+        "uv run python scripts/rumbo_check.py --full   # whole tree (legacy debt); CI and the hook "
+        "check only what you changed"
+    ]
+    assert len(agents.splitlines()) < 100
+    nightly = str(plan[".github/workflows/nightly.yml"])
+    assert "  full-check:" in nightly
+    assert "run: uv run python scripts/rumbo_check.py --full" in nightly
+    assert (
+        nightly.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 2
+    )  # audit + full
+
+
+def _rendered_checks_of(cfg: Config) -> dict[str, str]:
+    return tomllib.loads(str(plan_files(cfg)["pyproject.toml"]))["tool"]["rumbo"]["checks"]
+
+
+def test_adoption_with_the_default_tests_dir_writes_no_tests_key() -> None:
+    plan = plan_files(_adopted(tests_dir="tests"))
+    rumbo = tomllib.loads(str(plan["pyproject.toml"]))["tool"]["rumbo"]
+    assert rumbo["adopted"] is True and "tests" not in rumbo
+    assert sorted(rel for rel in plan if rel.startswith("tests/")) == [
+        "tests/architecture/test_architecture.py",
+        "tests/unit/test_check_tests_not_weakened.py",
+    ]
+
+
+def test_adoption_keeps_the_purity_rules_when_the_layout_has_layers() -> None:
+    plan = plan_files(_adopted(kind="service", layout="hexagonal"))
+    arch = str(plan["test/architecture/test_architecture.py"])
+    assert "FORBIDDEN_IN_INNER" in arch and "spikes" in arch
+    assert not [rel for rel in plan if rel.startswith("src/")]
+    assert "infra/Dockerfile" in plan  # the kind has it and no root was given
+
+
+def test_init_plan_is_unchanged_without_adoption() -> None:
+    cfg = Config(name="Legacy", package="legacy_app", llm=False, rigor="mvp", kind="cli")
+    plan = plan_files(cfg)
+    pyproject = str(plan["pyproject.toml"])
+    rumbo = tomllib.loads(pyproject)["tool"]["rumbo"]
+    assert "adopted" not in rumbo and "tests" not in rumbo
+    assert rumbo["checks"]["lint"] == "uv run ruff check ." and "{changed}" not in pyproject
+    assert "full-check" not in str(plan[".github/workflows/nightly.yml"])
+    assert "--full" not in str(plan["AGENTS.md"])
+    assert "src/legacy_app/__main__.py" in plan and "tests/unit/test_smoke.py" in plan
+
+
+def test_adoption_skips_ci_when_a_workflow_exists_and_prints_the_steps(tmp_path: Path) -> None:
+    """ADR-0013: an existing workflow is the human's; the report lists the two steps to add."""
+    cfg = _adopted()
+    root = _legacy(
+        tmp_path, LEGACY_PYPROJECT, "src/legacy_app/__init__.py", ".github/workflows/existing.yaml"
+    )
+    assert existing_workflows(root) == ["existing.yaml"]
+    assert ".github/workflows/ci.yml" not in plan_files(cfg, root)
+    assert ".github/workflows/ci.yml" in plan_files(cfg)  # without a root nothing is known
+    report = scaffold(cfg, root)
+    assert not (root / ".github" / "workflows" / "ci.yml").exists()
+    assert report.notes == [CI_STEPS_NOTE]
+    summary = report.summary()
+    assert "ci.yml was not written" in summary
+    assert "uv run python scripts/rumbo_check.py" in summary
+    assert "uv run python scripts/check_tests_not_weakened.py --strict" in summary
+    assert "RUMBO_BASE_REF" in summary
+    # Without a workflow, ci.yml is written as for any project and there is nothing to note.
+    other = _legacy(tmp_path / "other", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
+    report = scaffold(cfg, other)
+    assert (other / ".github" / "workflows" / "ci.yml").is_file() and report.notes == []
+
+
+def test_adoption_skips_infra_when_the_directory_exists(tmp_path: Path) -> None:
+    cfg = _adopted(kind="service", layout="flat")
+    root = _legacy(tmp_path, LEGACY_PYPROJECT, "src/legacy_app/__init__.py", "infra/k8s.yaml")
+    assert not [rel for rel in plan_files(cfg, root) if rel.startswith("infra/")]
+    assert "infra/Dockerfile" in plan_files(cfg, tmp_path / "elsewhere")
+    scaffold(cfg, root)
+    assert not (root / "infra" / "Dockerfile").exists()
+    assert (root / "docs" / "ops" / "runbook.md").is_file()  # the other ops files still come
+
+
+def test_adopted_project_round_trips_and_updates_without_a_skeleton(tmp_path: Path) -> None:
+    cfg = _adopted()
+    root = _legacy(
+        tmp_path,
+        LEGACY_PYPROJECT,
+        "src/legacy_app/__init__.py",
+        "test/test_x.py",
+        ".github/workflows/existing.yml",
+    )
+    scaffold(cfg, root)
+    project = Project.load(root)
+    assert (project.adopted, project.tests_dir, project.kind) == (True, "test", "cli")
+    again = Config.from_project(project)
+    assert (again.adopted, again.tests_dir) == (True, "test")
+    assert not (root / "src" / "legacy_app" / "__main__.py").exists()
+    assert not (root / "tests").exists()
+    report = update(project, root)
+    assert not [
+        rel for rel in report.created + report.differs if rel.startswith(("src/", "tests/"))
+    ]
+    assert not any("ci.yml" in rel for rel in report.differs)
+    assert not (root / "src" / "legacy_app" / "__main__.py").exists()
+
+
+def test_target_path_follows_the_tests_dir() -> None:
+    cfg = _adopted(tests_dir="test")
+    assert target_path("tests/unit/test_x.py.tmpl", cfg) == "test/unit/test_x.py"
+    assert (
+        target_path("tests/architecture/test_architecture.py.tmpl", cfg)
+        == "test/architecture/test_architecture.py"
+    )
+    assert (
+        target_path("src/__pkg__/tests.py", cfg) == "src/legacy_app/tests.py"
+    )  # only the first part
+    assert (
+        target_path("tests/unit/test_x.py", Config(name="x", package="x", llm=False))
+        == "tests/unit/test_x.py"
+    )
+
+
+@pytest.mark.parametrize("tests_dir", ["", "../x", "a/b", "tests dir", "x" * 51])
+def test_invalid_tests_dir(tests_dir: str) -> None:
+    with pytest.raises(ValueError, match="tests directory"):
+        Config(name="x", package="x", llm=False, adopted=True, tests_dir=tests_dir)

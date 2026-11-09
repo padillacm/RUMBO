@@ -82,6 +82,13 @@ versions), runs `pre-commit autoupdate` and `install`, and logs the A0 answers i
 `.gitignore`) and reports what it skipped. Review the output, explain to the human what was
 skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7 by hand.
 
+**An existing project** takes `rumbo init --adopt` (ADR-0013): it detects the package, the
+kind, the layout and the tests directory (the flags still win), writes the harness without the
+`src/` and tests skeleton, leaves an existing CI workflow alone and prints the two steps to add,
+and makes `lint`, `format` and `types` run on the changed files only (`{changed}`), so the
+legacy debt is measured nightly with `--full` instead of blocking every change. The adoption
+commit touches protected files, so the **human** makes it; from then on the hooks apply.
+
 ### A1. Repository structure
 
 ```
@@ -122,7 +129,7 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 │   │                         # the four packages below are the hexagonal layout (services);
 │   │                         # `layered` creates the packages listed in --layers, `flat` none
 │   ├── domain/__init__.py    # pure logic: no I/O, no LLM SDKs, no HTTP
-│   ├── app/__init__.py       # use cases; depends only on domain (+ ports.py, entrypoint.py, budget.py, telemetry.py with LLM)
+│   ├── app/__init__.py       # use cases; depends only on domain (+ async ports.py, entrypoint.py, budget.py, telemetry.py with LLM)
 │   ├── adapters/__init__.py  # external APIs, DB, LLM (+ llm.py, claude_code.py with LLM)
 │   ├── prompts/__init__.py   # versioned prompts (LLM products only)
 │   └── api/__init__.py       # FastAPI (+ http.py for a service, with or without LLM)
@@ -235,7 +242,7 @@ arch     = "uv run lint-imports"
 security = "uv run bandit -q -r src evals"
 security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
 audit    = "uv run pip-audit --skip-editable"
-evals    = "uv run python evals/run_evals.py --suite smoke"   # LLM products only, offline
+evals    = "uv run python evals/run_evals.py --suite smoke"   # LLM products and data pipelines, offline
 sensor   = "uv run python scripts/check_tests_not_weakened.py --base {base}"
 ```
 
@@ -337,8 +344,9 @@ marker is breaking a rule, not defeating a sensor: CI remains the binding layer.
 - reads JSONL cases (`{"id", "input", "expected", "grader", "tags"}`) from
   `evals/datasets/<suite>.jsonl`;
 - runs the real system (entry function in `src/<pkg>/app`, by default
-  `<pkg>.app.entrypoint:answer`) for each case, `k` times (`--k`, default 1; use 3 to measure
-  consistency);
+  `<pkg>.app.entrypoint:answer`, a coroutine; a synchronous entry such as a data pipeline's
+  `run` works too) for each case, `k` times (`--k`, default 1; use 3 to measure consistency),
+  with at most `--concurrency N` calls in flight (default 1; the report keeps the case order);
 - applies **deterministic** graders from `evals/graders/` (numeric accuracy with tolerance,
   field equality, assertions on tool-call arguments, abstention when the data is missing);
 - reports `pass@1` and `pass^k` (a case passes only if all `k` runs pass) and exits non-zero

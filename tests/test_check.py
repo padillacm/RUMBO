@@ -34,7 +34,7 @@ def project(root: Path, steps: dict[str, str]) -> Path:
 
 def ran(root: Path) -> list[str]:
     path = root / "order.txt"
-    return path.read_text().strip(";").split(";") if path.exists() else []
+    return path.read_text(encoding="utf-8").strip(";").split(";") if path.exists() else []
 
 
 def run(root: Path, *args: str) -> int:
@@ -286,3 +286,191 @@ def test_brief_captures_stderr_and_keeps_the_terminal_ascii(
     out = capsys.readouterr().out
     assert "caf? on stderr" in out or "caf\\xe9 on stderr" in out or "caf? on stderr" in out
     assert out.isascii()
+
+
+# ---------------------------------------------------------------------------- {changed}
+def git(root: Path, *args: str) -> None:
+    flags = ["-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", *flags, *args], cwd=root, check=True, capture_output=True)
+
+
+def write(root: Path, name: str, text: str = "x = 1\n") -> None:
+    (root / name).parent.mkdir(parents=True, exist_ok=True)
+    (root / name).write_text(text, encoding="utf-8")
+
+
+def show_args() -> str:
+    """A step that prints the arguments it received, in place of ``{changed}``."""
+    return py("import sys; print(sys.argv[1:])") + " {changed}"
+
+
+def received(out: str) -> list[str]:
+    """The argument list the step printed."""
+    (line,) = [ln for ln in out.splitlines() if ln.startswith("[")]
+    return json.loads(line.replace("'", '"'))
+
+
+@pytest.fixture
+def feature_repo(tmp_path: Path) -> Path:
+    """main with two .py files and a README; a feature branch with a committed .py change, a
+    deleted .py, a changed .md; plus an uncommitted .py change and an untracked .py file."""
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    write(tmp_path, "base.py")
+    write(tmp_path, "gone.py")
+    write(tmp_path, "README.md", "# demo\n")
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-q", "-m", "init")
+    git(tmp_path, "switch", "-q", "-c", "feature")
+    write(tmp_path, "pkg/committed.py")
+    write(tmp_path, "README.md", "# changed\n")
+    (tmp_path / "gone.py").unlink()
+    git(tmp_path, "add", ".")
+    git(tmp_path, "commit", "-q", "-m", "feature work")
+    write(tmp_path, "base.py", "x = 2\n")  # uncommitted
+    write(tmp_path, "new.py")  # untracked
+    write(tmp_path, "notes.md", "untracked, not python\n")
+    return tmp_path
+
+
+def test_changed_expands_to_the_changed_python_files_sorted(
+    feature_repo: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    root = project(feature_repo, {"sensor": show_args()})
+    assert run(root) == 0
+    out = capfd.readouterr().out
+    assert received(out) == ["base.py", "new.py", "pkg/committed.py"]
+    assert "ok   sensor\n" in out
+
+
+def test_changed_is_relative_to_the_given_base(
+    feature_repo: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    git(feature_repo, "add", ".")
+    git(feature_repo, "commit", "-q", "-m", "everything")
+    root = project(feature_repo, {"sensor": show_args()})
+    assert run(root, "--base", "feature~1") == 0
+    # pkg/committed.py is already part of feature~1; only the last commit counts
+    assert received(capfd.readouterr().out) == ["base.py", "new.py"]
+
+
+def test_changed_paths_are_relative_to_a_subdirectory_root(
+    feature_repo: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    sub = feature_repo / "sub"
+    write(sub, "inner.py")
+    write(feature_repo, "outer.py")
+    root = project(sub, {"sensor": show_args()})
+    assert run(root) == 0
+    assert received(capfd.readouterr().out) == ["inner.py"]
+
+
+def test_changed_with_nothing_changed_skips_the_step(
+    feature_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    git(feature_repo, "switch", "-q", "--discard-changes", "main")
+    (feature_repo / "new.py").unlink()
+    root = project(
+        feature_repo, {"lint": exits(0, "lint") + " {changed}", "test": exits(0, "test")}
+    )
+    assert run(root) == 0
+    assert ran(root) == ["test"], "the step with no changed files is not run"
+    lines = capsys.readouterr().out.splitlines()
+    assert "ok   lint (no changed files)" in lines
+    assert lines[-1] == "rumbo check: green (2 steps)"
+
+
+def test_changed_note_reaches_the_brief_log(feature_repo: Path) -> None:
+    git(feature_repo, "switch", "-q", "--discard-changes", "main")
+    (feature_repo / "new.py").unlink()
+    root = project(feature_repo, {"lint": exits(1) + " {changed}"})
+    assert run(root, "--brief") == 0
+    assert "ok   lint (no changed files)" in (root / ".rumbo-check.log").read_text(encoding="utf-8")
+
+
+def test_full_replaces_changed_with_the_whole_tree(
+    feature_repo: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    root = project(feature_repo, {"sensor": show_args()})
+    assert run(root, "--full") == 0
+    out = capfd.readouterr().out
+    assert received(out) == ["."]
+    assert "ok   sensor\n" in out
+
+
+def test_full_runs_even_when_nothing_changed(feature_repo: Path) -> None:
+    git(feature_repo, "switch", "-q", "--discard-changes", "main")
+    root = project(feature_repo, {"lint": exits(0, "lint") + " {changed}"})
+    assert run(root, "--full") == 0
+    assert ran(root) == ["lint"]
+
+
+def test_full_does_nothing_for_tables_without_changed(tmp_path: Path) -> None:
+    root = project(tmp_path, {"a": exits(0, "a"), "b": exits(0, "b")})
+    assert run(root, "--full") == 0
+    assert ran(root) == ["a", "b"]
+    assert check.build_parser().parse_args(["--full"]).full is True
+
+
+def test_changed_without_commits_falls_back_to_the_whole_tree(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    write(tmp_path, "a.py")
+    root = project(tmp_path, {"sensor": show_args()})
+    assert run(root) == 0
+    out = capfd.readouterr().out
+    assert received(out) == ["."]
+    assert "ok   sensor (no git base: whole tree)\n" in out
+
+
+def test_changed_with_an_unknown_base_falls_back_to_the_whole_tree(
+    feature_repo: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    root = project(feature_repo, {"sensor": show_args()})
+    assert run(root, "--base", "no-such-ref") == 0
+    out = capfd.readouterr().out
+    assert received(out) == ["."]
+    assert "ok   sensor (no git base: whole tree)\n" in out
+
+
+def test_changed_fallback_keeps_the_failure_exit_codes(feature_repo: Path) -> None:
+    root = project(feature_repo, {"sensor": exits(1) + " {changed}"})
+    assert run(root, "--base", "no-such-ref") == 1
+
+
+def test_changed_must_be_an_argument_of_its_own(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = project(
+        tmp_path, {"ok": exits(0, "ok"), "glued": exits(0, "glued") + " --files={changed}"}
+    )
+    assert run(root) == 3
+    assert ran(root) == [], "nothing runs when the configuration is broken"
+    out = capsys.readouterr().out
+    assert out.startswith("rumbo check: environment broken (step glued:")
+    assert "{changed} must be an argument of its own" in out
+
+
+def test_changed_is_resolved_once_and_only_when_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def fake(base: str, root: Path, full: bool) -> check.Changed:
+        calls.append(base)
+        return check.Changed(["a.py"])
+
+    monkeypatch.setattr(check, "resolve_changed", fake)
+    plain = project(tmp_path, {"a": exits(0, "a")})
+    assert run(plain) == 0
+    assert calls == [], "git is not consulted when no step uses {changed}"
+
+    twice = project(
+        tmp_path, {"lint": exits(0, "lint") + " {changed}", "types": exits(0) + " {changed}"}
+    )
+    assert run(twice) == 0
+    assert calls == ["main"]

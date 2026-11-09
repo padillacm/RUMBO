@@ -40,6 +40,7 @@ allowed-confusables = ["–", "−"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S603", "S607"]
+"scripts/**" = ["S603", "S607"]
 "src/rumbo/sensors/**" = ["S603", "S607"]
 "src/rumbo/cli.py" = ["S603", "S607"]
 "src/rumbo/scaffold.py" = ["S603", "S607"]
@@ -58,10 +59,63 @@ addopts = "-q --strict-markers"
 
 [dependency-groups]
 dev = [
+    "bandit>=1.9.4",
+    "hypothesis>=6.170.15",
+    "mutmut>=3.8.1",
+    "pip-audit>=2.10.1",
+    "pre-commit>=4.7.0",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.3",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
 "RUMBO.md" = "rumbo/templates/RUMBO.md"
+
+# --- Added by rumbo init ---
+[tool.rumbo]
+# RUMBO harness configuration, read by `rumbo gate`, `rumbo doctor` and `rumbo update`.
+version = "0.3.0"
+name = "rumbo"
+package = "rumbo"
+# ADR-0010: what the project is (service, library, cli, data) and how its package is organised
+# (hexagonal, layered, flat). `layers` lists a layered package's layers, outermost first.
+kind = "cli"
+layout = "flat"
+llm = false
+provider = "none"
+sdk_package = ""
+sdk_module = ""
+sdk_env_key = ""
+rigor = "production"
+# ADR-0013: the harness was mounted on an existing project; lint, format and types run on the
+# changed files (`{changed}` below), the nightly measures the whole tree with --full.
+adopted = true
+
+[tool.rumbo.checks]
+# Verification steps in execution order, read by `scripts/rumbo_check.py` (`rumbo check`).
+# One command per step, run without a shell (ADR-0006); `{base}` is origin/main if it exists, else main.
+# The steps scale with `rigor` (ADR-0011): `rumbo update` appends the ones your level requires
+# (after `rumbo promote` or a hand edit of `rigor`) and never replaces or removes one.
+# `{changed}` is the changed .py files (vs {base}, plus uncommitted and untracked ones); `rumbo
+# check --full` (or `scripts/rumbo_check.py --full`) replaces it with `.`: the whole tree.
+lint = "uv run ruff check ."
+format = "uv run ruff format --check ."
+types = "uv run pyright ."
+test = "uv run pytest --cov --cov-report=term-missing:skip-covered"
+security = "uv run bandit -q -r src -x src/rumbo/templates -s B404,B603,B607"
+security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
+audit = "uv run pip-audit --skip-editable"
+sensor = "uv run python scripts/check_tests_not_weakened.py --base {base}"
+
+
+
+
+[tool.coverage.run]
+source = ["src/rumbo"]
+branch = true
+
+[tool.bandit]
+# asserts in evals/ and tests/ are intended (B101); ruff S101 still guards src/.
+skips = ["B101"]

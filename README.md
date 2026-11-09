@@ -109,15 +109,23 @@ rumbo init --yes --name "XM Agent" --package xm_agent \
 |---|---|
 | `--kind` | `service` (default: HTTP skeleton, `infra/`, runbook, SLOs), `library` or `cli` (CHANGELOG, release workflow with Trusted Publishing, CI matrix; a cli also gets `[project.scripts]`), `data` (`evals/` with deterministic graders, `infra/`, runbook) |
 | `--layout` / `--layers` | `hexagonal` (default for a service: `domain/app/adapters/api` with import contracts), `flat` (default otherwise: no imposed packages, no import-linter), `layered` with `--layers outer,...,inner` (contracts generated from your list; the innermost layer is pure) |
-| `--llm` / `--no-llm` | LLM products get `evals/`, `prompts/`, the offline guard, budget and telemetry, and the provider SDK (the LLM skeleton forces the hexagonal layout) |
+| `--llm` / `--no-llm` | LLM products get `evals/`, `prompts/`, the offline guard, budget and telemetry, and the provider SDK; the skeleton is async-first (an `async` `Completion` port and `answer`, the request id in a context variable) and forces the hexagonal layout |
 | `--provider` | `anthropic`, `openai`, `google`, `mistral`, `claude-code` (the Claude Code CLI with your own login: no API key anywhere), `other` (with `--sdk-package`, `--sdk-module`, `--sdk-env-key`) |
 | `--rigor` | `prototype`, `mvp`, `production` (scales the check, the dev dependencies, CI, nightly, Dependabot and the gates; `rumbo promote` moves up) |
 | `--no-install` | write files only; skip `uv add` and pre-commit |
+| `--adopt` | existing project: detect package, kind, layout and tests directory; harness only (no skeleton); strict checks on changed files (`{changed}`), `--full` for the whole tree |
 | `--force` | overwrite existing files (keeps `.bak` copies). `pyproject.toml` and `.gitignore` are always merged, never replaced |
 
-In an existing project nothing is overwritten by default: the missing `[tool.*]` sections are
-merged into `pyproject.toml`, missing lines into `.gitignore`, and everything skipped is
-reported. Two things only you can do: replace `@your-handle` in
+In an existing project use `rumbo init --adopt`: it detects the package (from `[project].name`
+or the single top-level package), the kind (`[project.scripts]` → cli, a web framework
+dependency → service, else library), the layout and the tests directory (`tests` or `test`),
+writes the harness without the `src/` and tests skeleton, keeps an existing CI workflow and
+prints the two steps to add, and writes `lint`, `format` and `types` with `{changed}` so the
+strict tools run on the files a change touches; `uv run python scripts/rumbo_check.py --full`
+(or `rumbo check --full`) measures the whole tree and the nightly runs it. Nothing is
+overwritten: the missing `[tool.*]` sections are merged into `pyproject.toml`, missing lines
+into `.gitignore`, and everything skipped is reported. The adoption commit touches protected
+files, so you make it yourself. Two more things only you can do: replace `@your-handle` in
 `.github/CODEOWNERS` and the contact in `SECURITY.md`.
 
 Permanent install: `uv tool install git+https://github.com/padillacm/RUMBO`. Pin a release tag:
@@ -183,7 +191,8 @@ In a generated project, `uv run python scripts/rumbo_check.py` (or `rumbo check`
 harness, offline, in the order of the `[tool.rumbo.checks]` table in `pyproject.toml` (`lint`,
 `format`, `types`, `test`, `arch`, `security`, `security-scripts`, `audit`, `evals`, `sensor`);
 name steps to run a subset (`... rumbo_check.py lint types`), add `--brief` so only the failing
-tail reaches the agent (full log in `.rumbo-check.log`). Exit codes: 0 green, 1 a verification
+tail reaches the agent (full log in `.rumbo-check.log`), `--full` to expand `{changed}` to the
+whole tree in an adopted project. Exit codes: 0 green, 1 a verification
 failed, 3 the environment is broken. The `Makefile` keeps optional one-line aliases (`make check`,
 `make check-brief`, `make lint`, `make types`, `make test`, `make arch`, `make security`,
 `make sensor`, `make evals`) and the targets `make fmt`, `make review`, `make evals-live`,
@@ -209,7 +218,8 @@ when there is one and `uvx` otherwise (`RUMBO=... make review` overrides it); `B
   approves it (`[tests-change-approved]` in a human-authored commit, or the PR label).
 - `evals/` (LLM products): JSONL datasets, deterministic graders (numeric with tolerance,
   field equality, tool arguments, abstention), an LLM judge that counts only after calibration
-  against human labels (`evals/calibration/`), and `run_evals.py` with pass@1 and pass^k,
+  against human labels (`evals/calibration/`), and `run_evals.py` with pass@1 and pass^k and
+  bounded concurrency (`--concurrency N`; sync and async entries alike),
   offline unless `--live`.
 - Phase O wiring (LLM products): `app/budget.py` (per-request token, cost and time limits from
   `RUMBO_BUDGET_*`; the overrun becomes an abstention) and `app/telemetry.py` (spans with

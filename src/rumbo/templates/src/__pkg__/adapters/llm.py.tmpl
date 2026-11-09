@@ -1,4 +1,4 @@
-"""LLM adapter factory. Implements the `Completion` port from app/ports.py."""
+"""LLM adapter factory. Implements the `Completion` port from app/ports.py (async, ADR-0012)."""
 
 from __future__ import annotations
 
@@ -16,9 +16,13 @@ from {{package}}.app.ports import Completion, require_live
 
 
 def default_completion() -> Completion:
-    """Wire the {{provider}} SDK here (the SDK is forbidden inside domain/)."""
+    """Wire the {{provider}} SDK here (the SDK is forbidden inside domain/).
 
-    def complete(prompt: str, *, max_tokens: int = 1024) -> str:
+    Use the SDK's async client and `await` its call; pass `meter.remaining_seconds` as the
+    timeout so one call cannot overrun the request's budget (see app/budget.py).
+    """
+
+    async def complete(prompt: str, *, max_tokens: int = 1024) -> str:
         require_live("{{provider}}")
         raise NotImplementedError("wire the {{provider}} SDK in adapters/llm.py")
 
