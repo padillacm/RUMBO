@@ -623,3 +623,89 @@ def test_pre_tool_decides_within_the_latency_budget(tmp_path: Path) -> None:
     samples.sort()
     p95 = samples[int(len(samples) * 0.95) - 1]
     assert p95 < 0.1, f"p95 of four PreToolUse decisions took {p95 * 1000:.1f} ms"
+
+
+# ---------------------------------------------------------------- signed documents (ADR-0017)
+def _commit_documents(repo: Path) -> None:
+    """A signed spec, a signed ADR, a spec still under the mark and both 0000 templates."""
+    marked = f"{guard.TEMPLATE_MARK} -->\n# Draft\n"
+    for rel, text in {
+        "specs/0001-query.md": "# F-0001: Query\n- R1: The system shall answer.\n",
+        "specs/0002-draft.md": marked,
+        "specs/0000-template.md": marked,
+        "docs/adr/0001-storage.md": "# ADR-0001: Storage\nStatus: accepted\n",
+        "docs/adr/0000-template.md": marked,
+    }.items():
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs: the human signs a spec and an ADR")
+
+
+# Covers F-0001.R14 and F-0001.R15 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_editing_a_signed_spec_or_adr_is_blocked_and_drafting_is_not(repo: Path) -> None:
+    _commit_documents(repo)
+    for rel in ("specs/0001-query.md", "docs/adr/0001-storage.md"):
+        reason = guard.check_edit("Edit", _edit(rel), repo) or ""
+        assert rel in reason and "signed by the human" in reason and "supersedes" in reason
+        assert guard.check_edit("Write", {"file_path": rel, "content": "x"}, repo)
+    # Drafting stays free: a document under the mark, a new one, and the 0000 templates.
+    for rel in (
+        "specs/0002-draft.md",
+        "specs/0003-new.md",
+        "docs/adr/0002-new.md",
+        "specs/0000-template.md",
+        "docs/adr/0000-template.md",
+        "docs/brief.md",
+    ):
+        assert guard.check_edit("Edit", _edit(rel), repo) is None, rel
+
+
+# Covers F-0001.R13 and F-0001.R14 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_post_bash_reports_a_removed_mark_and_a_changed_signed_document(repo: Path) -> None:
+    _commit_documents(repo)
+    assert guard.check_post_bash(repo) is None
+    # A new document and an edit under the mark are not reported.
+    (repo / "specs" / "0003-new.md").write_text("# New\n", encoding="utf-8")
+    (repo / "specs" / "0002-draft.md").write_text(
+        f"{guard.TEMPLATE_MARK} -->\n# Draft\nmore\n", encoding="utf-8"
+    )
+    assert guard.check_post_bash(repo) is None
+    # `sed -i 1d`: the mark that was in HEAD is gone from the working tree.
+    (repo / "docs" / "brief.md").write_text("# Brief\n", encoding="utf-8")
+    reason = guard.check_post_bash(repo) or ""
+    assert "docs/brief.md" in reason and "template mark" in reason
+    assert "specs/0002-draft.md" not in reason
+    _git(repo, "checkout", "--", "docs/brief.md")
+    # A signed spec rewritten and a signed ADR deleted through the shell.
+    (repo / "specs" / "0001-query.md").write_text("# F-0001: Query\n", encoding="utf-8")
+    (repo / "docs" / "adr" / "0001-storage.md").unlink()
+    reason = guard.check_post_bash(repo) or ""
+    assert "specs/0001-query.md" in reason and "docs/adr/0001-storage.md" in reason
+    assert "signed" in reason
+    # Stop refuses for the same reason before running the check.
+    code, message = guard.check_stop({}, repo)
+    assert code == guard.BLOCK and "signed" in message
+
+
+# Covers F-0001.R14 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_pre_commit_refuses_a_staged_change_to_a_signed_document(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _commit_documents(repo)
+    monkeypatch.setenv("GEMINI_CLI", "1")
+    (repo / "specs" / "0003-new.md").write_text("# New\n", encoding="utf-8")
+    (repo / "specs" / "0002-draft.md").write_text(
+        f"{guard.TEMPLATE_MARK} -->\n# Draft\nmore\n", encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    assert guard.check_pre_commit(repo) is None  # drafting is free
+    (repo / "docs" / "adr" / "0001-storage.md").write_text("# rewritten\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    reason = guard.check_pre_commit(repo) or ""
+    assert "docs/adr/0001-storage.md" in reason and "signed" in reason
+    # The declared human edits a signed document by hand and commits it.
+    monkeypatch.delenv("GEMINI_CLI")
+    _git(repo, "config", "rumbo.human", "true")
+    assert guard.check_pre_commit(repo) is None
