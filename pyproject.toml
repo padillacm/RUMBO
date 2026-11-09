@@ -1,6 +1,6 @@
 [project]
 name = "rumbo"
-version = "0.3.0"
+version = "0.4.0"
 description = "RUMBO: an end-to-end framework for building software with AI coding agents (ANCLA at its core)."
 readme = "README.md"
 license = "MIT"
@@ -76,7 +76,7 @@ dev = [
 # --- Added by rumbo init ---
 [tool.rumbo]
 # RUMBO harness configuration, read by `rumbo gate`, `rumbo doctor` and `rumbo update`.
-version = "0.3.0"
+version = "0.4.0"
 name = "rumbo"
 package = "rumbo"
 # ADR-0010: what the project is (service, library, cli, data) and how its package is organised
