@@ -70,7 +70,7 @@ Do not continue without answers. Use `<pkg>` to refer to the package from here o
 If `uv` is available, mount the whole harness (A1–A7) with one command, using the A0 answers:
 
 ```bash
-uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
+uvx rumbo init --yes \
   --name "<project>" --package <pkg> --kind service|library|cli|data --rigor <rigor> \
   [--llm --provider anthropic|openai|google|mistral|claude-code | --no-llm] [--case "<case>"] \
   [--layout hexagonal|layered|flat [--layers outer,...,inner]] \

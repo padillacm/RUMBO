@@ -6,7 +6,7 @@
 .PHONY: check check-brief test lint types arch security evals evals-live mutation sensor sbom hooks fmt review rumbo
 
 # A locally installed `rumbo` is used when present; otherwise uvx fetches it (needs network).
-RUMBO ?= $(shell command -v rumbo >/dev/null 2>&1 && echo rumbo || echo "uvx --from git+https://github.com/padillacm/RUMBO rumbo")
+RUMBO ?= $(shell command -v rumbo >/dev/null 2>&1 && echo rumbo || echo "uvx rumbo")
 # Base for the review: origin/main when it exists, else main.
 BASE ?= $(shell git rev-parse --verify -q origin/main >/dev/null 2>&1 && echo origin/main || echo main)
 

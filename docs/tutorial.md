@@ -8,7 +8,7 @@ Python project. Times are approximate.
 
 ```bash
 mkdir price-agent && cd price-agent && git init -b main
-uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
+uvx rumbo init --yes \
   --name "Price Agent" --package price_agent --llm --provider claude-code --rigor mvp \
   --case "answers questions about daily spot prices"
 uv run python scripts/rumbo_check.py   # green, offline

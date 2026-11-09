@@ -4,7 +4,7 @@ RUMBO's pilot case, end to end. Recommended start:
 
 ```bash
 mkdir xm-agent && cd xm-agent && git init
-uvx --from git+https://github.com/padillacm/RUMBO rumbo init --yes \
+uvx rumbo init --yes \
   --name "XM Agent" --package xm_agent --llm --provider claude-code --rigor mvp \
   --case "Conversational agent over the Colombian electricity market data published by XM"
 make check && git add -A && git commit -m "chore: initial RUMBO harness"
