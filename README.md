@@ -131,7 +131,7 @@ files, so you make it yourself. Two more things only you can do: replace `@your-
 `.github/CODEOWNERS` and the contact in `SECURITY.md`.
 
 Permanent install: `uv tool install git+https://github.com/padillacm/RUMBO`. Pin a release tag:
-`…/RUMBO@v0.3.0`. Inside a generated project the agent calls it directly
+`…/RUMBO@v0.4.0`. Inside a generated project the agent calls it directly
 (`rumbo gate G4`, `rumbo trace`, `rumbo tour origin/main --out docs/reviews/`); nothing needs `make`.
 
 ### What happens right after `rumbo init`

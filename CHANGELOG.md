@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-09
+
+The six fronts of an external audit of v0.3.0, in seventeen decisions (ADR-0006 to ADR-0017),
+and RUMBO running its own harness.
+
 ### Added
 - ADR-0006: `scripts/rumbo_check.py` / `rumbo check`, a standard-library verification runner
   driven by an ordered `[tool.rumbo.checks]` table in `pyproject.toml`, with `--brief`,
@@ -19,7 +24,8 @@ All notable changes to this project are documented here. The format follows
 - ADR-0008: the guard also runs as git `pre-commit` and `commit-msg` hooks (installed by
   `rumbo init` through pre-commit), so any coding agent is bound by the hard rules at commit
   time. The actor comes from `[tool.rumbo].agent_env` markers or `git config rumbo.human`;
-  `rumbo doctor` warns when the clone is not declared.
+  `rumbo doctor` warns when the clone is not declared. The root commit of a repository is
+  exempt, so an agent can make the first commit of a generated project.
 - ADR-0009: a fix lane in ANCLA. `/rumbo-fix` (red regression test, minimal change, one
   approval) and three extra `rumbo gate G4` checks when every commit is non-`feat`:
   regression test added, diff ≤ 150 lines, no new runtime dependency.
@@ -59,12 +65,26 @@ All notable changes to this project are documented here. The format follows
 - ADR-0016: the eval runner fingerprints the prompts, the judge and the entry (sha256) in
   every report, records them in `evals/fingerprint.json` on a live run, and warns offline
   when fixtures or calibration may be stale; the warning never fails the step.
+- RUMBO adopts its own harness (`--adopt --kind cli --layout flat --rigor production`): the
+  runner, the guard as Claude Code and git hooks, the sensor and the gates run on this
+  repository; `tests/test_self_adoption.py` keeps `scripts/` identical to `src/rumbo/sensors/`.
+  Its own method documents are signed: brief, PRD, spec F-0001 (fifteen requirements traced
+  to tests), C4 and threat model; the first interview is recorded.
 
 ### Changed
 - `make check`, `make check-brief` and the other verification targets are optional one-line
   aliases of the runner; AGENTS.md, README, hooks, gates and CI call the runner directly.
 - `domain/` may import pure names (`PurePath`, `StringIO`); the architecture test now also
   forbids the builtin `open()`.
+- The repository pins Python 3.13 for development (`.python-version`); the CLI still supports
+  3.11+.
+
+### Fixed
+- The CLI reconfigures stdout and stderr to UTF-8, so ✅/❌ no longer crash on a Windows
+  console with a legacy code page.
+- Templates checked out with CRLF on Windows no longer leak CRLF into generated files.
+- The generated example integration test accepts the module's `SystemExit(0)`.
+- `scripts/e2e.sh` used a `git revert` flag that does not exist.
 
 ## [0.3.0] - 2026-11-01
 

@@ -11,6 +11,14 @@ from rumbo.scaffold import Config, plan_files
 from rumbo.sensors import guard
 
 
+@pytest.fixture(autouse=True)
+def _outside_any_claude_code_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`main` prefers CLAUDE_PROJECT_DIR over the payload's cwd (guard.py). When the suite
+    itself runs inside a Claude Code hook that variable points at this repository, and a
+    tmp_path becomes "outside the project". Each test starts without it."""
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+
 def _edit(path: str, old: str = "a", new: str = "b") -> dict[str, object]:
     return {"file_path": path, "old_string": old, "new_string": new}
 
