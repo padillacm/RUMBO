@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # F-0001: The agent cannot cheat its way to green
 Story: As a developer working with a coding agent I want the hard rules of AGENTS.md enforced by
 hooks, not by prose, so that the agent cannot weaken the harness, sign for me or finish on red,
@@ -6,7 +5,7 @@ whichever editor or CLI it runs in.
 
 Scope: `scripts/rumbo_guard.py` (canonical source `src/rumbo/sensors/guard.py`) as Claude Code
 hooks (`PreToolUse`, `PostToolUse`, `Stop`) and as git hooks (`pre-commit`, `commit-msg`).
-Decisions: ADR-0005, ADR-0006 (consumers), ADR-0008.
+Decisions: ADR-0005, ADR-0006 (consumers), ADR-0008, ADR-0017.
 
 ## Requirements (EARS)
 <!-- Ubiquitous: The system shall… · Event: When…, the system shall… · State: While…, the system shall…
@@ -22,7 +21,10 @@ Decisions: ADR-0005, ADR-0006 (consumers), ADR-0008.
 - R9 (ubiquitous): The guard shall decide the actor of a commit as an agent when an environment marker of `[tool.rumbo].agent_env` is set, as the human when `git config rumbo.human` is `true`, and as an agent otherwise.
 - R10 (ubiquitous): The guard shall never block the human: ordinary files and ordinary commands pass, a commit by the declared human passes, and a run with nothing staged passes silently.
 - R11 (ubiquitous): The guard shall not crash when git is missing or the repository has no commit; it shall let the action through.
-- R12 (ubiquitous): The guard shall decide a `PreToolUse` event in under 100 ms (p95), without network, subprocesses or test runs.
+- R12 (ubiquitous): The guard shall decide a `PreToolUse` event in under 100 ms (p95), without network or test runs, and without a subprocess except one `git show` when the target is a numbered ADR or spec.
+- R13 (event): When a shell command has finished and a document that carried the template mark in the last commit no longer carries it, the guard shall report the file and ask for the first line to be restored.
+- R14 (unwanted): If the agent edits, rewrites or deletes a numbered ADR or spec that is committed without the template mark (signed by the human), through an edit tool, a shell command or a commit, then the guard shall block or report it and tell the agent to propose the change or write a document that supersedes it.
+- R15 (ubiquitous): The guard shall let the agent create new ADRs and specs and edit those that still carry the template mark, and shall never treat the `0000-` templates as signed.
 
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
@@ -43,6 +45,9 @@ All in `tests/test_guard.py`; each test carries its requirement id in a comment.
 | R10 | `test_ordinary_files_and_files_outside_the_project_are_allowed`, `test_ordinary_commands_are_allowed`, `test_pre_commit_passes_silently_with_nothing_staged` |
 | R11 | `test_git_missing_never_crashes`, `test_git_hooks_without_git_never_crash` |
 | R12 | `test_pre_tool_decides_within_the_latency_budget` |
+| R13 | `test_post_bash_reports_a_removed_mark_and_a_changed_signed_document` |
+| R14 | `test_editing_a_signed_spec_or_adr_is_blocked_and_drafting_is_not`, `test_post_bash_reports_a_removed_mark_and_a_changed_signed_document`, `test_pre_commit_refuses_a_staged_change_to_a_signed_document` |
+| R15 | `test_editing_a_signed_spec_or_adr_is_blocked_and_drafting_is_not` |
 
 End to end: `scripts/e2e.sh` exercises the three Claude Code hook paths and the two git hooks in
 a generated project (`CLAUDECODE=1 git commit` of a protected file refused, the human's passes).
@@ -69,13 +74,9 @@ Live (pre-edit) hooks for agents other than Claude Code (Cursor's protocol is in
 stopping an agent that unsets its own marker outside Claude Code (CI and CODEOWNERS are the
 binding layer); protecting files the project adds to its own harness (the list is fixed).
 
-## Open questions (found while interrogating the spec)
-- A shell command that strips the template mark from a document (`sed -i '1d' docs/…`) is not
-  caught before it runs: only the git hook refuses it at commit. Should `PostToolUse` also
-  compare marks against `HEAD`?
-- R9 treats an undeclared human as an agent (fail-closed). On a fresh clone the human's first
-  commit of a protected file is refused with the hint; is that the intended first experience, or
-  should `rumbo doctor` be the only place that asks?
-- The protected list does not include the tests directory by design (the sensor guards it), but
-  nor `specs/` or `docs/adr/`: an agent can rewrite an accepted ADR. Is that a rule for the guard
-  or for review?
+## Questions resolved while interrogating the spec
+- A shell command that strips the template mark is now reported after the command, not only
+  refused at the commit (R13, ADR-0017).
+- An undeclared human on a fresh clone is treated as an agent, on purpose (R9, fail-closed):
+  one `git config rumbo.human true` per clone; the README says so next to the clone steps.
+- A signed ADR or spec is read-only for the agent; drafting stays free (R14, R15, ADR-0017).
