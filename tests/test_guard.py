@@ -376,6 +376,9 @@ def test_generated_project_wires_the_guard() -> None:
     assert "Bash(uv run python scripts/rumbo_check.py *)" in settings["permissions"]["allow"]
     assert "Bash(rumbo check *)" in settings["permissions"]["allow"]
     assert "Edit(./.claude/**)" in settings["permissions"]["deny"]
+    # The threat model's lethal-trifecta legs: no secrets read, no ad-hoc network calls.
+    for rule in ("Read(./.env)", "Bash(curl *)", "Bash(wget *)"):
+        assert rule in settings["permissions"]["deny"], rule
 
 
 # ------------------------------------------------------------- git hooks (ADR-0008)
