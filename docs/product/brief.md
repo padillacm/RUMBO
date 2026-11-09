@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # Brief
 
 **Problem:** A developer or a team of one to three people building Python software with a coding
