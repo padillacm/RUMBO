@@ -112,6 +112,8 @@ rumbo init --yes --name "XM Agent" --package xm_agent \
 | `--llm` / `--no-llm` | LLM products get `evals/`, `prompts/`, the offline guard, budget and telemetry, and the provider SDK; the skeleton is async-first (an `async` `Completion` port and `answer`, the request id in a context variable) and forces the hexagonal layout |
 | `--provider` | `anthropic`, `openai`, `google`, `mistral`, `claude-code` (the Claude Code CLI with your own login: no API key anywhere), `other` (with `--sdk-package`, `--sdk-module`, `--sdk-env-key`) |
 | `--rigor` | `prototype`, `mvp`, `production` (scales the check, the dev dependencies, CI, nightly, Dependabot and the gates; `rumbo promote` moves up) |
+| `--types` | `pyright` (default) or `mypy`: the dev tool, the `types` step and the `[tool.pyright]`/`[tool.mypy]` section follow it; the inner layer is strict under both (`ty` when it leaves preview) |
+| `--python` | minimum Python the project promises (`3.11` by default, up to the newest rumbo supports); feeds `requires-python`, ruff's `target-version`, the CI matrix, the Dockerfile and `.python-version` |
 | `--no-install` | write files only; skip `uv add` and pre-commit |
 | `--adopt` | existing project: detect package, kind, layout and tests directory; harness only (no skeleton); strict checks on changed files (`{changed}`), `--full` for the whole tree |
 | `--force` | overwrite existing files (keeps `.bak` copies). `pyproject.toml` and `.gitignore` are always merged, never replaced |
@@ -176,7 +178,7 @@ rumbo new adr|spec|postmortem "T"    # docs/adr/0001-t.md · specs/0001-t.md · 
 rumbo decision "title" --why "..." [--who human|ci]   # append to docs/decisions.md
 rumbo gate G1|G2|G3|G4|G5 [--no-run] # automatic checks (by rigor) + the human checklist; exit 1 on failure
 rumbo check-tests [--base REF] [--strict]             # anti-cheat sensor (tests not weakened)
-rumbo verify-dep NAME...             # exists on PyPI, age, repository, typosquatting, OSV vulnerabilities
+rumbo verify-dep NAME... [--index URL]                # existence and versions on your index (or PyPI); age, repository, typosquatting, OSV on PyPI
 rumbo tour [BASE] [--head H] [--out FILE]             # guided, pedagogical review of a git range
 rumbo trace [--strict]               # requirement (F-NNNN.Rk) → test/eval table; G4 reads it
 rumbo eval add SUITE --input '{...}' --expected '{...}' --grader NAME [--id --tag --source --note]
@@ -219,7 +221,10 @@ when there is one and `uvx` otherwise (`RUMBO=... make review` overrides it); `B
 - `evals/` (LLM products): JSONL datasets, deterministic graders (numeric with tolerance,
   field equality, tool arguments, abstention), an LLM judge that counts only after calibration
   against human labels (`evals/calibration/`), and `run_evals.py` with pass@1 and pass^k and
-  bounded concurrency (`--concurrency N`; sync and async entries alike),
+  bounded concurrency (`--concurrency N`; sync and async entries alike) and a fingerprint of
+  the prompts and the judge in every report: a live run records it in
+  `evals/fingerprint.json`, and an offline run warns when fixtures or calibration may be
+  stale (ADR-0016),
   offline unless `--live`.
 - Phase O wiring (LLM products): `app/budget.py` (per-request token, cost and time limits from
   `RUMBO_BUDGET_*`; the overrun becomes an abstention) and `app/telemetry.py` (spans with
@@ -291,8 +296,11 @@ is in `RUMBO.md`, Part E "Scaling the rigor".
   `claude-code` provider no API key exists on any machine.
 - Secrets: gitleaks over the full history in CI (the pre-commit hook only sees staged files),
   `.env` ignored, `detect-private-key`.
-- Supply chain: `rumbo verify-dep` before adding a package (existence, age, repository,
-  typosquatting against popular names, OSV), `pip-audit` and `bandit` in the check,
+- Supply chain: `rumbo verify-dep` before adding a package (existence and versions on the
+  index the project installs from, `--index` or `UV_INDEX_URL`/`UV_DEFAULT_INDEX`/
+  `PIP_INDEX_URL`, with credentials never printed; age, repository, typosquatting against
+  popular names and OSV measured against PyPI and labelled so), `pip-audit` and `bandit`
+  in the check,
   lockfile, Dependabot with cooldown, actions pinned by SHA, SBOM in production.
 - LLM products: a threat model template with the lethal trifecta and OWASP LLM 2025 /
   Agentic 2026, typed least-privilege tools, schema validation of everything the model

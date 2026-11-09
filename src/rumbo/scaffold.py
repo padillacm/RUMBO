@@ -16,13 +16,18 @@ from pathlib import Path
 
 from rumbo import __version__
 from rumbo.project import (
+    DEFAULT_PYTHON,
+    DEFAULT_TYPE_CHECKER,
     HEXAGONAL_LAYERS,
     KINDS,
     LAYOUTS,
     RIGOR_LEVELS,
+    SUPPORTED_PYTHONS,
+    TYPE_CHECKERS,
     Project,
     resolve_layout,
     validate_axes,
+    validate_python,
 )
 from rumbo.render import render
 
@@ -56,7 +61,8 @@ OTHER_PROVIDER = "other"
 
 # ADR-0011: the development tools scale with rigor; `import-linter` with the layout. `uv add`
 # resolves the versions, nothing is pinned here. `pre-commit` carries the guard's git hooks.
-BASE_DEV_DEPS = ["ruff", "pyright", "pytest", "hypothesis", "pre-commit"]
+# ADR-0015: the type-checker slot holds `pyright` or `mypy` (`Config.types`).
+BASE_DEV_DEPS = ["ruff", DEFAULT_TYPE_CHECKER, "pytest", "hypothesis", "pre-commit"]
 ARCH_DEV_DEPS = ["import-linter"]
 MVP_DEV_DEPS = ["pytest-cov", "bandit", "pip-audit"]
 PRODUCTION_DEV_DEPS = ["mutmut"]
@@ -215,9 +221,16 @@ class Config:
     # changed files); `tests_dir` is the detected tests directory ("tests" unless adopted).
     adopted: bool = False
     tests_dir: str = "tests"
+    # ADR-0014: the minimum Python the project promises; every template that names a
+    # version reads it (requires-python, ruff, the CI matrix, the Dockerfile,
+    # .python-version).
+    python: str = DEFAULT_PYTHON
+    # ADR-0015: the type checker (`pyright` or `mypy`): dependency, `types` step, config.
+    types: str = DEFAULT_TYPE_CHECKER
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
+        validate_python(self.python)
         if not valid_name(self.name):
             raise ValueError(
                 f"invalid project name {self.name!r}: no quotes, backslashes or control characters"
@@ -228,6 +241,8 @@ class Config:
             raise ValueError(f"invalid tests directory (a plain folder name): {self.tests_dir!r}")
         if self.rigor not in RIGOR_LEVELS:
             raise ValueError(f"invalid rigor {self.rigor!r}; use one of {RIGOR_LEVELS}")
+        if self.types not in TYPE_CHECKERS:
+            raise ValueError(f"invalid type checker {self.types!r}; use one of {TYPE_CHECKERS}")
         if self.kind not in KINDS:
             raise ValueError(f"invalid kind {self.kind!r}; use one of {KINDS}")
         if self.layout and self.layout not in LAYOUTS:
@@ -282,6 +297,8 @@ class Config:
             layers=project.layers,
             adopted=project.adopted,
             tests_dir=project.tests_dir,
+            python=project.python,
+            types=project.types,
         )
 
     # Same semantics as the Project properties (ADR-0010).
@@ -307,6 +324,11 @@ class Config:
         """The pure layer (strict types, mutation target, purity contract); '' when flat."""
         names = self.layer_names
         return names[-1] if names else ""
+
+    @property
+    def python_matrix(self) -> tuple[str, ...]:
+        """The supported Pythons from the minimum upwards: what a package's CI runs on."""
+        return SUPPORTED_PYTHONS[SUPPORTED_PYTHONS.index(self.python) :]
 
     def domain_forbidden_modules(self) -> list[str]:
         modules = ["httpx", "requests", "fastapi"]
@@ -355,6 +377,14 @@ class Config:
             "adopted": self.adopted,
             "tests_dir": self.tests_dir,
             "custom_tests_dir": self.tests_dir != "tests",
+            # ADR-0014: one Python setting feeding every place that names a version.
+            "python": self.python,
+            "python_nodot": self.python.replace(".", ""),
+            "python_matrix": json.dumps(list(self.python_matrix)),
+            # ADR-0015: the type checker, as a name and as flags.
+            "types": self.types,
+            "pyright": self.types == "pyright",
+            "mypy": self.types == "mypy",
             "case": self.case or "(no concrete case yet)",
             "date": dt.date.today().isoformat(),
             "rumbo_version": __version__,
@@ -498,7 +528,7 @@ def _layer_module(cfg: Config, layer: str) -> str:
     names = list(cfg.layers)
     below = names[names.index(layer) + 1 :]
     if not below:
-        return f'"""Layer {layer}: the innermost one, kept pure (no I/O; pyright strict)."""\n'
+        return f'"""Layer {layer}: the innermost one, kept pure (no I/O; strict types)."""\n'
     return f'"""Layer {layer}: may import only {", ".join(below)}."""\n'
 
 
@@ -671,6 +701,7 @@ def update(project: Project, dest: Path) -> Report:
     _add_checks_table(dest / "pyproject.toml", template, report)
     _add_missing_steps(dest / "pyproject.toml", template, report)
     _add_axes_keys(dest / "pyproject.toml", cfg, report)
+    _add_python_key(dest / "pyproject.toml", cfg, report)
     _bump_harness_version(dest / "pyproject.toml")
     missing = missing_dev_dependencies(cfg, (dest / "pyproject.toml").read_text(encoding="utf-8"))
     if missing:
@@ -783,10 +814,31 @@ def set_rigor(text: str, rigor: str) -> str:
 
 
 def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
-    """Writes the `kind`, `layout` (and `layers`) keys a project generated before ADR-0010 lacks.
+    """Writes the `kind`, `layout` (and `layers`) keys a project generated before ADR-0010
+    lacks, and the `types` key of ADR-0015.
 
-    `Project.load` inferred them (service, hexagonal); writing them makes the inference explicit.
-    Keys that exist are never touched.
+    `Project.load` inferred them (service, hexagonal, pyright); writing them makes the
+    inference explicit. Keys that exist are never touched.
+    """
+    wanted = {"kind": f'"{cfg.kind}"', "layout": f'"{cfg.layout}"'}
+    if cfg.layout == "layered":
+        wanted["layers"] = str(cfg.context()["layers_toml_list"])
+    wanted["types"] = f'"{cfg.types}"'  # ADR-0015
+    _add_rumbo_keys(pyproject, wanted, report)
+
+
+def _add_python_key(pyproject: Path, cfg: Config, report: Report) -> None:
+    """Writes the `python` key a project generated before ADR-0014 lacks.
+
+    `Project.load` defaulted it to 3.11; writing it makes the promise explicit.
+    """
+    _add_rumbo_keys(pyproject, {"python": f'"{cfg.python}"'}, report)
+
+
+def _add_rumbo_keys(pyproject: Path, wanted: dict[str, str], report: Report) -> None:
+    """Appends the `[tool.rumbo]` keys of `wanted` (name -> TOML value) that are missing.
+
+    Keys that exist are never touched; nothing is written when none is missing.
     """
     current = pyproject.read_text(encoding="utf-8")
     try:
@@ -796,9 +848,6 @@ def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
     header = _RUMBO_HEADER.search(current)
     if not isinstance(rumbo, dict) or header is None:
         return
-    wanted = {"kind": f'"{cfg.kind}"', "layout": f'"{cfg.layout}"'}
-    if cfg.layout == "layered":
-        wanted["layers"] = str(cfg.context()["layers_toml_list"])
     missing = [key for key in wanted if key not in rumbo]
     if not missing:
         return
@@ -865,12 +914,13 @@ def _run(cmd: list[str], cwd: Path, report: Report) -> int:
 
 
 def dev_dependencies(cfg: Config) -> list[str]:
-    """The development tools by rigor and layout (ADR-0011), in a stable order.
+    """The development tools by rigor, layout and type checker, in a stable order.
 
-    Every project gets the base; `import-linter` when the layout has layers to contract;
-    coverage, bandit and pip-audit from `mvp`; mutation testing at `production`.
+    Every project gets the base with its type checker (ADR-0015: `pyright` or `mypy`);
+    `import-linter` when the layout has layers to contract; coverage, bandit and pip-audit
+    from `mvp`; mutation testing at `production` (ADR-0011).
     """
-    deps = [*BASE_DEV_DEPS]
+    deps = [cfg.types if dep == DEFAULT_TYPE_CHECKER else dep for dep in BASE_DEV_DEPS]
     if cfg.arch:
         deps += ARCH_DEV_DEPS
     if cfg.rigor != "prototype":

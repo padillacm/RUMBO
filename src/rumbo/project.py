@@ -15,6 +15,14 @@ KINDS = ("service", "library", "cli", "data")
 LAYOUTS = ("hexagonal", "layered", "flat")
 DEFAULT_LAYOUT = {"service": "hexagonal", "library": "flat", "cli": "flat", "data": "flat"}
 HEXAGONAL_LAYERS = ("api", "adapters", "app", "domain")  # outermost first
+# ADR-0014: the Python versions a project may promise as its minimum
+# ([tool.rumbo].python), oldest first. Bumped on release only: a new entry needs that
+# Python to exist, never a version copied from memory.
+SUPPORTED_PYTHONS = ("3.11", "3.12", "3.13")
+DEFAULT_PYTHON = SUPPORTED_PYTHONS[0]
+# ADR-0015: the type checker is a setting; `ty` joins when it leaves preview.
+TYPE_CHECKERS = ("pyright", "mypy")
+DEFAULT_TYPE_CHECKER = "pyright"
 _LAYER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -45,6 +53,15 @@ def validate_axes(kind: str, layout: str, layers: tuple[str, ...]) -> None:
         raise ValueError(f"layers are only used with layout 'layered', got {layers!r}")
 
 
+def validate_python(python: str) -> None:
+    """Raises ValueError unless `python` is a supported minimum version (ADR-0014)."""
+    if python not in SUPPORTED_PYTHONS:
+        raise ValueError(
+            f"unsupported Python {python!r}; use one of {', '.join(SUPPORTED_PYTHONS)} "
+            "(the list grows with each rumbo release)"
+        )
+
+
 @dataclass(frozen=True)
 class Project:
     root: Path
@@ -63,6 +80,10 @@ class Project:
     # ADR-0013: mounted on an existing project; its tests directory ([tool.rumbo].tests).
     adopted: bool = False
     tests_dir: str = "tests"
+    # ADR-0014: the minimum Python the project promises ([tool.rumbo].python).
+    python: str = DEFAULT_PYTHON
+    # ADR-0015: the type checker ([tool.rumbo].types); older projects use pyright.
+    types: str = DEFAULT_TYPE_CHECKER
 
     @classmethod
     def load(cls, root: Path) -> Project:
@@ -95,6 +116,11 @@ class Project:
             else ()
         )
         validate_axes(kind, layout, layers)
+        python = str(cfg.get("python", DEFAULT_PYTHON))
+        validate_python(python)
+        types = str(cfg.get("types", DEFAULT_TYPE_CHECKER))
+        if types not in TYPE_CHECKERS:
+            raise ValueError(f"[tool.rumbo].types must be one of {TYPE_CHECKERS}, got {types!r}")
         return cls(
             root=root,
             package=str(package),
@@ -111,6 +137,8 @@ class Project:
             harness_version=str(cfg.get("version", "")),
             adopted=bool(cfg.get("adopted", False)),
             tests_dir=str(cfg.get("tests", "tests")) or "tests",
+            python=python,
+            types=types,
         )
 
     def read(self, rel: str) -> str | None:

@@ -9,7 +9,7 @@ rumbo gate G1..G5               automatic checks + human checklist of a gate
 rumbo doctor                    verify the harness is complete and current
 rumbo check [STEP ...]          run the verification steps of [tool.rumbo.checks]
 rumbo check-tests               anti-cheat sensor (tests not weakened)
-rumbo verify-dep NAME           verify a package on PyPI before adding it
+rumbo verify-dep NAME           verify a package on PyPI (or your index) before adding it
 rumbo tour [BASE]               guided, pedagogical review of a git range
 rumbo trace                     requirement → test traceability table
 rumbo eval add SUITE ...        turn a failure into an eval case
@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import contextlib
 import datetime as dt
 import http.client
 import json
+import os
 import re
 import subprocess
 import sys
@@ -31,6 +33,8 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable, Mapping
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +42,18 @@ from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
 from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
-from rumbo.project import KINDS, LAYOUTS, RIGOR_LEVELS, Project, rigor_rank, slug
+from rumbo.project import (
+    DEFAULT_PYTHON,
+    DEFAULT_TYPE_CHECKER,
+    KINDS,
+    LAYOUTS,
+    RIGOR_LEVELS,
+    SUPPORTED_PYTHONS,
+    TYPE_CHECKERS,
+    Project,
+    rigor_rank,
+    slug,
+)
 from rumbo.scaffold import (
     OTHER_PROVIDER,
     PROVIDERS,
@@ -171,6 +186,9 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         layers=layers,
         adopted=detected is not None,
         tests_dir=detected.tests_dir if detected else "tests",
+        python=args.python or DEFAULT_PYTHON,
+        # ADR-0015: the type checker is a flag, never an A0 question.
+        types=getattr(args, "types", None) or DEFAULT_TYPE_CHECKER,
     )
 
 
@@ -183,7 +201,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"\nMounting the RUMBO harness in {dest}")
     print(
         f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
-        f"provider={cfg.provider or '-'} rigor={cfg.rigor}"
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor} python={cfg.python}"
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor} types={cfg.types}"
         + (f" adopted=true tests={cfg.tests_dir}" if cfg.adopted else "")
         + "\n"
     )
@@ -502,6 +521,7 @@ def _levenshtein(a: str, b: str) -> int:
 
 
 def _normalize(name: str) -> str:
+    """PEP 503 normalisation: lowercase, runs of `-`, `_` and `.` collapsed to one dash."""
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
@@ -535,6 +555,156 @@ def osv_vulnerabilities(name: str) -> int | None:
     return len(data.get("vulns", [])) if data else 0
 
 
+# ADR-0014: a private index (Artifactory, CodeArtifact, GitLab...) answers existence and versions;
+# age, repository, typosquatting and OSV are still measured against PyPI and labelled as such.
+INDEX_ENV_VARS = ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "PIP_INDEX_URL")
+SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
+PYPI_LABEL = "(measured against PyPI, not against your index)"
+_RELEASE_RE = re.compile(r"(\d+(?:\.\d+)*)(.*)")
+_SDIST_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip")
+
+
+def resolve_index(flag: str | None, env: Mapping[str, str]) -> str | None:
+    """The private index to verify against: `--index`, else the first set `INDEX_ENV_VARS` entry.
+
+    None when nothing is set or the index is pypi.org itself: today's PyPI-only behaviour.
+    """
+    url = flag or next((env[key] for key in INDEX_ENV_VARS if env.get(key)), None)
+    if not url:
+        return None
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return None if host in ("pypi.org", "www.pypi.org") else url
+
+
+def sanitize_index(url: str) -> str:
+    """`scheme://host[:port]/path` without user info: the only form of an index URL ever printed."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        port = ""
+    return f"{parts.scheme}://{host}{port}{parts.path}"
+
+
+def _redact(text: str, index: str) -> str:
+    """An error message with every raw form of the index URL replaced by the sanitised one."""
+    parts = urllib.parse.urlsplit(index)
+    clean = sanitize_index(index)
+    text = text.replace(index, clean)
+    if parts.netloc:
+        text = text.replace(parts.netloc, urllib.parse.urlsplit(clean).netloc)
+    if parts.password:
+        text = text.replace(parts.password, "***")
+    return text
+
+
+class _Anchors(HTMLParser):
+    """Collects the text of every `<a>` of a PEP 503 project page: the file names."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.names: list[str] = []
+        self._text: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            self._text = ""
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._text is not None:
+            self.names.append(self._text.strip())
+            self._text = None
+
+    def handle_data(self, data: str) -> None:
+        if self._text is not None:
+            self._text += data
+
+
+def _version_from_filename(filename: str) -> str | None:
+    """The version in a wheel (`name-VERSION-py3-none-any.whl`) or sdist (`name-VERSION.tar.gz`)."""
+    if filename.endswith(".whl"):
+        parts = filename[:-4].split("-")
+        return parts[1] if len(parts) >= 5 else None
+    for suffix in _SDIST_SUFFIXES:
+        if filename.endswith(suffix):
+            stem = filename[: -len(suffix)]
+            return stem.rsplit("-", 1)[1] if "-" in stem else None
+    return None
+
+
+def _versions_from_files(filenames: Iterable[str]) -> list[str]:
+    seen: dict[str, None] = {}
+    for filename in filenames:
+        version = _version_from_filename(filename)
+        if version:
+            seen.setdefault(version, None)
+    return list(seen)
+
+
+def _version_key(version: str) -> tuple[tuple[int, ...], bool, str]:
+    """Best-effort ordering: release numbers as ints, finals after pre-releases, then text."""
+    match = _RELEASE_RE.match(version)
+    if not match:
+        return ((), False, version)
+    numbers, rest = match.groups()
+    return (tuple(int(x) for x in numbers.split(".")), rest == "", rest)
+
+
+def latest_version(versions: list[str]) -> str | None:
+    return max(versions, key=_version_key) if versions else None
+
+
+def parse_simple(body: str, content_type: str) -> list[str]:
+    """Versions in a simple-API project page: PEP 691 JSON, else the PEP 503 HTML anchors."""
+    data: Any = None
+    if content_type != "text/html":
+        with contextlib.suppress(ValueError):
+            data = json.loads(body)
+    if isinstance(data, dict):
+        versions = data.get("versions")
+        if isinstance(versions, list) and versions:
+            return [str(v) for v in versions]
+        files = data.get("files") or []
+        return _versions_from_files(
+            str(f.get("filename", "")) for f in files if isinstance(f, dict)
+        )
+    parser = _Anchors()
+    parser.feed(body)
+    return _versions_from_files(parser.names)
+
+
+def index_versions(index: str, name: str) -> list[str] | None:
+    """The versions of `name` on a simple-API index; None when the index answers 404.
+
+    Credentials in the URL travel as a Basic Authorization header, never in the request line,
+    and never reach a message: every error is raised with the URL already sanitised.
+    """
+    parts = urllib.parse.urlsplit(index)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(f"the index URL must be http(s), got {sanitize_index(index)!r}")
+    url = sanitize_index(index).rstrip("/") + "/" + _normalize(name) + "/"
+    headers = {"Accept": f"{SIMPLE_JSON}, text/html;q=0.1"}
+    if parts.username is not None:
+        user = urllib.parse.unquote(parts.username)
+        password = urllib.parse.unquote(parts.password or "")
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        headers["Authorization"] = f"Basic {token}"
+    request = urllib.request.Request(url, headers=headers)  # noqa: S310 - http(s), checked above
+    try:
+        with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310 # nosec B310
+            content_type = str(resp.headers.get_content_type())
+            charset = resp.headers.get_content_charset() or "utf-8"
+            body = resp.read().decode(charset, errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    return parse_simple(body, content_type)
+
+
 NETWORK_ERRORS = (
     urllib.error.URLError,
     TimeoutError,
@@ -558,63 +728,99 @@ def cmd_check(args: argparse.Namespace) -> int:
     return check.main(argv)
 
 
-def cmd_verify_dep(args: argparse.Namespace) -> int:
-    code = 0
-    for name in args.packages:
-        try:
-            data = pypi_info(name)
-        except NETWORK_ERRORS as exc:
-            print(f"❓ {name}: could not query PyPI ({exc}). Verify by hand.")
-            code = max(code, 2)
-            continue
-        if data is None:
+def _lookalikes(name: str) -> list[str]:
+    normalized = _normalize(name)
+    return [p for p in POPULAR_PACKAGES if p != normalized and _levenshtein(normalized, p) <= 2]
+
+
+def _verify_on_index(name: str, index: str) -> int:
+    """Existence and versions on the project's own index (ADR-0014); prints only sanitised URLs."""
+    shown = sanitize_index(index)
+    host = urllib.parse.urlsplit(shown).netloc
+    print(f"📦 {name}")
+    print(f"   index: {shown}")
+    try:
+        versions = index_versions(index, name)
+    except NETWORK_ERRORS as exc:
+        print(f"   ❓ could not query {host} ({_redact(str(exc), index)}). Verify by hand.")
+        return 2
+    if versions is None:
+        print(f"   ❌ exists on {host}: no. Hallucinated name? (slopsquatting)")
+        return 1
+    latest = latest_version(versions)
+    print(f"   exists on {host}: yes")
+    print(f"   versions on {host}: {len(versions)}" + (f" (latest {latest})" if latest else ""))
+    return 0
+
+
+def _verify_on_pypi(name: str, on_index: bool) -> int:
+    """Age, repository, typosquatting and OSV, measured on PyPI; labelled when an index is used."""
+    label = f" {PYPI_LABEL}" if on_index else ""
+    indent = "   " if on_index else ""
+    try:
+        data = pypi_info(name)
+    except NETWORK_ERRORS as exc:
+        print(f"{indent}❓ {name}: could not query PyPI ({exc}). Verify by hand.")
+        return 2
+    warnings: list[str] = []
+    if data is None:
+        if not on_index:
             print(f"❌ {name}: does NOT exist on PyPI. Hallucinated name? (slopsquatting)")
-            code = 1
-            continue
-        info: dict[str, Any] = data.get("info") or {}
-        releases: dict[str, list[dict[str, Any]]] = data.get("releases") or {}
-        canonical = str(info.get("name") or name)
-        dates = [
-            f["upload_time_iso_8601"][:10]
-            for files in releases.values()
-            for f in files
-            if isinstance(f, dict) and f.get("upload_time_iso_8601")
-        ]
-        first = min(dates) if dates else None
-        age = (dt.date.today() - dt.date.fromisoformat(first)).days if first else None
-        urls = info.get("project_urls") or {}
-        repo = next(
-            (u for k, u in urls.items() if re.search(r"source|repo|code|github|home", k, re.I)),
-            info.get("home_page") or "",
-        )
-        print(f"📦 {canonical} {info.get('version', '?')} — {info.get('summary') or ''}")
-        print(f"   first release: {first or '?'} ({age if age is not None else '?'} days ago)")
-        print(f"   repository: {repo or '(not declared)'}  ·  releases: {len(releases)}")
-        warnings: list[str] = []
-        if _normalize(canonical) != _normalize(name):
-            warnings.append(f"the canonical name is {canonical!r}")
-        if age is not None and age < 90:
-            warnings.append("younger than 90 days: review with care")
-        if not repo:
-            warnings.append("declares no repository")
-        lookalikes = [
-            p
-            for p in POPULAR_PACKAGES
-            if p != _normalize(canonical) and _levenshtein(_normalize(canonical), p) <= 2
-        ]
-        if lookalikes:
+            return 1
+        # The index is what the project installs from: absence on PyPI is a fact, not a failure.
+        print(f"   not on PyPI{label}")
+        if lookalikes := _lookalikes(name):
             warnings.append(
                 f"looks like a popular package: {', '.join(lookalikes)} (typosquatting?)"
             )
-        vulns = osv_vulnerabilities(canonical)
-        if vulns:
-            warnings.append(f"{vulns} known vulnerabilities in OSV (check the affected versions)")
-        elif vulns is None:
-            print("   (OSV not reachable: vulnerability check skipped)")
         for w in warnings:
-            print(f"   ⚠️  {w}")
-        if warnings:
-            code = max(code, 1)
+            print(f"   ⚠️  {w}{label}")
+        return 1 if warnings else 0
+    info: dict[str, Any] = data.get("info") or {}
+    releases: dict[str, list[dict[str, Any]]] = data.get("releases") or {}
+    canonical = str(info.get("name") or name)
+    dates = [
+        f["upload_time_iso_8601"][:10]
+        for files in releases.values()
+        for f in files
+        if isinstance(f, dict) and f.get("upload_time_iso_8601")
+    ]
+    first = min(dates) if dates else None
+    age = (dt.date.today() - dt.date.fromisoformat(first)).days if first else None
+    urls = info.get("project_urls") or {}
+    repo = next(
+        (u for k, u in urls.items() if re.search(r"source|repo|code|github|home", k, re.I)),
+        info.get("home_page") or "",
+    )
+    headline = f"{canonical} {info.get('version', '?')} — {info.get('summary') or ''}"
+    print(f"   on PyPI: {headline}{label}" if on_index else f"📦 {headline}")
+    print(f"   first release: {first or '?'} ({age if age is not None else '?'} days ago){label}")
+    print(f"   repository: {repo or '(not declared)'}  ·  releases: {len(releases)}{label}")
+    if _normalize(canonical) != _normalize(name):
+        warnings.append(f"the canonical name is {canonical!r}")
+    if age is not None and age < 90:
+        warnings.append("younger than 90 days: review with care")
+    if not repo:
+        warnings.append("declares no repository")
+    if lookalikes := _lookalikes(canonical):
+        warnings.append(f"looks like a popular package: {', '.join(lookalikes)} (typosquatting?)")
+    vulns = osv_vulnerabilities(canonical)
+    if vulns:
+        warnings.append(f"{vulns} known vulnerabilities in OSV (check the affected versions)")
+    elif vulns is None:
+        print(f"   (OSV not reachable: vulnerability check skipped){label}")
+    for w in warnings:
+        print(f"   ⚠️  {w}{label}")
+    return 1 if warnings else 0
+
+
+def cmd_verify_dep(args: argparse.Namespace) -> int:
+    index = resolve_index(args.index, os.environ)
+    code = 0
+    for name in args.packages:
+        if index is not None:
+            code = max(code, _verify_on_index(name, index))
+        code = max(code, _verify_on_pypi(name, on_index=index is not None))
     print("\nReminder: the human approves every new dependency; justify it in the PR.")
     return code
 
@@ -817,7 +1023,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sdk-module", help="importable module of the SDK (provider 'other')")
     p.add_argument("--sdk-env-key", help="env var holding the API key (provider 'other')")
     p.add_argument("--rigor", choices=RIGOR_LEVELS, help="rigor level (see RUMBO.md Part E)")
+    p.add_argument(
+        "--types",
+        choices=TYPE_CHECKERS,
+        help=f"type checker (ADR-0015; default: {DEFAULT_TYPE_CHECKER})",
+    )
     p.add_argument("--case", help="concrete use case (free text)")
+    p.add_argument(
+        "--python",
+        metavar="X.Y",
+        help="minimum Python the project promises (ADR-0014; default {DEFAULT_PYTHON}; one of "
+        f"{', '.join(SUPPORTED_PYTHONS)})",
+    )
     p.add_argument("--yes", "-y", action="store_true", help="do not ask; use flags only")
     p.add_argument(
         "--adopt",
@@ -912,8 +1129,21 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
 
-    p = sub.add_parser("verify-dep", help="verify packages on PyPI before adding them")
+    p = sub.add_parser(
+        "verify-dep",
+        help="verify packages on PyPI, or on your index, before adding them",
+        description="Existence and versions are checked on the index the project installs "
+        "from (--index, else UV_INDEX_URL, UV_DEFAULT_INDEX or PIP_INDEX_URL; PyPI when none "
+        "is set); age, repository, typosquatting and OSV are always measured against PyPI "
+        "(ADR-0014). Credentials in the URL are never printed.",
+    )
     p.add_argument("packages", nargs="+", help="package names")
+    p.add_argument(
+        "--index",
+        metavar="URL",
+        help="simple-API index to verify existence and versions against (default: the first "
+        "set of $UV_INDEX_URL, $UV_DEFAULT_INDEX, $PIP_INDEX_URL; PyPI when none is set)",
+    )
     p.set_defaults(func=cmd_verify_dep)
 
     p = sub.add_parser(

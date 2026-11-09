@@ -8,14 +8,17 @@ and a coroutine entry under `--concurrency 2` and prints the same report as a se
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
+from datetime import date
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -211,3 +214,131 @@ def test_rendered_runner_counts_a_failing_entry_and_rejects_zero_concurrency(
     assert "FAIL example-001 (0/1) exception: RuntimeError('down')" in failing.stdout
     assert "pass@1=0.000" in failing.stdout
     assert _run(runner, "--concurrency", "0").returncode == 2  # argparse usage error
+
+
+# --- the eval fingerprint (ADR-0016), executed -----------------------------------------------
+
+EMPTY = hashlib.sha256(b"").hexdigest()
+
+
+def _project(tmp_path: Path, cfg: Config = ANTHROPIC) -> tuple[Path, Path, Path]:
+    runner = _materialize_evals(cfg, tmp_path)
+    prompts = tmp_path / "src" / cfg.package / "prompts"
+    prompts.mkdir(parents=True, exist_ok=True)
+    prompt = prompts / "system.md"
+    prompt.write_bytes(b"You answer briefly.\nBe precise.\n")
+    return runner, prompt, tmp_path / "evals" / "graders" / "judge.py"
+
+
+def _last_report(root: Path) -> dict[str, Any]:
+    reports = sorted((root / "evals" / "reports").glob("smoke-*.json"))
+    return json.loads(reports[-1].read_text(encoding="utf-8"))
+
+
+def _warnings(result: subprocess.CompletedProcess[str]) -> list[str]:
+    return [line for line in result.stdout.splitlines() if line.startswith("WARNING")]
+
+
+def test_report_carries_the_fingerprint_and_it_follows_prompts_and_judge(tmp_path: Path) -> None:
+    runner, prompt, judge = _project(tmp_path)
+    assert _run(runner, "--entry", "entries:sync_entry").returncode == 0
+    first = _last_report(tmp_path)["fingerprint"]
+    assert set(first) == {"prompts", "judge", "entry"}
+    assert (
+        first["prompts"]
+        == hashlib.sha256(  # sorted relative path and content, NUL-framed
+            b"system.md\0You answer briefly.\nBe precise.\n\0"
+        ).hexdigest()
+    )
+    assert first["judge"] == hashlib.sha256(judge.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    assert first["entry"] == hashlib.sha256(b"entries:sync_entry").hexdigest()
+
+    prompt.write_text("You answer at length.\n", encoding="utf-8")
+    judge.write_text(judge.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    assert _run(runner, "--entry", "entries:async_entry").returncode == 0
+    second = _last_report(tmp_path)["fingerprint"]
+    assert all(second[part] != first[part] for part in ("prompts", "judge", "entry"))
+
+
+def test_live_run_records_evals_fingerprint_json(tmp_path: Path) -> None:
+    runner, _, _ = _project(tmp_path)
+    record = tmp_path / "evals" / "fingerprint.json"
+    assert not record.exists()
+    assert _run(runner, "--entry", "entries:sync_entry").returncode == 0
+    assert not record.exists()  # an offline run never records
+    live = _run(runner, "--entry", "entries:sync_entry", "--live")
+    assert live.returncode == 0, live.stdout + live.stderr
+    text = record.read_text(encoding="utf-8")
+    assert text.endswith("}\n") and text.startswith("{\n  ")  # pretty JSON, trailing newline
+    data = json.loads(text)
+    assert list(data) == ["prompts", "judge", "entry", "recorded", "suite"]
+    assert {k: data[k] for k in ("prompts", "judge", "entry")} == _last_report(tmp_path)[
+        "fingerprint"
+    ]
+    assert data["recorded"] == date.today().isoformat() and data["suite"] == "smoke"
+
+
+def test_offline_run_warns_once_per_changed_part_and_keeps_the_exit_code(tmp_path: Path) -> None:
+    runner, prompt, judge = _project(tmp_path)
+    args = ("--entry", "entries:sync_entry")
+    assert _run(runner, *args, "--live").returncode == 0
+    recorded = json.loads((tmp_path / "evals" / "fingerprint.json").read_text("utf-8"))["recorded"]
+
+    clean = _run(runner, *args)
+    assert clean.returncode == 0 and _warnings(clean) == []
+
+    prompt.write_text("You answer at length.\n", encoding="utf-8")
+    drifted = _run(runner, *args)
+    assert drifted.returncode == 0
+    assert _warnings(drifted) == [
+        f"WARNING: prompts changed since the last live run ({recorded}): "
+        "the recorded fixtures may be stale; re-record with --live"
+    ]
+    lines = drifted.stdout.splitlines()  # after the summary line, nothing else follows
+    assert lines[-2].startswith("cases=") and lines[-1] == _warnings(drifted)[0]
+
+    judge.write_text(judge.read_text(encoding="utf-8") + "# changed\n", encoding="utf-8")
+    both = _run(runner, *args)
+    assert both.returncode == 0
+    assert _warnings(both) == [
+        _warnings(drifted)[0],
+        f"WARNING: the judge changed since the last live run ({recorded}): "
+        "re-calibrate before trusting its verdicts (see evals/calibration/)",
+    ]
+
+    prompt.write_text("You answer briefly.\nBe precise.\n", encoding="utf-8")
+    only_judge = _run(runner, *args)
+    assert len(_warnings(only_judge)) == 1 and "the judge changed" in _warnings(only_judge)[0]
+
+    failing = _run(runner, "--entry", "entries:sync_entry", "--min-pass", "1.5")
+    assert failing.returncode == 1 and len(_warnings(failing)) == 1  # exit code is the gate's
+
+
+def test_offline_run_without_a_record_prints_no_warning(tmp_path: Path) -> None:
+    runner, prompt, _ = _project(tmp_path)
+    prompt.write_text("anything\n", encoding="utf-8")
+    result = _run(runner, "--entry", "entries:sync_entry")
+    assert result.returncode == 0 and "WARNING" not in result.stdout + result.stderr
+
+
+def test_data_project_runner_fingerprints_with_empty_inputs(tmp_path: Path) -> None:
+    runner = _materialize_evals(DATA, tmp_path)
+    assert not (tmp_path / "src").exists()
+    assert not (tmp_path / "evals" / "graders" / "judge.py").exists()
+    assert _run(runner, "--entry", "entries:sync_entry", "--live").returncode == 0
+    recorded = json.loads((tmp_path / "evals" / "fingerprint.json").read_text("utf-8"))
+    assert recorded["prompts"] == EMPTY and recorded["judge"] == EMPTY
+    assert recorded["entry"] == hashlib.sha256(b"entries:sync_entry").hexdigest()
+    fingerprint = _last_report(tmp_path)["fingerprint"]
+    assert fingerprint["prompts"] == EMPTY and fingerprint["judge"] == EMPTY
+    assert _warnings(_run(runner, "--entry", "entries:sync_entry")) == []
+
+
+def test_fingerprint_ignores_line_endings(tmp_path: Path) -> None:
+    runner, prompt, judge = _project(tmp_path)
+    assert _run(runner, "--entry", "entries:sync_entry").returncode == 0
+    lf = _last_report(tmp_path)["fingerprint"]
+    prompt.write_bytes(prompt.read_bytes().replace(b"\n", b"\r\n"))
+    judge.write_bytes(judge.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    assert _run(runner, "--entry", "entries:sync_entry").returncode == 0
+    assert _last_report(tmp_path)["fingerprint"] == lf

@@ -333,6 +333,12 @@ accepted findings: such files go stale the moment a file moves. The LLM skeleton
 (ADR-0012), with the request id in a context variable, because every current model SDK and web
 framework is.
 
+Enterprise variants are settings, never questions (ADR-0014, ADR-0015): `--python` is the one
+source of the minimum version, `--types` chooses pyright or mypy with the same strictness
+contract, and `rumbo verify-dep` checks existence and versions on the index the project
+installs from while labelling what it can only measure against PyPI. The eval runner
+fingerprints prompts and judge so fixture and judge drift are seen, not suffered (ADR-0016).
+
 `rumbo init` installs with `uv add` what the rigor verifies (ADR-0011): ruff, pyright, pytest,
 Hypothesis and pre-commit for a prototype (plus import-linter when the layout has layers);
 pytest-cov, bandit and pip-audit from mvp; mutmut at production. `rumbo promote` adds the next

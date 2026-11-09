@@ -15,6 +15,7 @@ def _edit(path: str, old: str = "a", new: str = "b") -> dict[str, object]:
     return {"file_path": path, "old_string": old, "new_string": new}
 
 
+# Covers F-0001.R1 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 @pytest.mark.parametrize(
     "rel",
     [
@@ -37,12 +38,14 @@ def test_protected_files_are_blocked(tmp_path: Path, rel: str) -> None:
     assert reason and "protected" in reason
 
 
+# Covers F-0001.R1 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_relative_paths_are_normalised(tmp_path: Path) -> None:
     assert guard.check_edit("Edit", _edit("src/../Makefile"), tmp_path)
     assert guard.check_edit("Edit", _edit("./.github/workflows/ci.yml"), tmp_path)
     assert guard.check_edit("Edit", _edit("src/demo/x.py"), tmp_path) is None
 
 
+# Covers F-0001.R10 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_ordinary_files_and_files_outside_the_project_are_allowed(tmp_path: Path) -> None:
     inside = _edit(str(tmp_path / "src/demo/domain/x.py"))
     assert guard.check_edit("Edit", inside, tmp_path) is None
@@ -51,6 +54,7 @@ def test_ordinary_files_and_files_outside_the_project_are_allowed(tmp_path: Path
     assert guard.check_edit("Edit", {}, tmp_path) is None
 
 
+# Covers F-0001.R2 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_template_mark_cannot_be_removed_by_edit_or_write(tmp_path: Path) -> None:
     doc = tmp_path / "specs" / "0001-x.md"
     doc.parent.mkdir()
@@ -68,6 +72,7 @@ def test_template_mark_cannot_be_removed_by_edit_or_write(tmp_path: Path) -> Non
     assert guard.check_edit("Write", new, tmp_path) is None
 
 
+# Covers F-0001.R3 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 @pytest.mark.parametrize(
     "command",
     [
@@ -115,6 +120,7 @@ def test_dangerous_commands_are_blocked(command: str) -> None:
     assert guard.check_bash(command)
 
 
+# Covers F-0001.R10 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 @pytest.mark.parametrize(
     "command",
     [
@@ -152,6 +158,7 @@ def test_ordinary_commands_are_allowed(command: str) -> None:
     assert guard.check_bash(command) is None
 
 
+# Covers F-0001.R4 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_post_bash_detects_protected_files_changed_since_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -175,6 +182,7 @@ def test_post_bash_detects_protected_files_changed_since_head(
     assert guard.check_post_bash(tmp_path) is None
 
 
+# Covers F-0001.R11 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_git_missing_never_crashes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def no_git(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError("git")
@@ -184,6 +192,7 @@ def test_git_missing_never_crashes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert guard.check_stop({}, tmp_path) == (0, "")
 
 
+# Covers F-0001.R5 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_stop_runs_make_check_only_when_code_changed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -241,6 +250,7 @@ def _stop(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object] | None = N
     return guard.main(["stop"])
 
 
+# Covers F-0001.R5 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_stop_passes_when_the_runner_is_green(
     project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -251,6 +261,7 @@ def test_stop_passes_when_the_runner_is_green(
     assert (project / "ran.txt").read_text(encoding="utf-8") == "--brief"
 
 
+# Covers F-0001.R5 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_stop_blocks_with_the_tail_when_the_runner_is_red(
     project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -264,6 +275,7 @@ def test_stop_blocks_with_the_tail_when_the_runner_is_red(
     assert "repair" not in err  # a red check is the agent's to fix
 
 
+# Covers F-0001.R6 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 @pytest.mark.parametrize("exit_code", ["3", "4"])
 def test_stop_reports_a_broken_environment_to_the_human(
     project: Path,
@@ -286,6 +298,7 @@ def test_stop_reports_a_broken_environment_to_the_human(
     assert "fake exit" not in human  # the human gets one or two lines, not the log
 
 
+# Covers F-0001.R6 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_stop_without_runner_or_make_asks_for_rumbo_update(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -405,6 +418,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+# Covers F-0001.R9 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 @pytest.mark.parametrize("marker", guard.DEFAULT_AGENT_ENV)
 def test_actor_is_an_agent_when_a_marker_is_set(
     repo: Path, monkeypatch: pytest.MonkeyPatch, marker: str
@@ -416,6 +430,7 @@ def test_actor_is_an_agent_when_a_marker_is_set(
     assert guard.actor(repo) == "agent"  # the marker wins over the clone's declaration
 
 
+# Covers F-0001.R9 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_actor_is_the_human_who_declared_rumbo_human(repo: Path) -> None:
     assert guard.actor(repo) == "unknown"
     _git(repo, "config", "rumbo.human", "true")
@@ -424,6 +439,7 @@ def test_actor_is_the_human_who_declared_rumbo_human(repo: Path) -> None:
     assert guard.actor(repo) == "unknown"
 
 
+# Covers F-0001.R9 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_agent_markers_come_from_pyproject_when_declared(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -441,6 +457,7 @@ def test_agent_markers_come_from_pyproject_when_declared(
     assert guard.agent_env_names(repo) == guard.DEFAULT_AGENT_ENV
 
 
+# Covers F-0001.R7 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_pre_commit_refuses_a_staged_protected_file_from_an_agent(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -465,6 +482,7 @@ def test_pre_commit_refuses_a_staged_protected_file_from_an_agent(
     assert capsys.readouterr() == ("", "")
 
 
+# Covers F-0001.R7 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_pre_commit_allows_uv_writes_and_lists_every_other_protected_file(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -486,6 +504,7 @@ def test_pre_commit_allows_uv_writes_and_lists_every_other_protected_file(
     assert listed == ".env, .github/workflows/ci.yml, scripts/rumbo_guard.py"
 
 
+# Covers F-0001.R7 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_pre_commit_refuses_removing_the_template_mark(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -511,6 +530,7 @@ def test_pre_commit_refuses_removing_the_template_mark(
     assert guard.check_pre_commit(repo) is None
 
 
+# Covers F-0001.R7 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_pre_commit_exempts_the_root_commit_and_guards_from_the_second(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -535,6 +555,7 @@ def test_pre_commit_exempts_the_root_commit_and_guards_from_the_second(
     assert "Makefile" in (guard.check_pre_commit(root) or "")
 
 
+# Covers F-0001.R10 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_pre_commit_passes_silently_with_nothing_staged(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -545,6 +566,7 @@ def test_pre_commit_passes_silently_with_nothing_staged(
     assert capsys.readouterr() == ("", "")
 
 
+# Covers F-0001.R8 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_commit_msg_refuses_the_approval_mark_from_an_agent(
     repo: Path,
     tmp_path: Path,
@@ -573,6 +595,7 @@ def test_commit_msg_refuses_the_approval_mark_from_an_agent(
     assert "usage" in capsys.readouterr().err
 
 
+# Covers F-0001.R11 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_git_hooks_without_git_never_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def no_git(cmd: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
         raise FileNotFoundError("git")
@@ -582,3 +605,21 @@ def test_git_hooks_without_git_never_crash(tmp_path: Path, monkeypatch: pytest.M
     assert guard.actor(tmp_path) == "unknown"
     assert guard.staged_files(tmp_path) == []
     assert guard.check_pre_commit(tmp_path) is None
+
+
+# Covers F-0001.R12 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_pre_tool_decides_within_the_latency_budget(tmp_path: Path) -> None:
+    """PreToolUse is pure decision logic: no network, no subprocess, p95 under 100 ms."""
+    import time
+
+    samples: list[float] = []
+    for n in range(60):
+        start = time.perf_counter()
+        guard.check_edit("Edit", {"file_path": f"src/app_{n}.py"}, tmp_path)
+        guard.check_edit("Write", {"file_path": "Makefile", "content": "x"}, tmp_path)
+        guard.check_bash("uv run pytest -q tests/unit")
+        guard.check_bash("git commit --no-verify -m x")
+        samples.append(time.perf_counter() - start)
+    samples.sort()
+    p95 = samples[int(len(samples) * 0.95) - 1]
+    assert p95 < 0.1, f"p95 of four PreToolUse decisions took {p95 * 1000:.1f} ms"
