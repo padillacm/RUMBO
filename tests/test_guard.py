@@ -170,23 +170,27 @@ def test_ordinary_commands_are_allowed(command: str) -> None:
 def test_post_bash_detects_protected_files_changed_since_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    status = " M Makefile\n?? .github/workflows/x.yml\n M pyproject.toml\n M src/demo/a.py\n"
-    monkeypatch.setattr(
-        guard.subprocess,
-        "run",
-        lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, status, ""),
+    # What `uv add rich` leaves behind (ADR-0019): `git show HEAD:pyproject.toml` answers the
+    # committed version, the working tree has one more dependency.
+    head = '[project]\nname = "demo"\ndependencies = ["httpx"]\n'
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\ndependencies = ["httpx", "rich"]\n', encoding="utf-8"
     )
+
+    def fake_git(status: str) -> object:
+        return lambda cmd, **_: subprocess.CompletedProcess(
+            cmd, 0, head if cmd[1] == "show" else status, ""
+        )
+
+    status = " M Makefile\n?? .github/workflows/x.yml\n M pyproject.toml\n M src/demo/a.py\n"
+    monkeypatch.setattr(guard.subprocess, "run", fake_git(status))
     reason = guard.check_post_bash(tmp_path) or ""
     assert "Makefile" in reason and ".github/workflows/x.yml" in reason
-    assert "pyproject.toml" not in reason  # uv add is allowed to change it
+    assert "pyproject.toml" not in reason  # uv add is allowed to change its dependency tables
     # Stop refuses first for the protected files, before running make
     code, message = guard.check_stop({}, tmp_path)
     assert code == guard.BLOCK and "protected" in message
-    monkeypatch.setattr(
-        guard.subprocess,
-        "run",
-        lambda cmd, **_: subprocess.CompletedProcess(cmd, 0, " M pyproject.toml\n", ""),
-    )
+    monkeypatch.setattr(guard.subprocess, "run", fake_git(" M pyproject.toml\n M uv.lock\n"))
     assert guard.check_post_bash(tmp_path) is None
 
 
@@ -451,6 +455,16 @@ def test_actor_is_the_human_who_declared_rumbo_human(repo: Path) -> None:
 
 
 # Covers F-0001.R9 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_default_agent_markers_have_a_source() -> None:
+    """ADR-0021: no marker is written from memory; each default names where it was confirmed."""
+    assert tuple(guard.AGENT_ENV_SOURCES) == guard.DEFAULT_AGENT_ENV
+    assert all(url.startswith("https://") for url in guard.AGENT_ENV_SOURCES.values())
+    verified = {"CLAUDECODE", "GEMINI_CLI", "CURSOR_AGENT", "CODEX_SANDBOX_NETWORK_DISABLED"}
+    verified |= {"CODEX_THREAD_ID", "CODEX_CI", "ROO_ACTIVE", "CLINE_ACTIVE"}
+    assert set(guard.DEFAULT_AGENT_ENV) == verified
+
+
+# Covers F-0001.R9 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_agent_markers_come_from_pyproject_when_declared(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -498,7 +512,14 @@ def test_pre_commit_allows_uv_writes_and_lists_every_other_protected_file(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("GEMINI_CLI", "1")
+    # ADR-0019: a uv write is a change to the dependency tables of a pyproject.toml that HEAD
+    # already has (a new pyproject.toml is a protected change), so the project commits one first.
     (repo / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
+    _git(repo, "add", "pyproject.toml")
+    _git(repo, "commit", "-qm", "chore: the project's pyproject.toml")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = ["httpx"]\n', encoding="utf-8"
+    )
     (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
     _git(repo, "add", "-A")
@@ -720,3 +741,232 @@ def test_pre_commit_refuses_a_staged_change_to_a_signed_document(
     monkeypatch.delenv("GEMINI_CLI")
     _git(repo, "config", "rumbo.human", "true")
     assert guard.check_pre_commit(repo) is None
+
+
+# ------------------------------------------------- the tables of pyproject.toml (ADR-0019)
+PYPROJECT_HEAD = """\
+[project]
+name = "demo"
+version = "0.1.0"
+dependencies = ["httpx"]
+
+[build-system]
+requires = ["hatchling"]
+
+[tool.rumbo.checks]
+tests = "uv run pytest -q"
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+addopts = "--cov-fail-under=80"
+"""
+# What `uv add`, `uv add --optional`, `uv add --dev` and a git source leave behind, reformatted
+# and with a comment: only the four free keys differ from PYPROJECT_HEAD.
+UV_ADD = (
+    PYPROJECT_HEAD.replace('["httpx"]', '[\n    "httpx",\n    "rich",\n]')
+    + """
+# added by uv
+[project.optional-dependencies]
+cli = ["typer"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+rich = { git = "https://example.com/rich.git" }
+"""
+)
+# One change outside the dependency tables each: the dotted path the guard names, (old, new).
+OUTSIDE: dict[str, tuple[str, str]] = {
+    "tool.rumbo": ('tests = "uv run pytest -q"', 'tests = "true"'),
+    "tool.ruff": ("line-length = 100", "line-length = 320"),
+    "tool.pytest": ("--cov-fail-under=80", "--cov-fail-under=0"),
+    "project.version": ('version = "0.1.0"', 'version = "9.9.9"'),
+}
+
+
+def _commit_pyproject(repo: Path, text: str = PYPROJECT_HEAD) -> Path:
+    """The human's commit of pyproject.toml (the tmp repository has no hooks installed)."""
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text(text, encoding="utf-8")
+    _git(repo, "add", "pyproject.toml")
+    _git(repo, "commit", "-qm", "chore: the human's pyproject.toml")
+    return pyproject
+
+
+# Covers F-0001.R4 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_pyproject_may_change_only_in_its_dependency_tables(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pyproject = _commit_pyproject(repo)
+    assert guard.check_post_bash(repo) is None
+    # `uv add`: the dependency tables and uv.lock change, nothing is reported.
+    pyproject.write_text(UV_ADD, encoding="utf-8")
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    assert guard.pyproject_change(repo, staged=False) == []
+    assert guard.check_post_bash(repo) is None
+    assert guard.changed_protected_files(repo) == []
+    for path, (old, new) in OUTSIDE.items():
+        assert old in PYPROJECT_HEAD, path
+        # Alone, and mixed with the uv write: the table outside the allow list is named.
+        for text in (PYPROJECT_HEAD, UV_ADD):
+            pyproject.write_text(text.replace(old, new), encoding="utf-8")
+            assert guard.pyproject_change(repo, staged=False) == [path]
+            reason = guard.check_post_bash(repo) or ""
+            assert f"outside its dependency tables: {path}. " in reason, path
+            assert "protected" in reason and "Restore" in reason and "ask the human" in reason
+            assert "project.dependencies" in reason and "tool.uv" in reason  # what may change
+    assert guard.changed_protected_files(repo) == ["pyproject.toml"]
+    # Stop refuses for the same reason before running the check.
+    code, message = guard.check_stop({}, repo)
+    assert code == guard.BLOCK and "project.version" in message
+    # An allow list, not a deny list: tables nobody listed, a removed table, the build system.
+    everything = UV_ADD.replace("[tool.ruff]\nline-length = 100\n", "")
+    for old, new in OUTSIDE.values():
+        everything = everything.replace(old, new)
+    everything = everything.replace('["hatchling"]', '["setuptools"]')
+    pyproject.write_text(everything + "\n[tool.coverage.report]\nfail_under = 0\n", "utf-8")
+    assert guard.pyproject_change(repo, staged=False) == [
+        "build-system.requires",
+        "project.version",
+        "tool.coverage",
+        "tool.pytest",
+        "tool.ruff",
+        "tool.rumbo",
+    ]
+    # A pyproject.toml without a [tool] table gains [tool.uv]: still only a dependency change.
+    _git(repo, "checkout", "--", "pyproject.toml")
+    bare = _commit_pyproject(repo, '[project]\nname = "demo"\n')
+    bare.write_text('[project]\nname = "demo"\n\n[tool.uv]\npackage = true\n', encoding="utf-8")
+    assert guard.check_post_bash(repo) is None
+    bare.write_text('[project]\nname = "demo"\n\n[tool.ruff]\n', encoding="utf-8")
+    assert guard.pyproject_change(repo, staged=False) == ["tool.ruff"]
+
+    # The extra git and TOML work is paid only when pyproject.toml is among the changed files.
+    def never(_root: Path, _staged: bool) -> list[str]:
+        raise AssertionError("pyproject.toml did not change")
+
+    monkeypatch.setattr(guard, "pyproject_change", never)
+    monkeypatch.setattr(guard, "changed_files", lambda _root: ["src/demo/x.py", "uv.lock"])
+    assert guard.check_post_bash(repo) is None
+
+
+# Covers F-0001.R7 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_pre_commit_refuses_pyproject_changes_outside_the_dependency_tables(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pyproject = _commit_pyproject(repo)
+    monkeypatch.setenv("CURSOR_AGENT", "1")
+    # `uv add` and the commit of its result: the agent's, with no approval step.
+    pyproject.write_text(UV_ADD, encoding="utf-8")
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    assert guard.pyproject_change(repo, staged=True) == []
+    assert guard.check_pre_commit(repo) is None
+    for path, (old, new) in OUTSIDE.items():
+        # Alone, and mixed with the uv write: refused, and the table is named.
+        for text in (PYPROJECT_HEAD, UV_ADD):
+            pyproject.write_text(text.replace(old, new), encoding="utf-8")
+            _git(repo, "add", "pyproject.toml")
+            assert guard.pyproject_change(repo, staged=True) == [path]
+            reason = guard.check_pre_commit(repo) or ""
+            assert f"outside its dependency tables: {path}. " in reason, path
+            assert "protected" in reason and "ask the human" in reason
+            assert "rumbo.human" not in reason
+    # Only HEAD and the index count: restoring the working tree without staging does not
+    # help, staging it does; and a change that is not staged is not this commit's.
+    pyproject.write_text(UV_ADD, encoding="utf-8")
+    assert "project.version" in (guard.check_pre_commit(repo) or "")
+    _git(repo, "add", "pyproject.toml")
+    assert guard.check_pre_commit(repo) is None
+    pyproject.write_text(UV_ADD.replace("line-length = 100", "line-length = 320"), "utf-8")
+    assert guard.check_pre_commit(repo) is None
+    # With another protected file, both are listed.
+    (repo / "Makefile").write_text("check: ; echo changed\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    reason = guard.check_pre_commit(repo) or ""
+    assert "protected file(s) staged: Makefile. " in reason
+    assert "outside its dependency tables: tool.ruff. " in reason
+    _git(repo, "restore", "--staged", "Makefile")
+    # An unknown actor is refused too and learns how a human declares themself; the declared
+    # human (rumbo.human true, no marker) commits any table.
+    monkeypatch.delenv("CURSOR_AGENT")
+    reason = guard.check_pre_commit(repo) or ""
+    assert "tool.ruff" in reason and "git config rumbo.human true" in reason
+    _git(repo, "config", "rumbo.human", "true")
+    assert guard.check_pre_commit(repo) is None
+    # The root commit is the harness itself: its pyproject.toml has nothing to be compared with.
+    monkeypatch.setenv("CURSOR_AGENT", "1")
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    _git(fresh, "init", "-q", "-b", "main")
+    (fresh / "pyproject.toml").write_text(PYPROJECT_HEAD, encoding="utf-8")
+    _git(fresh, "add", "pyproject.toml")
+    assert guard.pyproject_change(fresh, staged=True) == []
+    assert guard.check_pre_commit(fresh) is None
+    _git(fresh, "config", "user.email", "t@example.com")
+    _git(fresh, "config", "user.name", "t")
+    _git(fresh, "commit", "-qm", "chore: initial RUMBO harness")
+    # From the second commit on, the tables are guarded.
+    (fresh / "pyproject.toml").write_text(
+        PYPROJECT_HEAD.replace("--cov-fail-under=80", "--cov-fail-under=0"), encoding="utf-8"
+    )
+    _git(fresh, "add", "pyproject.toml")
+    assert "tool.pytest" in (guard.check_pre_commit(fresh) or "")
+
+
+# Covers F-0001.R4 and F-0001.R7 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_an_unparseable_or_new_pyproject_is_a_protected_change(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDECODE", "1")
+    new, broken, deleted = (
+        "pyproject.toml (new file)",
+        "pyproject.toml (cannot be parsed)",
+        "pyproject.toml (deleted)",
+    )
+
+    def both_layers(label: str) -> None:
+        """The working tree after a shell command, then the same content staged by an agent."""
+        assert guard.pyproject_change(repo, staged=False) == [label]
+        reason = guard.check_post_bash(repo) or ""
+        assert label in reason and "ask the human" in reason
+        _git(repo, "add", "-A")
+        assert guard.pyproject_change(repo, staged=True) == [label]
+        reason = guard.check_pre_commit(repo) or ""
+        assert label in reason and "ask the human" in reason
+
+    # New: HEAD exists and has no pyproject.toml, so there is nothing to compare with.
+    pyproject = repo / "pyproject.toml"
+    pyproject.write_text(UV_ADD, encoding="utf-8")
+    both_layers(new)
+    _git(repo, "commit", "-qm", "chore: the human's pyproject.toml")
+    assert guard.check_post_bash(repo) is None
+    # Deleted: the whole verification contract is gone.
+    pyproject.unlink()
+    both_layers(deleted)
+    _git(repo, "reset", "-q", "--hard", "HEAD")
+    # The current version does not parse, even if only a dependency line broke it.
+    pyproject.write_text(UV_ADD.replace('"rich",', '"rich" "textual",'), encoding="utf-8")
+    both_layers(broken)
+    # The version in HEAD does not parse: the guard cannot tell what a repair changes.
+    _git(repo, "commit", "-qm", "chore: a broken pyproject.toml")
+    pyproject.write_text(UV_ADD, encoding="utf-8")
+    both_layers(broken)
+    # None of it binds the declared human.
+    monkeypatch.delenv("CLAUDECODE")
+    _git(repo, "config", "rumbo.human", "true")
+    assert guard.check_pre_commit(repo) is None
+
+    # Without git there is no HEAD and no commit to protect: the action goes through (R11).
+    def no_git(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(guard.subprocess, "run", no_git)
+    assert guard.pyproject_change(repo, staged=False) == []
+    assert guard.pyproject_change(repo, staged=True) == []
