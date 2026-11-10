@@ -50,6 +50,43 @@ def test_init_yes_requires_a0_answers(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "--rigor" in capsys.readouterr().err
 
 
+def test_init_summary_prints_each_setting_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression (audit of v0.4.0): the summary line printed `provider=` and `rigor=` twice,
+    glued to `python=3.11` with no space."""
+    init = ["init", "--yes", "--no-install", "--name", "Demo", "--rigor", "mvp"]
+    assert main([*init, "--dir", str(tmp_path / "plain"), "--no-llm"]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line == (
+        "  package=demo kind=service layout=hexagonal llm=False provider=- rigor=mvp "
+        "python=3.11 types=pyright"
+    )
+    keys = [setting.split("=")[0] for setting in line.split()]
+    assert keys == ["package", "kind", "layout", "llm", "provider", "rigor", "python", "types"]
+    llm = [*init, "--llm", "--provider", "anthropic", "--types", "mypy", "--python", "3.12"]
+    assert main([*llm, "--dir", str(tmp_path / "llm")]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line.endswith("llm=True provider=anthropic rigor=mvp python=3.12 types=mypy")
+    assert line.count("provider=") == 1 and line.count("rigor=") == 1
+    # An adopted project adds its part at the end; `src=` appears only when it is not "src".
+    under_src = tmp_path / "under_src"
+    (under_src / "src" / "legacy_app").mkdir(parents=True)
+    (under_src / "src" / "legacy_app" / "__init__.py").write_text("", encoding="utf-8")
+    at_root = tmp_path / "at_root"
+    (at_root / "legacy_app").mkdir(parents=True)
+    (at_root / "legacy_app" / "__init__.py").write_text("", encoding="utf-8")
+    (at_root / "test").mkdir()
+    adopt = ["init", "--adopt", "--yes", "--no-install", "--no-llm", "--rigor", "mvp"]
+    assert main([*adopt, "--dir", str(under_src)]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line.endswith("python=3.11 types=pyright adopted=true tests=tests")
+    assert main([*adopt, "--dir", str(at_root)]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line.endswith("python=3.11 types=pyright adopted=true tests=test src=.")
+    assert len(line.split()) == len({setting.split("=")[0] for setting in line.split()}) == 11
+
+
 def test_init_llm_without_provider_fails(tmp_path: Path) -> None:
     assert (
         main(["init", "--dir", str(tmp_path), "--yes", "--no-install", "--llm", "--rigor", "mvp"])
@@ -229,12 +266,12 @@ def test_gate_g4_without_make_is_unmeasured_not_a_traceback(
     finally:
         runner.write_bytes(original)
     check = next(r for r in results if r.description == "rumbo check green")
-    assert check.ok is None and "not installed" in check.detail
+    assert check.ok is False and "not installed" in check.detail  # ADR-0018: not measured fails
 
 
 @pytest.mark.parametrize(
     ("exit_code", "ok", "detail"),
-    [(0, True, ""), (1, False, "FAIL lint (exit 1)"), (3, None, "environment broken (exit 3)")],
+    [(0, True, ""), (1, False, "FAIL lint (exit 1)"), (3, False, "environment broken (exit 3)")],
 )
 def test_gate_g4_runs_the_runner_and_tells_red_from_broken(
     simple_project: Path,

@@ -1,5 +1,6 @@
 """ADR-0006 fitness function: `rumbo check` runs [tool.rumbo.checks] without a shell and tells
-a verification failure (exit 1) from a broken environment (exit 3)."""
+a verification failure (exit 1) from a broken environment (exit 3). ADR-0018: a tool that ran
+and refused the code is a failure; ADR-0020: `{changed}` never names a file under spikes/."""
 
 import json
 import shutil
@@ -23,6 +24,29 @@ def exits(code: int, marker: str = "") -> str:
     """A step that records its run in order.txt and exits with ``code``."""
     record = f"open('order.txt', 'a').write('{marker};'); " if marker else ""
     return py(f"import sys; {record}sys.exit({code})")
+
+
+def tool(root: Path, name: str, code: int, version: int, marker: str = "") -> str:
+    """A step that runs a fake tool, ``python -m <name>``: it logs its arguments in calls.txt,
+    exits ``code``, and answers ``--version`` (the ADR-0018 probe) with exit ``version``."""
+    record = f"open('order.txt', 'a').write('{marker};')\n" if marker else ""
+    (root / f"{name}.py").write_text(
+        "import sys\n"
+        "open('calls.txt', 'a').write(' '.join(sys.argv[1:]) + ';')\n"
+        "if '--version' in sys.argv:\n"
+        f"    print('{name} 1.0, said to the probe')\n"
+        f"    sys.exit({version})\n"
+        f"{record}"
+        f"sys.exit({code})\n",
+        encoding="utf-8",
+    )
+    return f"{PY} -m {name}"
+
+
+def calls(root: Path) -> list[str]:
+    """The argument lists the fake tools received, in order."""
+    path = root / "calls.txt"
+    return path.read_text(encoding="utf-8").strip(";").split(";") if path.exists() else []
 
 
 def project(root: Path, steps: dict[str, str]) -> Path:
@@ -77,9 +101,8 @@ def test_stops_at_the_first_failure(tmp_path: Path, capsys: pytest.CaptureFixtur
 def test_keep_going_runs_everything_and_environment_wins(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = project(
-        tmp_path, {"lint": exits(1, "lint"), "types": exits(3, "types"), "test": exits(0, "test")}
-    )
+    broken = tool(tmp_path, "typechecker", 3, 3, "types")  # ADR-0018: not even --version works
+    root = project(tmp_path, {"lint": exits(1, "lint"), "types": broken, "test": exits(0, "test")})
     assert run(root, "--keep-going") == 3
     assert ran(root) == ["lint", "types", "test"]
     lines = capsys.readouterr().out.splitlines()
@@ -101,11 +124,103 @@ def test_keep_going_reports_every_failing_step(
 def test_exit_code_other_than_0_or_1_is_an_environment_problem(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = project(tmp_path, {"types": exits(2)})
+    # ADR-0018: still true when the tool cannot answer --version either.
+    root = project(tmp_path, {"types": tool(tmp_path, "typechecker", 2, 2)})
     assert run(root) == 3
     lines = capsys.readouterr().out.splitlines()
     assert lines[-2].startswith("ENV  types (") and lines[-2].endswith("exit 2)")
     assert lines[-1] == "rumbo check: environment broken (types)"
+
+
+def test_a_tool_that_ran_and_exited_2_is_red(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0018: pytest exits 2 on a collection error. The tool started, so the code is red."""
+    step = tool(tmp_path, "faketool", 2, 0) + " --cov tests"
+    root = project(tmp_path, {"test": step, "never": exits(0, "never")})
+    assert run(root) == 1
+    assert calls(root) == ["--cov tests", "--version"], "the probe: launcher, tool, --version"
+    assert ran(root) == [], "a red step stops the run like any other failure"
+    out = capfd.readouterr().out
+    lines = out.splitlines()
+    assert "FAIL test (faketool exit 2)" in lines
+    assert lines[-1] == "rumbo check: red (test)"
+    assert "said to the probe" not in out, "the probe is silent"
+
+
+def test_the_probe_is_silent_in_the_brief_log_too(tmp_path: Path) -> None:
+    root = project(tmp_path, {"test": tool(tmp_path, "faketool", 5, 0)})
+    assert run(root, "--brief") == 1
+    log = (root / ".rumbo-check.log").read_text(encoding="utf-8")
+    assert "FAIL test (faketool exit 5)" in log and "said to the probe" not in log
+
+
+def test_an_environment_that_cannot_launch_the_tool_is_env(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0018: `uv run pytest` exits 2 as well when uv cannot build the environment; then
+    `uv run pytest --version` fails too, and the agent is not handed the repair."""
+    root = project(tmp_path, {"test": tool(tmp_path, "faketool", 2, 2) + " --cov"})
+    assert run(root) == 3
+    assert calls(root) == ["--cov", "--version"]
+    lines = capsys.readouterr().out.splitlines()
+    assert "ENV  test (faketool exit 2)" in lines
+    assert lines[-1] == "rumbo check: environment broken (test)"
+
+
+def test_the_probe_stops_at_the_interpreter_for_a_script(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0018: a script of the project has no --version; the interpreter is asked instead."""
+    script = ["uv", "run", "python", "scripts/x.py", "--base", "main"]
+    assert check._probe_argv(script) == ["uv", "run", "python", "--version"]
+    frozen = ["uv", "run", "--frozen", "pytest", "--cov"]
+    assert check._probe_argv(frozen) == ["uv", "run", "--frozen", "pytest", "--version"]
+    assert check._probe_argv(["python", "-m", "mypy", "."]) == ["python", "-m", "mypy", "--version"]
+    assert check._probe_argv(["python", "-c", "raise SystemExit(2)"]) == ["python", "--version"]
+    assert check._probe_argv(["scripts/x.py", "--strict"]) is None, "no interpreter to ask"
+
+    write(
+        tmp_path,
+        "scripts/sensor.py",
+        "import sys\nopen('calls.txt', 'a').write(' '.join(sys.argv[1:]) + ';')\nsys.exit(2)\n",
+    )
+    root = project(tmp_path, {"sensor": f"{PY} scripts/sensor.py --strict"})
+    assert run(root) == 1
+    assert calls(root) == ["--strict"], "the script itself is never run with --version"
+    assert "FAIL sensor (sensor.py exit 2)" in capsys.readouterr().out.splitlines()
+
+
+def test_a_step_killed_by_a_signal_is_env_and_is_not_probed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, -9)
+
+    monkeypatch.setattr(check.subprocess, "run", fake_run)
+    result = check.run_step("test", ["uv", "run", "pytest"], tmp_path, None)
+    assert (result.status, result.detail) == (check.ENV, "pytest killed by signal 9")
+    assert seen == [["uv", "run", "pytest"]]
+
+
+def test_a_probe_that_does_not_answer_in_60_seconds_is_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    timeouts: list[object] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        if argv[-1] != "--version":
+            return subprocess.CompletedProcess(argv, 2)
+        timeouts.append(kwargs.get("timeout"))
+        raise subprocess.TimeoutExpired(argv, 60)
+
+    monkeypatch.setattr(check.subprocess, "run", fake_run)
+    result = check.run_step("test", ["uv", "run", "pytest"], tmp_path, None)
+    assert (result.status, result.detail) == (check.ENV, "pytest exit 2")
+    assert timeouts == [60]
 
 
 def test_missing_executable_is_an_environment_problem(
@@ -125,6 +240,13 @@ def test_tool_name_skips_launchers() -> None:
         check._tool_name(["uv", "run", "python", "scripts/sensor.py", "--base", "x"]) == "sensor.py"
     )
     assert check._tool_name(["ruff", "check", "."]) == "ruff"
+
+
+def test_tool_name_skips_launcher_options_and_launchers_given_by_path() -> None:
+    assert check._tool_name(["uv", "run", "--frozen", "pytest", "--cov"]) == "pytest"
+    assert check._tool_name([".venv/bin/python", "-m", "pytest"]) == "pytest"
+    assert check._tool_name(["C:/tools/uv.exe", "run", "ruff", "check"]) == "ruff"
+    assert check._tool_name(["python", "-c", "raise SystemExit(2)"]) == "python"
 
 
 def test_usage_errors_never_exit_2(tmp_path: Path) -> None:
@@ -342,6 +464,42 @@ def test_changed_expands_to_the_changed_python_files_sorted(
     out = capfd.readouterr().out
     assert received(out) == ["base.py", "new.py", "pkg/committed.py"]
     assert "ok   sensor\n" in out
+
+
+def test_changed_never_includes_spikes(
+    feature_repo: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0020: a file named on the command line bypasses the tools' exclusions, so the
+    prototypes under spikes/ are dropped from {changed}: committed, modified or untracked."""
+    write(feature_repo, "spikes/committed.py")
+    git(feature_repo, "add", ".")
+    git(feature_repo, "commit", "-q", "-m", "a spike")
+    write(feature_repo, "spikes/committed.py", "x = 2\n")  # uncommitted
+    write(feature_repo, "spikes/deep/untracked.py")
+    write(feature_repo, "pkg/spikes/kept.py")  # only the project's own spikes/ is exempt
+    write(feature_repo, "spikes_report.py")
+    root = project(feature_repo, {"sensor": show_args()})
+    assert run(root) == 0
+    assert received(capfd.readouterr().out) == [
+        "base.py",
+        "new.py",
+        "pkg/committed.py",
+        "pkg/spikes/kept.py",
+        "spikes_report.py",
+    ]
+    assert check.resolve_changed("main", root, full=True).files == ["."], "--full is unchanged"
+
+
+def test_only_spikes_changed_means_no_changed_files(
+    feature_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    git(feature_repo, "switch", "-q", "--discard-changes", "main")
+    (feature_repo / "new.py").unlink()
+    write(feature_repo, "spikes/proto.py", "import nothing_real\n")
+    root = project(feature_repo, {"lint": exits(1, "lint") + " {changed}"})
+    assert run(root) == 0
+    assert ran(root) == []
+    assert "ok   lint (no changed files)" in capsys.readouterr().out.splitlines()
 
 
 def test_changed_is_relative_to_the_given_base(
