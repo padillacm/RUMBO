@@ -120,7 +120,8 @@ rumbo init --yes --name "XM Agent" --package xm_agent \
 
 In an existing project use `rumbo init --adopt`: it detects the package (from `[project].name`
 or the single top-level package), the kind (`[project.scripts]` → cli, a web framework
-dependency → service, else library), the layout and the tests directory (`tests` or `test`),
+dependency → service, else library), the layout, the tests directory (`tests` or `test`) and
+where the package lives (under `src/` or at the root, kept in `[tool.rumbo].src`, ADR-0020),
 writes the harness without the `src/` and tests skeleton, keeps an existing CI workflow and
 prints the two steps to add, and writes `lint`, `format` and `types` with `{changed}` so the
 strict tools run on the files a change touches; `uv run python scripts/rumbo_check.py --full`
@@ -248,22 +249,31 @@ the harness commands (the check runner, pytest, ruff, read-only git) and wires
 `scripts/rumbo_guard.py` as Claude Code hooks:
 
 - **Before every `Edit`/`Write`/`Bash` call** it blocks edits to the Makefile, `pyproject.toml`
-  (except through `uv add`), CI, `infra/`, the pre-commit config, the sensors and `.env`;
+  (`uv add` may change its dependency tables and nothing else, ADR-0019), CI, `infra/`, the
+  pre-commit config, the sensors and `.env`;
   removing a template mark; writing `[tests-change-approved]`; `--no-verify`; force pushes;
   `git reset --hard`; disabling git hooks; `rm -rf` on the root; shell redirections into
   protected files. The reason reaches the agent, which has to ask you.
 - **On `Stop`**, if Python, TOML or JSONL files changed since the last commit, it runs
   `scripts/rumbo_check.py --brief` and refuses to finish while it is red. If the environment is
-  broken (exit 3) it tells the agent to report to you instead of repairing it.
+  broken (exit 3: a tool could not even start) it tells the agent to report to you instead of
+  repairing it. A tool that started and rejected the code (an import error while collecting
+  tests, pytest's exit 2) is red, not environment (ADR-0018).
 
-**Any other agent** (Cursor, Codex, Gemini CLI, Aider…) meets the same rules at commit time:
-`rumbo init` installs the guard as git `pre-commit` and `commit-msg` hooks through pre-commit.
-They refuse a staged protected file, a removed template mark and the approval mark when the
-actor is an agent (an environment marker from `[tool.rumbo].agent_env` is set, or nobody has
-declared the clone human). You declare yourself once per clone with
-`git config rumbo.human true`; `rumbo init` does it where it runs and `rumbo doctor` reminds
-you elsewhere. **On a fresh clone, run that command before your first commit**: until you do,
-the hooks treat a hand-made commit of a harness file as an agent's and refuse it with that hint.
+**Any other agent** meets the same rules at commit time: `rumbo init` installs the guard as
+git `pre-commit` and `commit-msg` hooks through pre-commit. Cursor, Codex, Cline and Roo Code
+are recognised by the environment marker they set. Two limits, stated plainly (ADR-0021):
+Aider and Amp set no marker we could confirm, so in a clone you declared human only their
+commit attribution gives them away, in CI; and Gemini CLI disables git hooks in the shell it
+runs, so for it the binding layers are the sensor in CI and CODEOWNERS.
+They refuse a staged protected file (in `pyproject.toml`, any change outside the dependency
+tables), a removed template mark and the approval mark when the actor is an agent (an
+environment marker from `[tool.rumbo].agent_env` is set, or nobody has declared the clone
+human). You declare yourself once per clone with `git config rumbo.human true`; `rumbo init`
+does it only when you run it yourself in a terminal (never when an agent runs it, ADR-0021)
+and `rumbo doctor` reminds you elsewhere. **On a fresh clone, run that command before your
+first commit**: until you do, the hooks treat a hand-made commit of a harness file as an
+agent's and refuse it with that hint.
 
 **Your signature is the template mark.** Once you remove it from an ADR or a spec and commit,
 the document is read-only for the agent (ADR-0017): it proposes changes or writes a new

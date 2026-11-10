@@ -6,17 +6,21 @@ import datetime as dt
 import difflib
 import json
 import keyword
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 from rumbo import __version__
 from rumbo.project import (
     DEFAULT_PYTHON,
+    DEFAULT_SRC,
     DEFAULT_TYPE_CHECKER,
     HEXAGONAL_LAYERS,
     KINDS,
@@ -25,11 +29,15 @@ from rumbo.project import (
     SUPPORTED_PYTHONS,
     TYPE_CHECKERS,
     Project,
+    code_root,
+    package_path,
     resolve_layout,
     validate_axes,
     validate_python,
+    validate_src,
 )
 from rumbo.render import render
+from rumbo.sensors.guard import agent_env_names
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = PACKAGE_DIR / "templates"
@@ -227,10 +235,14 @@ class Config:
     python: str = DEFAULT_PYTHON
     # ADR-0015: the type checker (`pyright` or `mypy`): dependency, `types` step, config.
     types: str = DEFAULT_TYPE_CHECKER
+    # ADR-0020: the directory that holds the package: "src", or "." when an adopted project
+    # keeps it at the root. Every path the tools are pointed at is derived from it.
+    src: str = DEFAULT_SRC
 
     def __post_init__(self) -> None:
         self.name = self.name.strip()
         validate_python(self.python)
+        validate_src(self.src)
         if not valid_name(self.name):
             raise ValueError(
                 f"invalid project name {self.name!r}: no quotes, backslashes or control characters"
@@ -299,6 +311,7 @@ class Config:
             tests_dir=project.tests_dir,
             python=project.python,
             types=project.types,
+            src=project.src,
         )
 
     # Same semantics as the Project properties (ADR-0010).
@@ -324,6 +337,16 @@ class Config:
         """The pure layer (strict types, mutation target, purity contract); '' when flat."""
         names = self.layer_names
         return names[-1] if names else ""
+
+    @property
+    def code_root(self) -> str:
+        """What the tools scan (ADR-0020): `src`, or the package when it lives at the root."""
+        return code_root(self.src, self.package)
+
+    @property
+    def package_path(self) -> str:
+        """The package directory relative to the root (ADR-0020): `src/<pkg>` or `<pkg>`."""
+        return package_path(self.src, self.package)
 
     @property
     def python_matrix(self) -> tuple[str, ...]:
@@ -385,6 +408,13 @@ class Config:
             "types": self.types,
             "pyright": self.types == "pyright",
             "mypy": self.types == "mypy",
+            # ADR-0020: where the package lives, and the two paths derived from it (a `src`
+            # project renders `src` and `src/<pkg>`, as it always did).
+            "src": self.src,
+            "code_root": self.code_root,
+            "package_path": self.package_path,
+            # `"src" / "pkg"` or `"pkg"`: the same path as operands of the pathlib `/`.
+            "package_path_py": " / ".join(f'"{part}"' for part in self.package_path.split("/")),
             "case": self.case or "(no concrete case yet)",
             "date": dt.date.today().isoformat(),
             "rumbo_version": __version__,
@@ -676,7 +706,7 @@ def update(project: Project, dest: Path) -> Report:
 
     Other template files that differ from the current template are only listed.
     """
-    cfg = Config.from_project(project)
+    cfg = _update_config(project, dest)
     report = Report()
     plan = plan_files(cfg, dest)
     for rel, item in plan.items():
@@ -702,6 +732,7 @@ def update(project: Project, dest: Path) -> Report:
     _add_missing_steps(dest / "pyproject.toml", template, report)
     _add_axes_keys(dest / "pyproject.toml", cfg, report)
     _add_python_key(dest / "pyproject.toml", cfg, report)
+    _add_src_key(dest / "pyproject.toml", cfg, report)
     _bump_harness_version(dest / "pyproject.toml")
     missing = missing_dev_dependencies(cfg, (dest / "pyproject.toml").read_text(encoding="utf-8"))
     if missing:
@@ -835,6 +866,38 @@ def _add_python_key(pyproject: Path, cfg: Config, report: Report) -> None:
     _add_rumbo_keys(pyproject, {"python": f'"{cfg.python}"'}, report)
 
 
+def _add_src_key(pyproject: Path, cfg: Config, report: Report) -> None:
+    """Writes the `src` key a project generated before ADR-0020 lacks.
+
+    `Project.load` defaulted it to "src"; `_update_config` looked once at where an adopted
+    project keeps its package. Writing it makes that the stored fact.
+    """
+    _add_rumbo_keys(pyproject, {"src": f'"{cfg.src}"'}, report)
+
+
+def _rumbo_table(pyproject: Path) -> dict[str, object]:
+    """The `[tool.rumbo]` table of a pyproject; empty when missing or unreadable."""
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    rumbo = data.get("tool", {}).get("rumbo")
+    return rumbo if isinstance(rumbo, dict) else {}
+
+
+def _update_config(project: Project, dest: Path) -> Config:
+    """The configuration `rumbo update` renders with.
+
+    ADR-0020: a project adopted before the `src` key existed may keep its package at the root.
+    While the key is missing the disk is looked at, once: `update` then writes the key and
+    every later command reads it.
+    """
+    cfg = Config.from_project(project)
+    if cfg.adopted and "src" not in _rumbo_table(dest / "pyproject.toml"):
+        cfg.src = detect_src(dest, cfg.package)
+    return cfg
+
+
 def _add_rumbo_keys(pyproject: Path, wanted: dict[str, str], report: Report) -> None:
     """Appends the `[tool.rumbo]` keys of `wanted` (name -> TOML value) that are missing.
 
@@ -865,7 +928,7 @@ def update_diff(project: Project, dest: Path) -> str:
     Writes nothing. Framework-owned files are marked [update replaces]; the others
     [merge by hand] so the human can pick lines from the current template.
     """
-    cfg = Config.from_project(project)
+    cfg = _update_config(project, dest)
     chunks: list[str] = []
     for rel, item in plan_files(cfg, dest).items():
         target = dest / rel
@@ -1040,9 +1103,16 @@ def detect_kind(pyproject: dict[str, object]) -> str:
     return "library"
 
 
+def detect_src(root: Path, package: str) -> str:
+    """Where the package lives (ADR-0020): "." when it is at the root and not under `src/`."""
+    if (root / "src" / package).is_dir():
+        return "src"
+    return "." if (root / package).is_dir() else DEFAULT_SRC
+
+
 def detect_layout(root: Path, package: str) -> str:
-    """`hexagonal` when the package has `domain/` and `app/` under `src/`, else `flat`."""
-    base = root / "src" / package
+    """`hexagonal` when the package (under `src/` or at the root) has `domain/` and `app/`."""
+    base = root / package_path(detect_src(root, package), package)
     return "hexagonal" if (base / "domain").is_dir() and (base / "app").is_dir() else "flat"
 
 
@@ -1063,16 +1133,20 @@ class Detected:
     kind: str
     layout: str
     tests_dir: str
+    src: str = DEFAULT_SRC  # ADR-0020: "." when the package was found at the root
 
     def summary(self) -> str:
         return (
             f"package={self.package or '?'} kind={self.kind} layout={self.layout} "
-            f"tests={self.tests_dir}"
+            f"tests={self.tests_dir}" + (f" src={self.src}" if self.src != DEFAULT_SRC else "")
         )
 
 
 def detect_project(root: Path, package: str | None = None) -> Detected:
-    """Detects name, package, kind, layout and tests directory; `package` skips its detection."""
+    """Detects name, package (and where it lives), kind, layout and tests directory.
+
+    `package` skips the detection of the package.
+    """
     pyproject = read_pyproject(root)
     project_name = _project_table(pyproject).get("name")
     name = project_name.strip() if isinstance(project_name, str) and project_name.strip() else ""
@@ -1083,11 +1157,66 @@ def detect_project(root: Path, package: str | None = None) -> Detected:
         kind=detect_kind(pyproject),
         layout=detect_layout(root, package) if package else "flat",
         tests_dir=detect_tests_dir(root),
+        src=detect_src(root, package) if package else DEFAULT_SRC,
     )
 
 
-def install(cfg: Config, dest: Path, report: Report) -> None:
-    """Installs dependencies with uv (latest stable versions), the git hooks and `rumbo.human`."""
+# ADR-0008: what a human runs once per clone so the git hooks let their commits through.
+HUMAN_COMMAND = ("git", "config", "rumbo.human", "true")
+
+
+def is_console(stream: IO[str] | None) -> bool:
+    """True when `stream` is a real terminal.
+
+    `isatty()` alone is not enough on Windows: it is also true for the NUL device, which is
+    what a process started without a terminal (an agent's subprocess, a script with
+    `< /dev/null`) reads from. There the console API is asked as well.
+    """
+    try:
+        if stream is None or not stream.isatty():
+            return False
+        if sys.platform == "win32":
+            import ctypes
+            import msvcrt
+
+            mode = ctypes.c_ulong()
+            handle = ctypes.c_void_p(msvcrt.get_osfhandle(stream.fileno()))
+            return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+        return True
+    except (AttributeError, ValueError, OSError):  # no stream, a closed one, not a file
+        return False
+
+
+def at_a_terminal() -> bool:
+    """Standard input AND output are terminals: someone types and someone reads."""
+    return is_console(sys.stdin) and is_console(sys.stdout)
+
+
+def human_present(
+    dest: Path,
+    environ: Mapping[str, str] | None = None,
+    isatty: Callable[[], bool] | None = None,
+) -> bool:
+    """True when a human is demonstrably running the command (ADR-0021).
+
+    No agent marker in the environment (the guard's own list: `[tool.rumbo].agent_env` of the
+    project, else its `DEFAULT_AGENT_ENV`) and the command runs at a terminal (`at_a_terminal`:
+    an agent's subprocess has its output captured). `environ` and `isatty` default to the
+    process's own.
+    """
+    env = os.environ if environ is None else environ
+    if any(env.get(name) for name in agent_env_names(dest)):
+        return False
+    return bool((isatty or at_a_terminal)())
+
+
+def install(cfg: Config, dest: Path, report: Report, human: bool | None = None) -> None:
+    """Installs dependencies with uv (latest stable versions) and the git hooks.
+
+    `rumbo.human` is declared in the clone only for a human who is demonstrably there
+    (ADR-0021; `human` overrides `human_present`). Otherwise the setting is left alone: only
+    the human declares the human, and `rumbo init` prints the command in its next steps.
+    """
     if shutil.which("uv") is None:
         print("WARNING: 'uv' is not installed; install uv and run the commands in README.md.")
         report.commands.append(("uv (not installed)", 127))
@@ -1099,7 +1228,9 @@ def install(cfg: Config, dest: Path, report: Report) -> None:
     if (dest / ".git").exists():
         _run(["uv", "run", "pre-commit", "autoupdate"], dest, report)
         _run(["uv", "run", "pre-commit", "install"], dest, report)
-        # ADR-0008: the human runs `rumbo init`; the git hooks let their commits through.
-        _run(["git", "config", "rumbo.human", "true"], dest, report)
+        # ADR-0008/0021: the git hooks let the human's commits through; an agent that mounts
+        # the harness never makes that declaration on the human's behalf.
+        if human_present(dest) if human is None else human:
+            _run(list(HUMAN_COMMAND), dest, report)
     else:
         print("WARNING: not a git repository; run 'git init', then 'uv run pre-commit install'.")

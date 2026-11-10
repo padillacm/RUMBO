@@ -12,7 +12,7 @@ The entry may be a coroutine function (awaited) or a plain function (run in a wo
 case order whatever the concurrency, and with the default N=1 it is identical to a serial run.
 
 Every report carries a fingerprint (ADR-0016): sha256 digests of the prompts under
-src/{{package}}/prompts/, of evals/graders/judge.py and of the --entry reference. A `--live`
+{{package_path}}/prompts/, of evals/graders/judge.py and of the --entry reference. A `--live`
 run records them in evals/fingerprint.json (commit it with the fixtures it describes); an
 offline run that finds the file prints one warning per changed part after the summary line:
 the prompts changed (the recorded fixtures may be stale: re-record with --live) or the judge
@@ -83,7 +83,7 @@ def _normalized(file: Path) -> bytes:
 
 def fingerprint(root: Path, entry: str) -> dict[str, str]:
     """sha256 digests of what a recorded fixture or a calibration depends on (ADR-0016)."""
-    prompts = root / "src" / "{{package}}" / "prompts"
+    prompts = root / {{package_path_py}} / "prompts"
     files = sorted(
         (f.relative_to(prompts).as_posix(), f)
         for f in prompts.rglob("*")

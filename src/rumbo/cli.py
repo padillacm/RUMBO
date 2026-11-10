@@ -44,6 +44,7 @@ from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
 from rumbo.project import (
     DEFAULT_PYTHON,
+    DEFAULT_SRC,
     DEFAULT_TYPE_CHECKER,
     KINDS,
     LAYOUTS,
@@ -55,12 +56,14 @@ from rumbo.project import (
     slug,
 )
 from rumbo.scaffold import (
+    HUMAN_COMMAND,
     OTHER_PROVIDER,
     PROVIDERS,
     Config,
     Detected,
     add_dev_dependencies,
     detect_project,
+    detect_src,
     dev_dependencies,
     install,
     plan_files,
@@ -186,9 +189,31 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         layers=layers,
         adopted=detected is not None,
         tests_dir=detected.tests_dir if detected else "tests",
+        # ADR-0020: where the package that was finally chosen lives (never asked, no flag).
+        src=detect_src(Path(args.dir).resolve(), package) if detected else DEFAULT_SRC,
         python=args.python or DEFAULT_PYTHON,
         # ADR-0015: the type checker is a flag, never an A0 question.
         types=getattr(args, "types", None) or DEFAULT_TYPE_CHECKER,
+    )
+
+
+def _init_summary(cfg: Config) -> str:
+    """The settings `rumbo init` mounts the harness with, each one once, on one line."""
+    line = (
+        f"package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor} python={cfg.python} types={cfg.types}"
+    )
+    if cfg.adopted:
+        line += f" adopted=true tests={cfg.tests_dir}"
+    if cfg.src != DEFAULT_SRC:
+        line += f" src={cfg.src}"  # ADR-0020: only when the package is not under src/
+    return line
+
+
+def _next_steps(steps: list[str]) -> str:
+    """The steps numbered from 1; the continuation lines of a step are indented under it."""
+    return "\n".join(
+        f"  {n}. " + step.replace("\n", "\n     ") for n, step in enumerate(steps, start=1)
     )
 
 
@@ -199,13 +224,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         return _err(str(exc))
     dest = Path(args.dir).resolve()
     print(f"\nMounting the RUMBO harness in {dest}")
-    print(
-        f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
-        f"provider={cfg.provider or '-'} rigor={cfg.rigor} python={cfg.python}"
-        f"provider={cfg.provider or '-'} rigor={cfg.rigor} types={cfg.types}"
-        + (f" adopted=true tests={cfg.tests_dir}" if cfg.adopted else "")
-        + "\n"
-    )
+    print(f"  {_init_summary(cfg)}\n")
     if args.force:
         print(
             "--force: existing files are overwritten (a .bak copy is kept); "
@@ -228,22 +247,31 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not args.no_install:
         install(cfg, dest, rep)
     print("\n" + rep.summary())
+    # ADR-0021: only the human declares the human. `install` did it for a human at a terminal;
+    # in every other case the command is the human's first step in this clone.
+    declare = (
+        [f"{' '.join(HUMAN_COMMAND)}    # you, the human, once per clone (never the agent)"]
+        if (dest / ".git").exists() and not _declared_human(dest)
+        else []
+    )
     if args.no_install:
         runtime = runtime_dependencies(cfg)
-        print(
-            "\nNext steps (--no-install):\n"
-            f"  1. uv add --dev {' '.join(dev_dependencies(cfg))}"
-            + (f"\n     uv add {' '.join(runtime)}" if runtime else "")
-            + "\n  2. uv run pre-commit autoupdate && uv run pre-commit install\n"
-            "  3. uv run python scripts/rumbo_check.py    # must be green\n"
-        )
+        steps = [
+            f"uv add --dev {' '.join(dev_dependencies(cfg))}"
+            + (f"\nuv add {' '.join(runtime)}" if runtime else ""),
+            "uv run pre-commit autoupdate && uv run pre-commit install",
+            *declare,
+            "uv run python scripts/rumbo_check.py    # must be green",
+        ]
+        print(f"\nNext steps (--no-install):\n{_next_steps(steps)}\n")
     else:
-        print(
-            "\nNext steps (A8):\n"
-            "  1. uv run python scripts/rumbo_check.py    # must be green\n"
-            "  2. git add -A && git commit -m 'chore: initial RUMBO harness'\n"
-            '  3. Open Claude Code and say: "Read AGENTS.md and RUMBO.md; let\'s start phase R".'
-        )
+        steps = [
+            *declare,
+            "uv run python scripts/rumbo_check.py    # must be green",
+            "git add -A && git commit -m 'chore: initial RUMBO harness'",
+            'Open Claude Code and say: "Read AGENTS.md and RUMBO.md; let\'s start phase R".',
+        ]
+        print(f"\nNext steps (A8):\n{_next_steps(steps)}")
     print("  See what was created with: git status")
     return 1 if any(rc != 0 for _, rc in rep.commands) else 0
 
@@ -382,13 +410,18 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 # ----------------------------------------------------------------------- doctor
 def _declared_human(root: Path) -> bool:
-    """`git config rumbo.human` is true in this clone (set by `rumbo init`, ADR-0008)."""
+    """`git config rumbo.human` is true in this clone (ADR-0008).
+
+    The human declares it; `rumbo init` does it only for a human at a terminal (ADR-0021).
+    """
     try:
         proc = subprocess.run(
             ["git", "config", "--get", "rumbo.human"],
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError:
@@ -552,7 +585,10 @@ def osv_vulnerabilities(name: str) -> int | None:
         )
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return None
-    return len(data.get("vulns", [])) if data else 0
+    if data is None:
+        return 0
+    vulns = data.get("vulns", []) if isinstance(data, dict) else None
+    return len(vulns) if isinstance(vulns, list) else None  # an unexpected shape: unknown
 
 
 # ADR-0014: a private index (Artifactory, CodeArtifact, GitLab...) answers existence and versions;
@@ -572,7 +608,13 @@ def resolve_index(flag: str | None, env: Mapping[str, str]) -> str | None:
     url = flag or next((env[key] for key in INDEX_ENV_VARS if env.get(key)), None)
     if not url:
         return None
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        _ = parts.port  # a port that is not a number raises here, not later in a request
+    except ValueError:
+        # Never echo the value: it may carry credentials.
+        raise ValueError("the index URL cannot be parsed (check the host and the port)") from None
+    host = (parts.hostname or "").lower()
     return None if host in ("pypi.org", "www.pypi.org") else url
 
 
@@ -776,23 +818,28 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
         for w in warnings:
             print(f"   ⚠️  {w}{label}")
         return 1 if warnings else 0
-    info: dict[str, Any] = data.get("info") or {}
-    releases: dict[str, list[dict[str, Any]]] = data.get("releases") or {}
-    canonical = str(info.get("name") or name)
-    dates = [
-        f["upload_time_iso_8601"][:10]
-        for files in releases.values()
-        for f in files
-        if isinstance(f, dict) and f.get("upload_time_iso_8601")
-    ]
-    first = min(dates) if dates else None
-    age = (dt.date.today() - dt.date.fromisoformat(first)).days if first else None
-    urls = info.get("project_urls") or {}
-    repo = next(
-        (u for k, u in urls.items() if re.search(r"source|repo|code|github|home", k, re.I)),
-        info.get("home_page") or "",
-    )
-    headline = f"{canonical} {info.get('version', '?')} — {info.get('summary') or ''}"
+    try:
+        info: dict[str, Any] = data.get("info") or {}
+        releases: dict[str, list[dict[str, Any]]] = data.get("releases") or {}
+        canonical = str(info.get("name") or name)
+        dates = [
+            f["upload_time_iso_8601"][:10]
+            for files in releases.values()
+            for f in files
+            if isinstance(f, dict) and f.get("upload_time_iso_8601")
+        ]
+        first = min(dates) if dates else None
+        age = (dt.date.today() - dt.date.fromisoformat(first)).days if first else None
+        urls = info.get("project_urls") or {}
+        repo = next(
+            (u for k, u in urls.items() if re.search(r"source|repo|code|github|home", k, re.I)),
+            info.get("home_page") or "",
+        )
+        headline = f"{canonical} {info.get('version', '?')} — {info.get('summary') or ''}"
+    except (AttributeError, TypeError, KeyError, ValueError):
+        # ADR-0014 / threat model, boundary 3: the answer is untrusted data.
+        print(f"{indent}❓ {name}: PyPI answered in an unexpected shape. Verify by hand.")
+        return 2
     print(f"   on PyPI: {headline}{label}" if on_index else f"📦 {headline}")
     print(f"   first release: {first or '?'} ({age if age is not None else '?'} days ago){label}")
     print(f"   repository: {repo or '(not declared)'}  ·  releases: {len(releases)}{label}")
@@ -815,7 +862,10 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
 
 
 def cmd_verify_dep(args: argparse.Namespace) -> int:
-    index = resolve_index(args.index, os.environ)
+    try:
+        index = resolve_index(args.index, os.environ)
+    except ValueError as exc:
+        return _err(str(exc))
     code = 0
     for name in args.packages:
         if index is not None:

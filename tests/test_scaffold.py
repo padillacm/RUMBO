@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,7 @@ COMBINATIONS = [
 ]
 
 
+# Covers F-0004.R2 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("cfg", COMBINATIONS, ids=lambda c: f"{c.provider or 'no-llm'}-{c.rigor}")
 def test_every_combination_renders(cfg: Config) -> None:
     plan = plan_files(cfg)
@@ -77,6 +79,7 @@ def test_every_combination_renders(cfg: Config) -> None:
     assert data["tool"]["rumbo"]["llm"] is cfg.llm
 
 
+# Covers F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_ci_never_holds_the_model_credential() -> None:
     plan = plan_files(Config(name="x", package="x", llm=True, provider="openai", rigor="mvp"))
     ci = str(plan[".github/workflows/ci.yml"])
@@ -86,6 +89,7 @@ def test_ci_never_holds_the_model_credential() -> None:
     assert "gitleaks-action" in ci
 
 
+# Covers F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_llm_only_files() -> None:
     with_llm = plan_files(Config(name="x", package="x", llm=True, provider="anthropic"))
     without = plan_files(Config(name="x", package="x", llm=False))
@@ -110,6 +114,7 @@ def test_llm_only_files() -> None:
     assert "src/x/adapters/claude_code.py" not in with_llm
 
 
+# Covers F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_claude_code_provider_has_no_sdk_and_an_adapter() -> None:
     cfg = Config(name="x", package="x", llm=True, provider="claude-code")
     assert cfg.sdk_package == ""
@@ -118,6 +123,7 @@ def test_claude_code_provider_has_no_sdk_and_an_adapter() -> None:
     assert "npm install -g @anthropic-ai/claude-code" in str(plan[".github/workflows/nightly.yml"])
 
 
+# Covers F-0004.R6 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_rigor_controls_nightly_dependabot_and_check() -> None:
     proto = plan_files(Config(name="x", package="x", llm=False, rigor="prototype"))
     prod = plan_files(
@@ -161,6 +167,7 @@ def expected_steps(cfg: Config) -> list[str]:
     ]
 
 
+# Covers F-0004.R6 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("cfg", COMBINATIONS, ids=lambda c: f"{c.provider or 'no-llm'}-{c.rigor}")
 def test_checks_table_lists_the_steps_in_order(cfg: Config) -> None:
     """ADR-0006 fitness: every project has [tool.rumbo.checks], same steps, same order."""
@@ -216,6 +223,7 @@ def test_generated_ci_runs_the_runner_on_linux_and_windows_without_make(cfg: Con
             assert "run: uv run python evals/run_evals.py --suite all --live" in str(nightly)
 
 
+# Covers F-0004.R7 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_runner_is_copied_byte_identical_and_protected(simple_project: Path) -> None:
     from rumbo.scaffold import CHECK_FILE
     from rumbo.sensors import guard
@@ -229,6 +237,7 @@ def test_runner_is_copied_byte_identical_and_protected(simple_project: Path) -> 
     assert attributes.endswith("* text=auto eol=lf\n")
 
 
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_update_refreshes_the_runner(llm_project: Path) -> None:
     from rumbo.scaffold import CHECK_FILE
 
@@ -242,6 +251,7 @@ def test_update_refreshes_the_runner(llm_project: Path) -> None:
     assert "scripts/rumbo_check.py" in rep.created and runner.exists()
 
 
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_update_adds_the_checks_table_to_an_older_project(llm_project: Path) -> None:
     pyproject = llm_project / "pyproject.toml"
     original = pyproject.read_text(encoding="utf-8")
@@ -261,6 +271,7 @@ def test_update_adds_the_checks_table_to_an_older_project(llm_project: Path) -> 
         pyproject.write_text(original, encoding="utf-8")
 
 
+# Covers F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_provider_sdk_is_forbidden_in_domain() -> None:
     cfg = Config(name="x", package="x", llm=True, provider="google")
     data = tomllib.loads(str(plan_files(cfg)["pyproject.toml"]))
@@ -269,6 +280,7 @@ def test_provider_sdk_is_forbidden_in_domain() -> None:
     assert cfg.sdk_package == "google-genai"
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_name_is_escaped_in_toml_and_python() -> None:
     cfg = Config(name="Demo 'quoted' project", package="demo", llm=True, provider="anthropic")
     plan = plan_files(cfg)
@@ -276,18 +288,21 @@ def test_name_is_escaped_in_toml_and_python() -> None:
     ast.parse(str(plan["src/demo/api/http.py"]))
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("name", ['bad "name"', "back\\slash", "new\nline", ""])
 def test_invalid_names(name: str) -> None:
     with pytest.raises(ValueError):
         Config(name=name, package="x", llm=False)
 
 
+# Covers F-0004.R2 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_target_path() -> None:
     cfg = Config(name="x", package="my_pkg", llm=False)
     assert target_path("dot_github/workflows/ci.yml.tmpl", cfg) == ".github/workflows/ci.yml"
     assert target_path("src/__pkg__/domain/__init__.py", cfg) == "src/my_pkg/domain/__init__.py"
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("package", ["MyPkg", "1pkg", "with-dash", "class", "tests", ""])
 def test_invalid_packages(package: str) -> None:
     assert not valid_package(package)
@@ -295,12 +310,14 @@ def test_invalid_packages(package: str) -> None:
         Config(name="x", package=package, llm=False)
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_to_package() -> None:
     assert to_package("2048 game") == "app_2048_game"
     assert to_package("Mi Proyecto") == "mi_proyecto"
     assert to_package("class") == "class_app"
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_llm_needs_valid_provider() -> None:
     with pytest.raises(ValueError):
         Config(name="x", package="x", llm=True)
@@ -310,6 +327,7 @@ def test_llm_needs_valid_provider() -> None:
         Config(name="x", package="x", llm=True, provider="other", sdk_package="foo")
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize(
     ("sdk_package", "sdk_module"),
     [
@@ -334,6 +352,7 @@ def test_other_provider_sdk_names_are_validated(sdk_package: str, sdk_module: st
         )
 
 
+# Covers F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_other_provider_accepts_extras_and_dotted_modules() -> None:
     cfg = Config(
         name="x",
@@ -350,6 +369,7 @@ def test_other_provider_accepts_extras_and_dotted_modules() -> None:
     ast.parse(str(plan["tests/architecture/test_architecture.py"]))
 
 
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_scaffold_skips_existing_and_reports(simple_project: Path) -> None:
     agents = simple_project / "AGENTS.md"
     agents.write_text("mine", encoding="utf-8")
@@ -361,6 +381,7 @@ def test_scaffold_skips_existing_and_reports(simple_project: Path) -> None:
     assert not rep.created and not rep.merged
 
 
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_force_overwrites_but_merges_pyproject_and_gitignore(simple_project: Path) -> None:
     pyproject = simple_project / "pyproject.toml"
     pyproject.write_text(
@@ -392,6 +413,7 @@ def test_sensor_is_copied_and_executable(simple_project: Path) -> None:
     assert os.name == "nt" or sensor.stat().st_mode & 0o111  # no exec bits on Windows
 
 
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_merge_pyproject_keeps_existing_sections() -> None:
     existing = '[project]\nname = "x"\n\n[tool.ruff]\nline-length = 120\n'
     template = (
@@ -406,12 +428,14 @@ def test_merge_pyproject_keeps_existing_sections() -> None:
     assert any("kept" in n for n in notes)
 
 
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_merge_lines_without_duplicates() -> None:
     merged, new = merge_lines(".venv/\n", ".venv/\n.env\n")
     assert new == [".env"]
     assert merged.count(".venv/") == 1
 
 
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_update_refreshes_owned_files_only(llm_project: Path) -> None:
     rumbo_md = llm_project / "RUMBO.md"
     rumbo_md.write_text("old", encoding="utf-8")
@@ -457,6 +481,7 @@ def test_config_round_trips_through_project(llm_project: Path) -> None:
     )
 
 
+# Covers F-0004.R11, F-0004.R12 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_pre_commit_rev_bumps_are_not_drift(llm_project: Path) -> None:
     from rumbo.scaffold import update, update_diff
 
@@ -573,15 +598,32 @@ def test_pre_commit_config_wires_the_guard_as_git_hooks(simple_project: Path) ->
         assert existing in config
 
 
-def test_init_declares_the_human_in_the_clone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+class _Stdin:
+    """Stands in for `sys.stdin`: a terminal or a pipe."""
+
+    def __init__(self, terminal: bool) -> None:
+        self.terminal = terminal
+
+    def isatty(self) -> bool:
+        return self.terminal
+
+
+def _init_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: bool
+) -> list[list[str]]:
+    """Prepares `rumbo init` (with install) for a test: uv is faked, git is real and isolated,
+    no agent marker is in the environment and stdin is (or is not) a terminal. Returns the list
+    the commands of `install` are recorded in."""
     from rumbo import scaffold as scaffold_module
-    from rumbo.cli import main
     from rumbo.scaffold import Report
+    from rumbo.sensors.guard import DEFAULT_AGENT_ENV
 
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for marker in DEFAULT_AGENT_ENV:  # the suite itself may be run by an agent
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setattr("sys.stdin", _Stdin(terminal))
+    monkeypatch.setattr("rumbo.scaffold.at_a_terminal", lambda: terminal)
     commands: list[list[str]] = []
     real_run = scaffold_module._run
 
@@ -594,9 +636,32 @@ def test_init_declares_the_human_in_the_clone(
 
     monkeypatch.setattr(scaffold_module, "_run", fake_run)
     monkeypatch.setattr(scaffold_module.shutil, "which", lambda _name: "uv")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return commands
+
+
+def _git_repo(root: Path) -> Path:
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    return root
+
+
+def _rumbo_human(repo: Path) -> str:
+    """The value of `rumbo.human` in the clone ('' when it is not set)."""
+    declared = subprocess.run(
+        ["git", "config", "--get", "rumbo.human"], cwd=repo, capture_output=True, text=True
+    )
+    return declared.stdout.strip()
+
+
+# Covers F-0004.R15 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_declares_the_human_in_the_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0008, as narrowed by ADR-0021: the scenario is a human at a terminal."""
+    from rumbo.cli import main
+
+    commands = _init_without_network(tmp_path, monkeypatch, terminal=True)
+    repo = _git_repo(tmp_path / "repo")
     init = ["init", "--yes", "--name", "Demo", "--package", "demo", "--no-llm", "--rigor", "mvp"]
     assert main([*init, "--dir", str(repo)]) == 0
     assert commands.index(["uv", "run", "pre-commit", "install"]) < commands.index(
@@ -621,6 +686,101 @@ def test_init_declares_the_human_in_the_clone(
     assert main([*init, "--dir", str(plain)]) == 0
     assert not any(cmd[0] == "git" for cmd in commands)
     assert "not a git repository" in capsys.readouterr().out
+
+
+# Covers F-0004.R15 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_declares_rumbo_human_only_for_an_interactive_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0021 fitness: `rumbo init` sets `rumbo.human` only when a human is demonstrably
+    there (no agent marker in the environment and stdin is a terminal). Otherwise it leaves the
+    setting alone and prints the one command the human runs, in its next steps."""
+    from rumbo.cli import main
+    from rumbo.scaffold import HUMAN_COMMAND, human_present
+    from rumbo.sensors.guard import DEFAULT_AGENT_ENV
+
+    declare = list(HUMAN_COMMAND)
+    hint = "1. git config rumbo.human true"  # the human's first step in the clone
+    init = ["init", "--yes", "--name", "Demo", "--package", "demo", "--no-llm", "--rigor", "mvp"]
+    assert declare == ["git", "config", "rumbo.human", "true"]
+
+    # 1. A terminal and no marker: a human is there, the clone is declared, nothing to add.
+    commands = _init_without_network(tmp_path, monkeypatch, terminal=True)
+    human = _git_repo(tmp_path / "human")
+    assert main([*init, "--dir", str(human)]) == 0
+    assert declare in commands
+    assert _rumbo_human(human) == "true"
+    out = capsys.readouterr().out
+    assert hint not in out and "Next steps (A8):\n  1. uv run python" in out
+
+    # 2. A terminal but an agent marker: not set, and the next steps say what the human runs.
+    monkeypatch.setenv(DEFAULT_AGENT_ENV[0], "1")
+    commands.clear()
+    agent = _git_repo(tmp_path / "agent")
+    assert main([*init, "--dir", str(agent)]) == 0
+    assert declare not in commands
+    assert _rumbo_human(agent) == ""
+    out = capsys.readouterr().out
+    assert f"Next steps (A8):\n  {hint}" in out
+    assert "  2. uv run python scripts/rumbo_check.py" in out  # the other steps are renumbered
+    # `--no-install` declares nothing either: the command comes after the hooks are installed.
+    bare = _git_repo(tmp_path / "bare")
+    assert main([*init, "--no-install", "--dir", str(bare)]) == 0
+    assert _rumbo_human(bare) == ""
+    out = capsys.readouterr().out
+    assert "  3. git config rumbo.human true" in out and "  4. uv run python scripts/" in out
+
+    # 3. No marker but no terminal (a pipe, CI, an agent with no known marker): not set either.
+    monkeypatch.delenv(DEFAULT_AGENT_ENV[0])
+    monkeypatch.setattr("sys.stdin", _Stdin(terminal=False))
+    monkeypatch.setattr("rumbo.scaffold.at_a_terminal", lambda: False)
+    commands.clear()
+    piped = _git_repo(tmp_path / "piped")
+    assert main([*init, "--dir", str(piped)]) == 0
+    assert declare not in commands
+    assert _rumbo_human(piped) == ""
+    assert f"Next steps (A8):\n  {hint}" in capsys.readouterr().out
+
+    # A declaration the human already made is left alone, and then there is nothing to say.
+    subprocess.run(declare, cwd=piped, check=True)
+    assert main([*init, "--dir", str(piped)]) == 0
+    assert _rumbo_human(piped) == "true"
+    assert hint not in capsys.readouterr().out
+
+    # The two conditions, one by one (both are injectable); a project's own `agent_env` counts.
+    def terminal() -> bool:
+        return True
+
+    assert human_present(human, environ={}, isatty=terminal) is True
+    assert human_present(human, environ={}, isatty=lambda: False) is False
+    for marker in DEFAULT_AGENT_ENV:
+        assert human_present(human, environ={marker: "1"}, isatty=terminal) is False
+    pyproject = human / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(
+        text.replace("[tool.rumbo]\n", '[tool.rumbo]\nagent_env = ["MY_AGENT"]\n', 1),
+        encoding="utf-8",
+    )
+    assert human_present(human, environ={"MY_AGENT": "1"}, isatty=terminal) is False
+    assert human_present(human, environ={DEFAULT_AGENT_ENV[0]: "1"}, isatty=terminal) is True
+
+
+# Covers F-0004.R15 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_the_null_device_is_not_a_terminal() -> None:
+    """ADR-0021: on Windows `isatty()` is true for NUL, where a process without a terminal
+    reads from; `rumbo init < /dev/null` declared the human. A closed or missing stream and
+    one that is not a file are not terminals either."""
+    import io
+
+    from rumbo.scaffold import is_console
+
+    with open(os.devnull, encoding="utf-8") as null:
+        assert is_console(null) is False
+    closed = open(os.devnull, encoding="utf-8")  # noqa: SIM115
+    closed.close()
+    assert is_console(closed) is False
+    assert is_console(None) is False
+    assert is_console(io.StringIO("y\n")) is False
 
 
 # ------------------------------------------------------- kinds and layouts (ADR-0010)
@@ -660,6 +820,7 @@ COLUMNS = HTTP_FILES | OPS_FILES | SLOS_FILES | EVALS_FILES | JUDGE_FILES
 RELEASE_TEMPLATES = ("CHANGELOG.md", "dot_github/workflows/release.yml.tmpl")
 
 
+# Covers F-0004.R3 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("kind", KINDS)
 def test_each_kind_generates_exactly_its_column(kind: str) -> None:
     """ADR-0010 fitness: the plan holds what the table says for the kind and nothing else."""
@@ -696,6 +857,7 @@ def test_each_kind_generates_exactly_its_column(kind: str) -> None:
     assert "def main() -> int:" in main and "configure_json_logging" not in main
 
 
+# Covers F-0004.R3, F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_data_gets_evals_without_a_model_and_the_judge_only_with_one() -> None:
     offline = plan_files(_axes("data"))
     assert offline.keys() >= EVALS_FILES and not JUDGE_FILES & offline.keys()
@@ -708,6 +870,7 @@ def test_data_gets_evals_without_a_model_and_the_judge_only_with_one() -> None:
     assert "tests/unit/test_graders.py" not in plan_files(_axes("library"))
 
 
+# Covers F-0004.R3 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_service_keeps_http_without_llm_and_logs_json_only_with_it() -> None:
     plain = plan_files(_axes("service"))
     http = str(plain["src/x/api/http.py"])
@@ -719,6 +882,7 @@ def test_service_keeps_http_without_llm_and_logs_json_only_with_it() -> None:
     assert '"python", "-m", "x"' in str(plan_files(_axes("data"))["infra/Dockerfile"])
 
 
+# Covers F-0004.R4 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize(
     ("layout", "layers", "inner"),
     [("hexagonal", (), "domain"), ("layered", ("web", "core"), "core"), ("flat", (), "")],
@@ -775,6 +939,7 @@ def test_each_layout_has_its_contracts_or_none(
             ast.parse(str(plan[path]), filename=path)
 
 
+# Covers F-0004.R4 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_layout_defaults_follow_the_kind_and_llm_forces_hexagonal() -> None:
     assert _axes("service").layout == "hexagonal"
     assert all(_axes(kind).layout == "flat" for kind in ("library", "cli", "data"))
@@ -784,6 +949,7 @@ def test_layout_defaults_follow_the_kind_and_llm_forces_hexagonal() -> None:
     assert _axes("data", llm=True).layout == "hexagonal"
 
 
+# Covers F-0004.R4 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -802,6 +968,7 @@ def test_axes_validation(kwargs: dict[str, Any]) -> None:
         Config(name="x", package="x", llm=False, **kwargs)
 
 
+# Covers F-0004.R3, F-0004.R4, F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_service_dependencies_do_not_depend_on_llm() -> None:
     assert runtime_dependencies(_axes("service")) == ["fastapi", "uvicorn", "httpx"]
     assert runtime_dependencies(_axes("service", llm=True)) == [
@@ -818,6 +985,7 @@ def test_service_dependencies_do_not_depend_on_llm() -> None:
     assert dev_dependencies(_axes("cli", layout="hexagonal")) == dev_dependencies(_axes("service"))
 
 
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_project_load_infers_service_hexagonal_and_update_writes_the_keys(
     llm_project: Path,
 ) -> None:
@@ -855,6 +1023,7 @@ def test_project_load_infers_service_hexagonal_and_update_writes_the_keys(
         pyproject.write_text(original, encoding="utf-8")
 
 
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_update_writes_layers_for_a_layered_project(tmp_path: Path) -> None:
     cfg = _axes("library", layout="layered", layers=("web", "core"))
     scaffold(cfg, tmp_path)
@@ -900,6 +1069,7 @@ def _rigor(rigor: str, kind: str = "service", layout: str = "", llm: bool = Fals
     )
 
 
+# Covers F-0004.R6 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_dev_dependencies_scale_with_rigor_kind_and_layout() -> None:
     """ADR-0011 fitness: a prototype installs what a prototype verifies; nothing is pinned."""
     assert dev_dependencies(_rigor("prototype")) == [*BASE_TOOLS, "import-linter"]
@@ -930,6 +1100,7 @@ def test_dev_dependencies_scale_with_rigor_kind_and_layout() -> None:
     assert runtime_dependencies(_rigor("production", kind="library")) == []
 
 
+# Covers F-0004.R6 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("kind", KINDS)
 def test_check_steps_per_rigor(kind: str) -> None:
     """ADR-0011 fitness: security, security-scripts and audit arrive with mvp, in ADR-0006 order."""
@@ -950,6 +1121,7 @@ def _dev_group(pyproject: Path, deps: list[str]) -> None:
     pyproject.write_text(pyproject.read_text(encoding="utf-8") + group, encoding="utf-8")
 
 
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_update_appends_the_steps_of_a_raised_rigor_once(simple_project: Path) -> None:
     """ADR-0011 fitness: a hand-raised rigor gets its steps appended once, plus the uv line."""
     pyproject = simple_project / "pyproject.toml"
@@ -1000,6 +1172,7 @@ def test_update_appends_the_steps_of_a_raised_rigor_once(simple_project: Path) -
     ]
 
 
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_missing_dev_dependencies_reads_both_groups_and_ignores_versions() -> None:
     cfg = _rigor("production", kind="library")  # flat: no import-linter
     base = 'name = "x"\n[tool.rumbo]\npackage = "x"\n'
@@ -1019,6 +1192,7 @@ def test_missing_dev_dependencies_reads_both_groups_and_ignores_versions() -> No
     assert dependency_name("") == ""
 
 
+# Covers F-0004.R13 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_set_rigor_rewrites_only_the_key() -> None:
     cfg = Config(
         name="x",
@@ -1079,6 +1253,7 @@ def _adopted(
     )
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_detect_package_from_the_project_name(tmp_path: Path) -> None:
     """ADR-0013: `[project].name` normalised to snake_case when its directory exists."""
     root = _legacy(tmp_path / "a", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
@@ -1090,6 +1265,7 @@ def test_detect_package_from_the_project_name(tmp_path: Path) -> None:
     assert detect_package(root, read_pyproject(root)) == "legacy_app"
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_detect_package_from_the_single_directory(tmp_path: Path) -> None:
     """ADR-0013: without a matching name, the one directory with an __init__.py that is not a
     harness folder (tests, test, docs, scripts, spikes, evals, infra, src)."""
@@ -1103,6 +1279,7 @@ def test_detect_package_from_the_single_directory(tmp_path: Path) -> None:
     assert detect_package(tmp_path / "d", {}) is None  # no pyproject, no directories
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_detect_package_ambiguity_asks_for_the_flag(tmp_path: Path) -> None:
     root = _legacy(tmp_path, LEGACY_PYPROJECT, "alpha/__init__.py", "src/beta/__init__.py")
     with pytest.raises(ValueError, match=r"alpha, beta.*--package"):
@@ -1111,6 +1288,7 @@ def test_detect_package_ambiguity_asks_for_the_flag(tmp_path: Path) -> None:
     assert detect_project(root, "beta").package == "beta"
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize(
     ("pyproject", "kind"),
     [
@@ -1149,6 +1327,7 @@ def test_detect_kind(pyproject: str, kind: str) -> None:
     assert detect_kind(tomllib.loads(pyproject)) == kind
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_detect_layout(tmp_path: Path) -> None:
     hexagonal = _legacy(
         tmp_path / "hex",
@@ -1167,6 +1346,7 @@ def test_detect_layout(tmp_path: Path) -> None:
     )
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_detect_tests_dir(tmp_path: Path) -> None:
     assert detect_tests_dir(tmp_path) == "tests"  # nothing yet: the default
     (tmp_path / "test").mkdir()
@@ -1175,6 +1355,7 @@ def test_detect_tests_dir(tmp_path: Path) -> None:
     assert detect_tests_dir(tmp_path) == "tests"  # `tests` wins when both exist
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_detect_project_puts_it_together(tmp_path: Path) -> None:
     root = _legacy(tmp_path, LEGACY_PYPROJECT, "src/legacy_app/__init__.py", "test/test_x.py")
     detected = detect_project(root)
@@ -1188,6 +1369,7 @@ def test_detect_project_puts_it_together(tmp_path: Path) -> None:
     )
 
 
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_adoption_plan_writes_the_harness_and_no_skeleton() -> None:
     """ADR-0013 fitness: nothing under src/, only two test files, `adopted = true`, `{changed}`."""
     cfg = _adopted()
@@ -1246,6 +1428,7 @@ def _rendered_checks_of(cfg: Config) -> dict[str, str]:
     return tomllib.loads(str(plan_files(cfg)["pyproject.toml"]))["tool"]["rumbo"]["checks"]
 
 
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_adoption_with_the_default_tests_dir_writes_no_tests_key() -> None:
     plan = plan_files(_adopted(tests_dir="tests"))
     rumbo = tomllib.loads(str(plan["pyproject.toml"]))["tool"]["rumbo"]
@@ -1256,6 +1439,7 @@ def test_adoption_with_the_default_tests_dir_writes_no_tests_key() -> None:
     ]
 
 
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_adoption_keeps_the_purity_rules_when_the_layout_has_layers() -> None:
     plan = plan_files(_adopted(kind="service", layout="hexagonal"))
     arch = str(plan["test/architecture/test_architecture.py"])
@@ -1264,6 +1448,7 @@ def test_adoption_keeps_the_purity_rules_when_the_layout_has_layers() -> None:
     assert "infra/Dockerfile" in plan  # the kind has it and no root was given
 
 
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_plan_is_unchanged_without_adoption() -> None:
     cfg = Config(name="Legacy", package="legacy_app", llm=False, rigor="mvp", kind="cli")
     plan = plan_files(cfg)
@@ -1276,6 +1461,7 @@ def test_init_plan_is_unchanged_without_adoption() -> None:
     assert "src/legacy_app/__main__.py" in plan and "tests/unit/test_smoke.py" in plan
 
 
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_adoption_skips_ci_when_a_workflow_exists_and_prints_the_steps(tmp_path: Path) -> None:
     """ADR-0013: an existing workflow is the human's; the report lists the two steps to add."""
     cfg = _adopted()
@@ -1299,6 +1485,7 @@ def test_adoption_skips_ci_when_a_workflow_exists_and_prints_the_steps(tmp_path:
     assert (other / ".github" / "workflows" / "ci.yml").is_file() and report.notes == []
 
 
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_adoption_skips_infra_when_the_directory_exists(tmp_path: Path) -> None:
     cfg = _adopted(kind="service", layout="flat")
     root = _legacy(tmp_path, LEGACY_PYPROJECT, "src/legacy_app/__init__.py", "infra/k8s.yaml")
@@ -1309,6 +1496,7 @@ def test_adoption_skips_infra_when_the_directory_exists(tmp_path: Path) -> None:
     assert (root / "docs" / "ops" / "runbook.md").is_file()  # the other ops files still come
 
 
+# Covers F-0004.R10, F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_adopted_project_round_trips_and_updates_without_a_skeleton(tmp_path: Path) -> None:
     cfg = _adopted()
     root = _legacy(
@@ -1333,6 +1521,177 @@ def test_adopted_project_round_trips_and_updates_without_a_skeleton(tmp_path: Pa
     assert not (root / "src" / "legacy_app" / "__main__.py").exists()
 
 
+# ------------------------------------------- the layout the project already has (ADR-0020)
+# Covers F-0004.R9, F-0004.R10, F-0004.R11
+# (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_adopting_a_root_package_points_every_tool_at_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0020 fitness: a package at the root (no `src/`) and tests in `test/` are adopted as
+    they are; `[tool.rumbo].src` records it and every tool is pointed at the package."""
+    from rumbo.cli import main
+
+    root = _legacy(
+        tmp_path / "legacy", LEGACY_PYPROJECT, "legacy_app/__init__.py", "test/test_x.py"
+    )
+    detected = detect_project(root)
+    assert (detected.package, detected.src, detected.tests_dir) == ("legacy_app", ".", "test")
+    assert detected.summary() == "package=legacy_app kind=cli layout=flat tests=test src=."
+    adopt = ["init", "--adopt", "--yes", "--no-install", "--no-llm", "--rigor", "mvp"]
+    assert main([*adopt, "--dir", str(root)]) == 0
+    assert "adopted=true tests=test src=.\n" in capsys.readouterr().out
+
+    # The key, and the project state that reads it.
+    tool = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+    assert tool["rumbo"]["src"] == "." and tool["rumbo"]["tests"] == "test"
+    project = Project.load(root)
+    assert (project.src, project.code_root, project.package_path) == (
+        ".",
+        "legacy_app",
+        "legacy_app",
+    )
+    cfg = Config.from_project(project)
+    assert (cfg.src, cfg.code_root, cfg.package_path) == (".", "legacy_app", "legacy_app")
+    # The checks table, the type checker, coverage: the package, never `src`.
+    assert tool["rumbo"]["checks"]["security"] == "uv run bandit -q -r legacy_app"
+    assert tool["pyright"]["include"] == ["legacy_app", "test"]
+    assert tool["coverage"]["run"]["source"] == ["legacy_app"]
+    assert tool["ruff"]["force-exclude"] is True and tool["ruff"]["extend-exclude"] == ["spikes"]
+    rendered = (root / "pyproject.toml").read_text(encoding="utf-8")
+    settings = [ln for ln in rendered.splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in settings if '"src' in ln or "src/" in ln or " src" in ln]
+    # The architecture test looks at the package where it is, and finds what is wrong there.
+    arch = root / "test" / "architecture" / "test_architecture.py"
+    text = arch.read_text(encoding="utf-8")
+    assert 'SRC = ROOT / "legacy_app"\n' in text and '"src"' not in text
+    assert "- Nothing in legacy_app/ imports spikes/." in text
+    spec = importlib.util.spec_from_file_location("root_package_arch_test", arch)
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert root / "legacy_app" == loaded.SRC
+    loaded.test_src_does_not_import_spikes()
+    (root / "legacy_app" / "bad.py").write_text("import spikes\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        loaded.test_src_does_not_import_spikes()
+    # What the harness tells the agent follows too.
+    assert "- Package: legacy_app (flat" in (root / "AGENTS.md").read_text(encoding="utf-8")
+
+    # A raised rigor appends its steps with the same paths; `update` is otherwise a no-op.
+    assert not update(project, root).merged
+    proto = _legacy(tmp_path / "proto", LEGACY_PYPROJECT, "legacy_app/__init__.py")
+    assert main([*adopt[:-1], "prototype", "--dir", str(proto)]) == 0
+    pyproject = proto / "pyproject.toml"
+    pyproject.write_text(set_rigor(pyproject.read_text(encoding="utf-8"), "mvp"), encoding="utf-8")
+    report = update(Project.load(proto), proto)
+    assert "pyproject.toml (+checks: security, security-scripts, audit)" in report.merged
+    checks = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]["checks"]
+    assert checks["security"] == "uv run bandit -q -r legacy_app"
+
+    # A project adopted before the key existed: `update` looks once and writes what it finds.
+    pyproject.write_text(
+        re.sub(r'(?m)^src = "\."\n', "", pyproject.read_text(encoding="utf-8")), encoding="utf-8"
+    )
+    older = Project.load(proto)
+    assert older.src == "src"  # a project without the key loads as "src"
+    assert "pyproject.toml (+src)" in update(older, proto).merged
+    assert Project.load(proto).src == "."
+    assert not update(Project.load(proto), proto).merged  # once
+
+    # With layers and with mypy, the strict layer and the mutation paths follow the package.
+    layered = Config(
+        name="Legacy",
+        package="legacy_app",
+        llm=False,
+        rigor="production",
+        kind="service",
+        adopted=True,
+        tests_dir="test",
+        src=".",
+    )
+    tool = tomllib.loads(str(plan_files(layered)["pyproject.toml"]))["tool"]
+    assert tool["pyright"]["strict"] == ["legacy_app/domain"]
+    assert tool["mutmut"]["source_paths"] == ["legacy_app/"]
+    assert tool["mutmut"]["only_mutate"] == ["legacy_app/domain/*"]
+    mypy = dataclasses.replace(layered, types="mypy")
+    tool = tomllib.loads(str(plan_files(mypy)["pyproject.toml"]))["tool"]
+    assert tool["mypy"]["files"] == ["legacy_app", "test"]
+    assert tool["mypy"]["overrides"][0]["module"] == "legacy_app.domain.*"
+    # The layout is detected where the package is.
+    hexagonal = _legacy(
+        tmp_path / "hex",
+        LEGACY_PYPROJECT,
+        "legacy_app/__init__.py",
+        "legacy_app/domain/__init__.py",
+        "legacy_app/app/__init__.py",
+    )
+    assert detect_layout(hexagonal, "legacy_app") == "hexagonal"
+
+
+# Covers F-0004.R10, F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_a_src_project_renders_as_before(simple_project: Path, tmp_path: Path) -> None:
+    """ADR-0020 fitness: with the package under `src/` (every `rumbo init`, and an adopted
+    project that has it there) the configuration names the same paths it always did."""
+    for cfg in (
+        Config(name="Demo", package="demo", llm=False, rigor="production"),
+        Config(name="Demo", package="demo", llm=False, rigor="production", adopted=True),
+    ):
+        assert (cfg.src, cfg.code_root, cfg.package_path) == ("src", "src", "src/demo")
+        plan = plan_files(cfg)
+        pyproject = str(plan["pyproject.toml"])
+        for literal in (
+            'security = "uv run bandit -q -r src"\n',
+            'include = ["src", "tests"]\n',
+            'strict = ["src/demo/domain"]\n',
+            'source = ["src/demo"]\n',
+            'source_paths = ["src/"]\n',
+            'only_mutate = ["src/demo/domain/*"]\n',
+            'packages = ["src/demo"]\n',
+            '\nsrc = "src"\n',
+        ):
+            assert literal in pyproject, literal
+        arch = str(plan["tests/architecture/test_architecture.py"])
+        assert 'SRC = ROOT / "src" / "demo"\n' in arch
+        assert "- Nothing in src/ imports spikes/." in arch
+        assert "- Layers: src/demo/{domain,app,adapters,api}" in str(plan["AGENTS.md"])
+    mypy = Config(name="Demo", package="demo", llm=False, rigor="mvp", types="mypy")
+    assert 'files = ["src", "tests"]\n' in str(plan_files(mypy)["pyproject.toml"])
+    llm = Config(name="Demo", package="demo", llm=True, provider="anthropic", rigor="mvp")
+    assert 'security = "uv run bandit -q -r src evals"\n' in str(plan_files(llm)["pyproject.toml"])
+    runner = str(plan_files(llm)["evals/run_evals.py"])
+    assert 'prompts = root / "src" / "demo" / "prompts"\n' in runner
+    # The one new line of `[tool.ruff]`: a project's exclusions hold for a file named by path.
+    ruff = tomllib.loads(str(plan_files(mypy)["pyproject.toml"]))["tool"]["ruff"]
+    assert ruff["force-exclude"] is True and ruff["extend-exclude"] == ["spikes"]
+
+    # An adopted project with its package under src/ is detected as such, and says nothing new.
+    legacy = _legacy(tmp_path / "legacy", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
+    assert detect_project(legacy).src == "src"
+    assert "src=" not in detect_project(legacy).summary()
+
+    # A project generated before the key existed loads as "src"; `update` writes it, once.
+    pyproject_file = simple_project / "pyproject.toml"
+    original = pyproject_file.read_text(encoding="utf-8")
+    assert tomllib.loads(original)["tool"]["rumbo"]["src"] == "src"
+    try:
+        pyproject_file.write_text(re.sub(r"(?m)^src = .*\n", "", original), encoding="utf-8")
+        project = Project.load(simple_project)
+        assert (project.src, project.code_root, project.package_path) == ("src", "src", "src/demo")
+        assert "pyproject.toml (+src)" in update(project, simple_project).merged
+        rumbo = tomllib.loads(pyproject_file.read_text(encoding="utf-8"))["tool"]["rumbo"]
+        assert rumbo["src"] == "src"
+        assert not update(Project.load(simple_project), simple_project).merged
+        # Only "src" and "." are directories the harness knows how to point the tools at.
+        pyproject_file.write_text(original.replace('src = "src"', 'src = "lib"'), encoding="utf-8")
+        with pytest.raises(ValueError, match=r"\[tool\.rumbo\]\.src"):
+            Project.load(simple_project)
+    finally:
+        pyproject_file.write_text(original, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[tool\.rumbo\]\.src"):
+        Config(name="Demo", package="demo", llm=False, src="lib")
+
+
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_target_path_follows_the_tests_dir() -> None:
     cfg = _adopted(tests_dir="test")
     assert target_path("tests/unit/test_x.py.tmpl", cfg) == "test/unit/test_x.py"
@@ -1376,6 +1735,7 @@ def _python_places(cfg: Config) -> dict[str, str]:
     }
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_python_setting_renders_every_place_that_names_a_version() -> None:
     library = _python_places(
         Config(name="x", package="x", llm=False, kind="library", python="3.12")
@@ -1396,6 +1756,7 @@ def test_python_setting_renders_every_place_that_names_a_version() -> None:
     assert newest["matrix"] == '["3.13"]' and newest["target"] == "py313"
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_python_default_is_unchanged() -> None:
     cfg = Config(name="x", package="x", llm=False, kind="cli")
     assert cfg.python == "3.11"
@@ -1406,12 +1767,14 @@ def test_python_default_is_unchanged() -> None:
     assert data["dockerfile"] == "3.11"  # the image builds on the minimum the project promises
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("python", ["3.10", "3.99", "3", "py311", "3.11.4"])
 def test_unsupported_python_is_refused(python: str) -> None:
     with pytest.raises(ValueError, match=r"unsupported Python .*3\.11, 3\.12, 3\.13"):
         Config(name="x", package="x", llm=False, python=python)
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_project_load_reads_the_python_key_and_validates_it(tmp_path: Path) -> None:
     scaffold(Config(name="x", package="x", llm=False, kind="library", python="3.12"), tmp_path)
     project = Project.load(tmp_path)
@@ -1427,6 +1790,7 @@ def test_project_load_reads_the_python_key_and_validates_it(tmp_path: Path) -> N
         Project.load(tmp_path)
 
 
+# Covers F-0004.R11, F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_project_load_defaults_python_and_update_writes_the_key_once(simple_project: Path) -> None:
     """ADR-0014 migration: older projects load as 3.11; `rumbo update` writes the promise."""
     pyproject = simple_project / "pyproject.toml"
@@ -1448,6 +1812,7 @@ def test_project_load_defaults_python_and_update_writes_the_key_once(simple_proj
     assert pyproject.read_text(encoding="utf-8").count("\npython = ") == 1
 
 
+# Covers F-0004.R8, F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_an_existing_python_version_file_is_kept(tmp_path: Path) -> None:
     (tmp_path / ".python-version").write_text("3.13\n", encoding="utf-8")
     rep = scaffold(Config(name="x", package="x", llm=False, python="3.11"), tmp_path)
@@ -1489,6 +1854,7 @@ def _types(types: str, kind: str = "service", layout: str = "", llm: bool = Fals
     )
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize(
     ("kind", "layout", "llm"),
     [("service", "", True), ("cli", "flat", False), ("data", "flat", False)],
@@ -1526,6 +1892,7 @@ def test_types_mypy_renders_the_mypy_configuration(kind: str, layout: str, llm: 
     assert check_steps(cfg) == check_steps(_types("pyright", kind=kind, layout=layout, llm=llm))
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_types_mypy_adopted_checks_the_changed_files_in_the_tests_dir() -> None:
     cfg = Config(
         name="Legacy",
@@ -1542,6 +1909,7 @@ def test_types_mypy_adopted_checks_the_changed_files_in_the_tests_dir() -> None:
     assert tool["mypy"]["files"] == ["src", "test"]
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("cfg", COMBINATIONS, ids=lambda c: f"{c.provider or 'no-llm'}-{c.rigor}")
 def test_every_combination_renders_with_mypy(cfg: Config) -> None:
     with_mypy = dataclasses.replace(cfg, types="mypy")
@@ -1551,6 +1919,7 @@ def test_every_combination_renders_with_mypy(cfg: Config) -> None:
     assert plan.keys() == plan_files(cfg).keys()  # the setting changes configuration, not files
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_default_type_checker_is_pyright_and_agents_md_does_not_change() -> None:
     cfg = _axes("service")
     assert cfg.types == "pyright"
@@ -1571,6 +1940,7 @@ def test_default_type_checker_is_pyright_and_agents_md_does_not_change() -> None
     assert {"Bash(uv run pyright *)", "Bash(uv run mypy *)"} <= set(allowed["permissions"]["allow"])
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_unknown_type_checker_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="type checker 'ty'"):
         _types("ty")
@@ -1583,6 +1953,7 @@ def test_unknown_type_checker_is_refused(tmp_path: Path) -> None:
         Project.load(tmp_path)
 
 
+# Covers F-0004.R11, F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_project_load_defaults_to_pyright_and_update_writes_the_key_once(tmp_path: Path) -> None:
     """ADR-0015 migration: a project generated before the setting loads as pyright; `rumbo
     update` writes the key once and never touches the `types` step."""
@@ -1605,6 +1976,7 @@ def test_project_load_defaults_to_pyright_and_update_writes_the_key_once(tmp_pat
     assert not rep.merged  # idempotent
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_types_round_trips_through_project(tmp_path: Path) -> None:
     cfg = _types("mypy", kind="cli", layout="flat")
     scaffold(cfg, tmp_path)
@@ -1620,3 +1992,52 @@ def test_types_round_trips_through_project(tmp_path: Path) -> None:
         "pre-commit",
         *MVP_TOOLS,
     ]
+
+
+# ------------------------------------- specs/0004: line endings and the standard library
+# Covers F-0004.R7 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_every_file_is_written_with_lf_line_endings(tmp_path: Path) -> None:
+    """A text-mode write on Windows ends every line with CRLF, and a template checked out with
+    CRLF would carry it into the project: created, merged and updated files are all LF."""
+    from rumbo.scaffold import _write
+
+    root = tmp_path / "project"
+    report = scaffold(Config(name="Demo", package="demo", llm=True, provider="anthropic"), root)
+    assert {"pyproject.toml", "AGENTS.md", "scripts/rumbo_guard.py"} <= set(report.created)
+    assert not [rel for rel in report.created if b"\r" in (root / rel).read_bytes()]
+    # A late key that `update` appends to pyproject.toml.
+    pyproject = root / "pyproject.toml"
+    pyproject.write_bytes(re.sub(rb"(?m)^python = .*\n", b"", pyproject.read_bytes()))
+    assert "pyproject.toml (+python)" in update(Project.load(root), root).merged
+    assert b"\r" not in pyproject.read_bytes()
+    # A merge into a file the project already had.
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    (existing / ".gitignore").write_bytes(b"node_modules/\n")
+    report = scaffold(Config(name="Demo", package="demo", llm=False), existing)
+    assert any(item.startswith(".gitignore (+") for item in report.merged)
+    ignored = (existing / ".gitignore").read_bytes()
+    assert ignored.startswith(b"node_modules/\n") and b"\r" not in ignored
+    # A source checked out with CRLF (a Windows clone of the framework) is normalised.
+    source = tmp_path / "source.md"
+    source.write_bytes(b"one\r\ntwo\r\n")
+    _write(root / "copied.md", source, "copied.md")
+    assert (root / "copied.md").read_bytes() == b"one\ntwo\n"
+
+
+# Covers F-0004.R2 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_the_scaffolder_imports_only_the_standard_library() -> None:
+    """ADR-0001 for the modules of this feature (init, update, promote and the template engine);
+    `tests/test_fitness.py` holds the same rule for the whole package."""
+    import rumbo
+
+    package = Path(rumbo.__file__).parent
+    allowed = sys.stdlib_module_names | {"rumbo"}
+    for module in ("cli.py", "scaffold.py", "render.py", "project.py"):
+        imported: set[str] = set()
+        for node in ast.walk(ast.parse((package / module).read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                imported.add(node.module.split(".")[0])
+        assert imported and imported <= allowed, (module, sorted(imported - allowed))
