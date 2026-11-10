@@ -15,6 +15,7 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 from rumbo import __version__
 from rumbo.project import (
@@ -1164,6 +1165,33 @@ def detect_project(root: Path, package: str | None = None) -> Detected:
 HUMAN_COMMAND = ("git", "config", "rumbo.human", "true")
 
 
+def is_console(stream: IO[str] | None) -> bool:
+    """True when `stream` is a real terminal.
+
+    `isatty()` alone is not enough on Windows: it is also true for the NUL device, which is
+    what a process started without a terminal (an agent's subprocess, a script with
+    `< /dev/null`) reads from. There the console API is asked as well.
+    """
+    try:
+        if stream is None or not stream.isatty():
+            return False
+        if sys.platform == "win32":
+            import ctypes
+            import msvcrt
+
+            mode = ctypes.c_ulong()
+            handle = ctypes.c_void_p(msvcrt.get_osfhandle(stream.fileno()))
+            return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+        return True
+    except (AttributeError, ValueError, OSError):  # no stream, a closed one, not a file
+        return False
+
+
+def at_a_terminal() -> bool:
+    """Standard input AND output are terminals: someone types and someone reads."""
+    return is_console(sys.stdin) and is_console(sys.stdout)
+
+
 def human_present(
     dest: Path,
     environ: Mapping[str, str] | None = None,
@@ -1172,16 +1200,14 @@ def human_present(
     """True when a human is demonstrably running the command (ADR-0021).
 
     No agent marker in the environment (the guard's own list: `[tool.rumbo].agent_env` of the
-    project, else its `DEFAULT_AGENT_ENV`) and standard input is a terminal. `environ` and
-    `isatty` default to the process's own.
+    project, else its `DEFAULT_AGENT_ENV`) and the command runs at a terminal (`at_a_terminal`:
+    an agent's subprocess has its output captured). `environ` and `isatty` default to the
+    process's own.
     """
     env = os.environ if environ is None else environ
     if any(env.get(name) for name in agent_env_names(dest)):
         return False
-    try:
-        return bool((isatty or sys.stdin.isatty)())
-    except (AttributeError, ValueError):  # no standard input, or a closed one
-        return False
+    return bool((isatty or at_a_terminal)())
 
 
 def install(cfg: Config, dest: Path, report: Report, human: bool | None = None) -> None:

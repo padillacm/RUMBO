@@ -598,6 +598,7 @@ def _init_without_network(
     for marker in DEFAULT_AGENT_ENV:  # the suite itself may be run by an agent
         monkeypatch.delenv(marker, raising=False)
     monkeypatch.setattr("sys.stdin", _Stdin(terminal))
+    monkeypatch.setattr("rumbo.scaffold.at_a_terminal", lambda: terminal)
     commands: list[list[str]] = []
     real_run = scaffold_module._run
 
@@ -705,6 +706,7 @@ def test_init_declares_rumbo_human_only_for_an_interactive_human(
     # 3. No marker but no terminal (a pipe, CI, an agent with no known marker): not set either.
     monkeypatch.delenv(DEFAULT_AGENT_ENV[0])
     monkeypatch.setattr("sys.stdin", _Stdin(terminal=False))
+    monkeypatch.setattr("rumbo.scaffold.at_a_terminal", lambda: False)
     commands.clear()
     piped = _git_repo(tmp_path / "piped")
     assert main([*init, "--dir", str(piped)]) == 0
@@ -734,6 +736,23 @@ def test_init_declares_rumbo_human_only_for_an_interactive_human(
     )
     assert human_present(human, environ={"MY_AGENT": "1"}, isatty=terminal) is False
     assert human_present(human, environ={DEFAULT_AGENT_ENV[0]: "1"}, isatty=terminal) is True
+
+
+def test_the_null_device_is_not_a_terminal() -> None:
+    """ADR-0021: on Windows `isatty()` is true for NUL, where a process without a terminal
+    reads from; `rumbo init < /dev/null` declared the human. A closed or missing stream and
+    one that is not a file are not terminals either."""
+    import io
+
+    from rumbo.scaffold import is_console
+
+    with open(os.devnull, encoding="utf-8") as null:
+        assert is_console(null) is False
+    closed = open(os.devnull, encoding="utf-8")  # noqa: SIM115
+    closed.close()
+    assert is_console(closed) is False
+    assert is_console(None) is False
+    assert is_console(io.StringIO("y\n")) is False
 
 
 # ------------------------------------------------------- kinds and layouts (ADR-0010)
