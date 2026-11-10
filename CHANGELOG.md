@@ -6,9 +6,44 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Fixes from an external audit of v0.4.0 (eight findings), in four decisions (ADR-0018 to
+ADR-0021).
+
+### Fixed
+- ADR-0018: a step whose tool started and rejected the code is **red**, not a broken
+  environment. pytest exits `2` on an import or syntax error while collecting and `5` when it
+  collects nothing; mypy and `ruff format --check` exit `2` on a syntax error. The runner used
+  to report all of them as exit `3`, so the `Stop` hook told the agent not to repair its own
+  mistake and `rumbo gate G4` exited `0`. On such a code the runner now asks whether the tool
+  can start (`<launcher> <tool> --version`): yes means red, no means environment. In G4 a
+  runner or sensor that could not be measured fails the gate.
+- ADR-0019: the guard no longer exempts the whole `pyproject.toml`. An agent's shell command
+  or commit may change `project.dependencies`, `project.optional-dependencies`,
+  `dependency-groups` and `tool.uv` (what `uv add` writes) and nothing else; a change to
+  `[tool.rumbo.checks]`, the linter, the type checker, pytest, coverage or the version is
+  reported after the command and refused at commit, with the tables named. `uv.lock` stays free.
+- ADR-0020: adoption follows the project's layout. Gate G3 and `rumbo trace` read the tests
+  directory from `[tool.rumbo].tests` instead of assuming `tests/`; a package at the root
+  (no `src/`) is recorded in the new `[tool.rumbo].src` key and bandit, the type checker,
+  coverage, the mutation paths and the architecture test point at it; `{changed}` never
+  contains files under `spikes/`, and the generated `[tool.ruff]` sets `force-exclude = true`.
+- ADR-0021: the anti-cheat sensor ignores an approval mark authored or co-authored by other
+  agents, not only Claude, and a project adds its own with `[tool.rumbo].agent_authors`;
+  `rumbo init` sets `rumbo.human` only for a human at a terminal, never when an agent runs it.
+- The sensor resolves assertion helpers that are methods of the test class (`self._verify()`),
+  including inherited ones: moving asserts into such a method is not reported as a weakening,
+  and emptying it is.
+- The human checklists of G3 and G5 follow `kind` and `layout` like the automatic checks: a
+  flat package is not asked for import-linter contracts, a library or CLI is not asked for
+  SLOs, a runbook or a canary.
+- `rumbo init` printed `provider=` and `rigor=` twice in its summary line.
+
+### Added
+- Gate G2 lists the features of the PRD that have no spec (reported, never failing).
+
 ## [0.4.0] - 2026-11-09
 
-The six fronts of an external audit of v0.3.0, in seventeen decisions (ADR-0006 to ADR-0017),
+The six fronts of an external audit of v0.3.0, in twelve decisions (ADR-0006 to ADR-0017),
 and RUMBO running its own harness.
 
 ### Added

@@ -84,7 +84,7 @@ versions), runs `pre-commit autoupdate` and `install`, and logs the A0 answers i
 skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7 by hand.
 
 **An existing project** takes `rumbo init --adopt` (ADR-0013): it detects the package, the
-kind, the layout and the tests directory (the flags still win), writes the harness without the
+kind, the layout, the tests directory and whether the package lives under `src/` or at the root (`[tool.rumbo].src`, ADR-0020; the flags still win), writes the harness without the
 `src/` and tests skeleton, leaves an existing CI workflow alone and prints the two steps to add,
 and makes `lint`, `format` and `types` run on the changed files only (`{changed}`), so the
 legacy debt is measured nightly with `--full` instead of blocking every change. The adoption
@@ -322,21 +322,26 @@ sensors, `evals/run_evals.py`, `.env*`), removal of the `<!-- rumbo:template` ma
 `[tests-change-approved]`, `--no-verify`, force pushes, `git reset --hard`, disabling hooks,
 `rm -rf` on the root and shell redirections into protected files. On `Stop`, if Python, TOML
 or JSONL files changed since the last commit, it runs `scripts/rumbo_check.py --brief` and refuses to finish
-while it is red; if the environment is broken (exit 3) it asks the agent to report to the human instead. The human is never blocked: edits by hand do not go through the hook, and a
+while it is red; if the environment is broken (exit 3: a tool could not start) it asks the agent to report to the human instead; a tool that started and rejected the code, such as pytest failing to import a test file, is red (ADR-0018). In `pyproject.toml` only the dependency tables written by `uv add` may change without the human (ADR-0019). The human is never blocked: edits by hand do not go through the hook, and a
 rule can be overridden in `.claude/settings.local.json`. `settings.json` also pre-approves the
 harness commands (the check runner, pytest, ruff, read-only git) and denies `curl`/`wget` and
 reading `.env`.
 
 The same script is also a **git hook** (ADR-0008), installed by `rumbo init` through
-pre-commit (`pre-commit` and `commit-msg`), so an agent running in Cursor, Codex, Gemini CLI
-or Aider meets the same rules when it commits. The actor is an agent when one of the
+pre-commit (`pre-commit` and `commit-msg`), so an agent running in Cursor, Codex, Cline or
+Roo Code meets the same rules when it commits. The actor is an agent when one of the
 environment markers in `[tool.rumbo].agent_env` is set (default: `CLAUDECODE`, `GEMINI_CLI`,
-`CURSOR_AGENT`, `CODEX_SANDBOX_NETWORK_DISABLED`), the human when `git config rumbo.human` is
-`true` in the clone (`rumbo init` sets it; `rumbo doctor` warns when it is missing), and
+`CURSOR_AGENT`, `CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_THREAD_ID`, `CODEX_CI`, `ROO_ACTIVE`,
+`CLINE_ACTIVE`; each confirmed in the tool's source or documentation, ADR-0021), the human when `git config rumbo.human` is
+`true` in the clone (`rumbo init` sets it only for a human at a terminal, never when an agent runs it; `rumbo doctor` warns when it is missing), and
 unknown otherwise, which counts as an agent. For an agent the hooks refuse a staged protected
 file, a staged document whose template mark is gone, and a commit message carrying
 `[tests-change-approved]`. The block is late (at commit) and an agent that unsets its own
-marker is breaking a rule, not defeating a sensor: CI remains the binding layer.
+marker is breaking a rule, not defeating a sensor: CI remains the binding layer. Two limits
+(ADR-0021): Aider and Amp set no confirmed marker, so in a clone the human declared they are
+recognised only in CI, by their commit attribution (the sensor ignores an approval mark they
+author; add other identities in `[tool.rumbo].agent_authors`); and Gemini CLI disables git
+hooks in the shell it runs, so the git hook never sees its commits.
 
 **The mark is the signature** (ADR-0017). A numbered ADR or spec committed without the
 template mark is signed by the human and read-only for the agent: an edit is blocked, a change
