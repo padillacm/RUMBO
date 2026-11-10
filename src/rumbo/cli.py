@@ -44,6 +44,7 @@ from rumbo.metrics import collect
 from rumbo.metrics import render as render_metrics
 from rumbo.project import (
     DEFAULT_PYTHON,
+    DEFAULT_SRC,
     DEFAULT_TYPE_CHECKER,
     KINDS,
     LAYOUTS,
@@ -55,12 +56,14 @@ from rumbo.project import (
     slug,
 )
 from rumbo.scaffold import (
+    HUMAN_COMMAND,
     OTHER_PROVIDER,
     PROVIDERS,
     Config,
     Detected,
     add_dev_dependencies,
     detect_project,
+    detect_src,
     dev_dependencies,
     install,
     plan_files,
@@ -186,9 +189,31 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         layers=layers,
         adopted=detected is not None,
         tests_dir=detected.tests_dir if detected else "tests",
+        # ADR-0020: where the package that was finally chosen lives (never asked, no flag).
+        src=detect_src(Path(args.dir).resolve(), package) if detected else DEFAULT_SRC,
         python=args.python or DEFAULT_PYTHON,
         # ADR-0015: the type checker is a flag, never an A0 question.
         types=getattr(args, "types", None) or DEFAULT_TYPE_CHECKER,
+    )
+
+
+def _init_summary(cfg: Config) -> str:
+    """The settings `rumbo init` mounts the harness with, each one once, on one line."""
+    line = (
+        f"package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
+        f"provider={cfg.provider or '-'} rigor={cfg.rigor} python={cfg.python} types={cfg.types}"
+    )
+    if cfg.adopted:
+        line += f" adopted=true tests={cfg.tests_dir}"
+    if cfg.src != DEFAULT_SRC:
+        line += f" src={cfg.src}"  # ADR-0020: only when the package is not under src/
+    return line
+
+
+def _next_steps(steps: list[str]) -> str:
+    """The steps numbered from 1; the continuation lines of a step are indented under it."""
+    return "\n".join(
+        f"  {n}. " + step.replace("\n", "\n     ") for n, step in enumerate(steps, start=1)
     )
 
 
@@ -199,13 +224,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         return _err(str(exc))
     dest = Path(args.dir).resolve()
     print(f"\nMounting the RUMBO harness in {dest}")
-    print(
-        f"  package={cfg.package} kind={cfg.kind} layout={cfg.layout} llm={cfg.llm} "
-        f"provider={cfg.provider or '-'} rigor={cfg.rigor} python={cfg.python}"
-        f"provider={cfg.provider or '-'} rigor={cfg.rigor} types={cfg.types}"
-        + (f" adopted=true tests={cfg.tests_dir}" if cfg.adopted else "")
-        + "\n"
-    )
+    print(f"  {_init_summary(cfg)}\n")
     if args.force:
         print(
             "--force: existing files are overwritten (a .bak copy is kept); "
@@ -228,22 +247,31 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not args.no_install:
         install(cfg, dest, rep)
     print("\n" + rep.summary())
+    # ADR-0021: only the human declares the human. `install` did it for a human at a terminal;
+    # in every other case the command is the human's first step in this clone.
+    declare = (
+        [f"{' '.join(HUMAN_COMMAND)}    # you, the human, once per clone (never the agent)"]
+        if (dest / ".git").exists() and not _declared_human(dest)
+        else []
+    )
     if args.no_install:
         runtime = runtime_dependencies(cfg)
-        print(
-            "\nNext steps (--no-install):\n"
-            f"  1. uv add --dev {' '.join(dev_dependencies(cfg))}"
-            + (f"\n     uv add {' '.join(runtime)}" if runtime else "")
-            + "\n  2. uv run pre-commit autoupdate && uv run pre-commit install\n"
-            "  3. uv run python scripts/rumbo_check.py    # must be green\n"
-        )
+        steps = [
+            f"uv add --dev {' '.join(dev_dependencies(cfg))}"
+            + (f"\nuv add {' '.join(runtime)}" if runtime else ""),
+            "uv run pre-commit autoupdate && uv run pre-commit install",
+            *declare,
+            "uv run python scripts/rumbo_check.py    # must be green",
+        ]
+        print(f"\nNext steps (--no-install):\n{_next_steps(steps)}\n")
     else:
-        print(
-            "\nNext steps (A8):\n"
-            "  1. uv run python scripts/rumbo_check.py    # must be green\n"
-            "  2. git add -A && git commit -m 'chore: initial RUMBO harness'\n"
-            '  3. Open Claude Code and say: "Read AGENTS.md and RUMBO.md; let\'s start phase R".'
-        )
+        steps = [
+            *declare,
+            "uv run python scripts/rumbo_check.py    # must be green",
+            "git add -A && git commit -m 'chore: initial RUMBO harness'",
+            'Open Claude Code and say: "Read AGENTS.md and RUMBO.md; let\'s start phase R".',
+        ]
+        print(f"\nNext steps (A8):\n{_next_steps(steps)}")
     print("  See what was created with: git status")
     return 1 if any(rc != 0 for _, rc in rep.commands) else 0
 
@@ -382,7 +410,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
 # ----------------------------------------------------------------------- doctor
 def _declared_human(root: Path) -> bool:
-    """`git config rumbo.human` is true in this clone (set by `rumbo init`, ADR-0008)."""
+    """`git config rumbo.human` is true in this clone (ADR-0008).
+
+    The human declares it; `rumbo init` does it only for a human at a terminal (ADR-0021).
+    """
     try:
         proc = subprocess.run(
             ["git", "config", "--get", "rumbo.human"],

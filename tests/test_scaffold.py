@@ -573,15 +573,31 @@ def test_pre_commit_config_wires_the_guard_as_git_hooks(simple_project: Path) ->
         assert existing in config
 
 
-def test_init_declares_the_human_in_the_clone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+class _Stdin:
+    """Stands in for `sys.stdin`: a terminal or a pipe."""
+
+    def __init__(self, terminal: bool) -> None:
+        self.terminal = terminal
+
+    def isatty(self) -> bool:
+        return self.terminal
+
+
+def _init_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: bool
+) -> list[list[str]]:
+    """Prepares `rumbo init` (with install) for a test: uv is faked, git is real and isolated,
+    no agent marker is in the environment and stdin is (or is not) a terminal. Returns the list
+    the commands of `install` are recorded in."""
     from rumbo import scaffold as scaffold_module
-    from rumbo.cli import main
     from rumbo.scaffold import Report
+    from rumbo.sensors.guard import DEFAULT_AGENT_ENV
 
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for marker in DEFAULT_AGENT_ENV:  # the suite itself may be run by an agent
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setattr("sys.stdin", _Stdin(terminal))
     commands: list[list[str]] = []
     real_run = scaffold_module._run
 
@@ -594,9 +610,31 @@ def test_init_declares_the_human_in_the_clone(
 
     monkeypatch.setattr(scaffold_module, "_run", fake_run)
     monkeypatch.setattr(scaffold_module.shutil, "which", lambda _name: "uv")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return commands
+
+
+def _git_repo(root: Path) -> Path:
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    return root
+
+
+def _rumbo_human(repo: Path) -> str:
+    """The value of `rumbo.human` in the clone ('' when it is not set)."""
+    declared = subprocess.run(
+        ["git", "config", "--get", "rumbo.human"], cwd=repo, capture_output=True, text=True
+    )
+    return declared.stdout.strip()
+
+
+def test_init_declares_the_human_in_the_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0008, as narrowed by ADR-0021: the scenario is a human at a terminal."""
+    from rumbo.cli import main
+
+    commands = _init_without_network(tmp_path, monkeypatch, terminal=True)
+    repo = _git_repo(tmp_path / "repo")
     init = ["init", "--yes", "--name", "Demo", "--package", "demo", "--no-llm", "--rigor", "mvp"]
     assert main([*init, "--dir", str(repo)]) == 0
     assert commands.index(["uv", "run", "pre-commit", "install"]) < commands.index(
@@ -621,6 +659,81 @@ def test_init_declares_the_human_in_the_clone(
     assert main([*init, "--dir", str(plain)]) == 0
     assert not any(cmd[0] == "git" for cmd in commands)
     assert "not a git repository" in capsys.readouterr().out
+
+
+def test_init_declares_rumbo_human_only_for_an_interactive_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0021 fitness: `rumbo init` sets `rumbo.human` only when a human is demonstrably
+    there (no agent marker in the environment and stdin is a terminal). Otherwise it leaves the
+    setting alone and prints the one command the human runs, in its next steps."""
+    from rumbo.cli import main
+    from rumbo.scaffold import HUMAN_COMMAND, human_present
+    from rumbo.sensors.guard import DEFAULT_AGENT_ENV
+
+    declare = list(HUMAN_COMMAND)
+    hint = "1. git config rumbo.human true"  # the human's first step in the clone
+    init = ["init", "--yes", "--name", "Demo", "--package", "demo", "--no-llm", "--rigor", "mvp"]
+    assert declare == ["git", "config", "rumbo.human", "true"]
+
+    # 1. A terminal and no marker: a human is there, the clone is declared, nothing to add.
+    commands = _init_without_network(tmp_path, monkeypatch, terminal=True)
+    human = _git_repo(tmp_path / "human")
+    assert main([*init, "--dir", str(human)]) == 0
+    assert declare in commands
+    assert _rumbo_human(human) == "true"
+    out = capsys.readouterr().out
+    assert hint not in out and "Next steps (A8):\n  1. uv run python" in out
+
+    # 2. A terminal but an agent marker: not set, and the next steps say what the human runs.
+    monkeypatch.setenv(DEFAULT_AGENT_ENV[0], "1")
+    commands.clear()
+    agent = _git_repo(tmp_path / "agent")
+    assert main([*init, "--dir", str(agent)]) == 0
+    assert declare not in commands
+    assert _rumbo_human(agent) == ""
+    out = capsys.readouterr().out
+    assert f"Next steps (A8):\n  {hint}" in out
+    assert "  2. uv run python scripts/rumbo_check.py" in out  # the other steps are renumbered
+    # `--no-install` declares nothing either: the command comes after the hooks are installed.
+    bare = _git_repo(tmp_path / "bare")
+    assert main([*init, "--no-install", "--dir", str(bare)]) == 0
+    assert _rumbo_human(bare) == ""
+    out = capsys.readouterr().out
+    assert "  3. git config rumbo.human true" in out and "  4. uv run python scripts/" in out
+
+    # 3. No marker but no terminal (a pipe, CI, an agent with no known marker): not set either.
+    monkeypatch.delenv(DEFAULT_AGENT_ENV[0])
+    monkeypatch.setattr("sys.stdin", _Stdin(terminal=False))
+    commands.clear()
+    piped = _git_repo(tmp_path / "piped")
+    assert main([*init, "--dir", str(piped)]) == 0
+    assert declare not in commands
+    assert _rumbo_human(piped) == ""
+    assert f"Next steps (A8):\n  {hint}" in capsys.readouterr().out
+
+    # A declaration the human already made is left alone, and then there is nothing to say.
+    subprocess.run(declare, cwd=piped, check=True)
+    assert main([*init, "--dir", str(piped)]) == 0
+    assert _rumbo_human(piped) == "true"
+    assert hint not in capsys.readouterr().out
+
+    # The two conditions, one by one (both are injectable); a project's own `agent_env` counts.
+    def terminal() -> bool:
+        return True
+
+    assert human_present(human, environ={}, isatty=terminal) is True
+    assert human_present(human, environ={}, isatty=lambda: False) is False
+    for marker in DEFAULT_AGENT_ENV:
+        assert human_present(human, environ={marker: "1"}, isatty=terminal) is False
+    pyproject = human / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(
+        text.replace("[tool.rumbo]\n", '[tool.rumbo]\nagent_env = ["MY_AGENT"]\n', 1),
+        encoding="utf-8",
+    )
+    assert human_present(human, environ={"MY_AGENT": "1"}, isatty=terminal) is False
+    assert human_present(human, environ={DEFAULT_AGENT_ENV[0]: "1"}, isatty=terminal) is True
 
 
 # ------------------------------------------------------- kinds and layouts (ADR-0010)
@@ -1331,6 +1444,173 @@ def test_adopted_project_round_trips_and_updates_without_a_skeleton(tmp_path: Pa
     ]
     assert not any("ci.yml" in rel for rel in report.differs)
     assert not (root / "src" / "legacy_app" / "__main__.py").exists()
+
+
+# ------------------------------------------- the layout the project already has (ADR-0020)
+def test_adopting_a_root_package_points_every_tool_at_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0020 fitness: a package at the root (no `src/`) and tests in `test/` are adopted as
+    they are; `[tool.rumbo].src` records it and every tool is pointed at the package."""
+    from rumbo.cli import main
+
+    root = _legacy(
+        tmp_path / "legacy", LEGACY_PYPROJECT, "legacy_app/__init__.py", "test/test_x.py"
+    )
+    detected = detect_project(root)
+    assert (detected.package, detected.src, detected.tests_dir) == ("legacy_app", ".", "test")
+    assert detected.summary() == "package=legacy_app kind=cli layout=flat tests=test src=."
+    adopt = ["init", "--adopt", "--yes", "--no-install", "--no-llm", "--rigor", "mvp"]
+    assert main([*adopt, "--dir", str(root)]) == 0
+    assert "adopted=true tests=test src=.\n" in capsys.readouterr().out
+
+    # The key, and the project state that reads it.
+    tool = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+    assert tool["rumbo"]["src"] == "." and tool["rumbo"]["tests"] == "test"
+    project = Project.load(root)
+    assert (project.src, project.code_root, project.package_path) == (
+        ".",
+        "legacy_app",
+        "legacy_app",
+    )
+    cfg = Config.from_project(project)
+    assert (cfg.src, cfg.code_root, cfg.package_path) == (".", "legacy_app", "legacy_app")
+    # The checks table, the type checker, coverage: the package, never `src`.
+    assert tool["rumbo"]["checks"]["security"] == "uv run bandit -q -r legacy_app"
+    assert tool["pyright"]["include"] == ["legacy_app", "test"]
+    assert tool["coverage"]["run"]["source"] == ["legacy_app"]
+    assert tool["ruff"]["force-exclude"] is True and tool["ruff"]["extend-exclude"] == ["spikes"]
+    rendered = (root / "pyproject.toml").read_text(encoding="utf-8")
+    settings = [ln for ln in rendered.splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in settings if '"src' in ln or "src/" in ln or " src" in ln]
+    # The architecture test looks at the package where it is, and finds what is wrong there.
+    arch = root / "test" / "architecture" / "test_architecture.py"
+    text = arch.read_text(encoding="utf-8")
+    assert 'SRC = ROOT / "legacy_app"\n' in text and '"src"' not in text
+    assert "- Nothing in legacy_app/ imports spikes/." in text
+    spec = importlib.util.spec_from_file_location("root_package_arch_test", arch)
+    assert spec is not None and spec.loader is not None
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    assert root / "legacy_app" == loaded.SRC
+    loaded.test_src_does_not_import_spikes()
+    (root / "legacy_app" / "bad.py").write_text("import spikes\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        loaded.test_src_does_not_import_spikes()
+    # What the harness tells the agent follows too.
+    assert "- Package: legacy_app (flat" in (root / "AGENTS.md").read_text(encoding="utf-8")
+
+    # A raised rigor appends its steps with the same paths; `update` is otherwise a no-op.
+    assert not update(project, root).merged
+    proto = _legacy(tmp_path / "proto", LEGACY_PYPROJECT, "legacy_app/__init__.py")
+    assert main([*adopt[:-1], "prototype", "--dir", str(proto)]) == 0
+    pyproject = proto / "pyproject.toml"
+    pyproject.write_text(set_rigor(pyproject.read_text(encoding="utf-8"), "mvp"), encoding="utf-8")
+    report = update(Project.load(proto), proto)
+    assert "pyproject.toml (+checks: security, security-scripts, audit)" in report.merged
+    checks = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]["checks"]
+    assert checks["security"] == "uv run bandit -q -r legacy_app"
+
+    # A project adopted before the key existed: `update` looks once and writes what it finds.
+    pyproject.write_text(
+        re.sub(r'(?m)^src = "\."\n', "", pyproject.read_text(encoding="utf-8")), encoding="utf-8"
+    )
+    older = Project.load(proto)
+    assert older.src == "src"  # a project without the key loads as "src"
+    assert "pyproject.toml (+src)" in update(older, proto).merged
+    assert Project.load(proto).src == "."
+    assert not update(Project.load(proto), proto).merged  # once
+
+    # With layers and with mypy, the strict layer and the mutation paths follow the package.
+    layered = Config(
+        name="Legacy",
+        package="legacy_app",
+        llm=False,
+        rigor="production",
+        kind="service",
+        adopted=True,
+        tests_dir="test",
+        src=".",
+    )
+    tool = tomllib.loads(str(plan_files(layered)["pyproject.toml"]))["tool"]
+    assert tool["pyright"]["strict"] == ["legacy_app/domain"]
+    assert tool["mutmut"]["source_paths"] == ["legacy_app/"]
+    assert tool["mutmut"]["only_mutate"] == ["legacy_app/domain/*"]
+    mypy = dataclasses.replace(layered, types="mypy")
+    tool = tomllib.loads(str(plan_files(mypy)["pyproject.toml"]))["tool"]
+    assert tool["mypy"]["files"] == ["legacy_app", "test"]
+    assert tool["mypy"]["overrides"][0]["module"] == "legacy_app.domain.*"
+    # The layout is detected where the package is.
+    hexagonal = _legacy(
+        tmp_path / "hex",
+        LEGACY_PYPROJECT,
+        "legacy_app/__init__.py",
+        "legacy_app/domain/__init__.py",
+        "legacy_app/app/__init__.py",
+    )
+    assert detect_layout(hexagonal, "legacy_app") == "hexagonal"
+
+
+def test_a_src_project_renders_as_before(simple_project: Path, tmp_path: Path) -> None:
+    """ADR-0020 fitness: with the package under `src/` (every `rumbo init`, and an adopted
+    project that has it there) the configuration names the same paths it always did."""
+    for cfg in (
+        Config(name="Demo", package="demo", llm=False, rigor="production"),
+        Config(name="Demo", package="demo", llm=False, rigor="production", adopted=True),
+    ):
+        assert (cfg.src, cfg.code_root, cfg.package_path) == ("src", "src", "src/demo")
+        plan = plan_files(cfg)
+        pyproject = str(plan["pyproject.toml"])
+        for literal in (
+            'security = "uv run bandit -q -r src"\n',
+            'include = ["src", "tests"]\n',
+            'strict = ["src/demo/domain"]\n',
+            'source = ["src/demo"]\n',
+            'source_paths = ["src/"]\n',
+            'only_mutate = ["src/demo/domain/*"]\n',
+            'packages = ["src/demo"]\n',
+            '\nsrc = "src"\n',
+        ):
+            assert literal in pyproject, literal
+        arch = str(plan["tests/architecture/test_architecture.py"])
+        assert 'SRC = ROOT / "src" / "demo"\n' in arch
+        assert "- Nothing in src/ imports spikes/." in arch
+        assert "- Layers: src/demo/{domain,app,adapters,api}" in str(plan["AGENTS.md"])
+    mypy = Config(name="Demo", package="demo", llm=False, rigor="mvp", types="mypy")
+    assert 'files = ["src", "tests"]\n' in str(plan_files(mypy)["pyproject.toml"])
+    llm = Config(name="Demo", package="demo", llm=True, provider="anthropic", rigor="mvp")
+    assert 'security = "uv run bandit -q -r src evals"\n' in str(plan_files(llm)["pyproject.toml"])
+    runner = str(plan_files(llm)["evals/run_evals.py"])
+    assert 'prompts = root / "src" / "demo" / "prompts"\n' in runner
+    # The one new line of `[tool.ruff]`: a project's exclusions hold for a file named by path.
+    ruff = tomllib.loads(str(plan_files(mypy)["pyproject.toml"]))["tool"]["ruff"]
+    assert ruff["force-exclude"] is True and ruff["extend-exclude"] == ["spikes"]
+
+    # An adopted project with its package under src/ is detected as such, and says nothing new.
+    legacy = _legacy(tmp_path / "legacy", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
+    assert detect_project(legacy).src == "src"
+    assert "src=" not in detect_project(legacy).summary()
+
+    # A project generated before the key existed loads as "src"; `update` writes it, once.
+    pyproject_file = simple_project / "pyproject.toml"
+    original = pyproject_file.read_text(encoding="utf-8")
+    assert tomllib.loads(original)["tool"]["rumbo"]["src"] == "src"
+    try:
+        pyproject_file.write_text(re.sub(r"(?m)^src = .*\n", "", original), encoding="utf-8")
+        project = Project.load(simple_project)
+        assert (project.src, project.code_root, project.package_path) == ("src", "src", "src/demo")
+        assert "pyproject.toml (+src)" in update(project, simple_project).merged
+        rumbo = tomllib.loads(pyproject_file.read_text(encoding="utf-8"))["tool"]["rumbo"]
+        assert rumbo["src"] == "src"
+        assert not update(Project.load(simple_project), simple_project).merged
+        # Only "src" and "." are directories the harness knows how to point the tools at.
+        pyproject_file.write_text(original.replace('src = "src"', 'src = "lib"'), encoding="utf-8")
+        with pytest.raises(ValueError, match=r"\[tool\.rumbo\]\.src"):
+            Project.load(simple_project)
+    finally:
+        pyproject_file.write_text(original, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[tool\.rumbo\]\.src"):
+        Config(name="Demo", package="demo", llm=False, src="lib")
 
 
 def test_target_path_follows_the_tests_dir() -> None:
