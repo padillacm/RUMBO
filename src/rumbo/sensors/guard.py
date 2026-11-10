@@ -287,6 +287,8 @@ def changed_files(root: Path) -> list[str]:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError:
@@ -483,6 +485,8 @@ def run_verification(root: Path, changed: int) -> tuple[int, str]:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
         if proc.returncode == 0:
@@ -498,7 +502,13 @@ def run_verification(root: Path, changed: int) -> tuple[int, str]:
         )
     try:
         proc = subprocess.run(
-            ["make", "check-brief"], cwd=root, capture_output=True, text=True, check=False
+            ["make", "check-brief"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
     except FileNotFoundError:
         return _environment(

@@ -420,6 +420,8 @@ def _declared_human(root: Path) -> bool:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError:
@@ -583,7 +585,10 @@ def osv_vulnerabilities(name: str) -> int | None:
         )
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         return None
-    return len(data.get("vulns", [])) if data else 0
+    if data is None:
+        return 0
+    vulns = data.get("vulns", []) if isinstance(data, dict) else None
+    return len(vulns) if isinstance(vulns, list) else None  # an unexpected shape: unknown
 
 
 # ADR-0014: a private index (Artifactory, CodeArtifact, GitLab...) answers existence and versions;
@@ -603,7 +608,13 @@ def resolve_index(flag: str | None, env: Mapping[str, str]) -> str | None:
     url = flag or next((env[key] for key in INDEX_ENV_VARS if env.get(key)), None)
     if not url:
         return None
-    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        _ = parts.port  # a port that is not a number raises here, not later in a request
+    except ValueError:
+        # Never echo the value: it may carry credentials.
+        raise ValueError("the index URL cannot be parsed (check the host and the port)") from None
+    host = (parts.hostname or "").lower()
     return None if host in ("pypi.org", "www.pypi.org") else url
 
 
@@ -807,23 +818,28 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
         for w in warnings:
             print(f"   ⚠️  {w}{label}")
         return 1 if warnings else 0
-    info: dict[str, Any] = data.get("info") or {}
-    releases: dict[str, list[dict[str, Any]]] = data.get("releases") or {}
-    canonical = str(info.get("name") or name)
-    dates = [
-        f["upload_time_iso_8601"][:10]
-        for files in releases.values()
-        for f in files
-        if isinstance(f, dict) and f.get("upload_time_iso_8601")
-    ]
-    first = min(dates) if dates else None
-    age = (dt.date.today() - dt.date.fromisoformat(first)).days if first else None
-    urls = info.get("project_urls") or {}
-    repo = next(
-        (u for k, u in urls.items() if re.search(r"source|repo|code|github|home", k, re.I)),
-        info.get("home_page") or "",
-    )
-    headline = f"{canonical} {info.get('version', '?')} — {info.get('summary') or ''}"
+    try:
+        info: dict[str, Any] = data.get("info") or {}
+        releases: dict[str, list[dict[str, Any]]] = data.get("releases") or {}
+        canonical = str(info.get("name") or name)
+        dates = [
+            f["upload_time_iso_8601"][:10]
+            for files in releases.values()
+            for f in files
+            if isinstance(f, dict) and f.get("upload_time_iso_8601")
+        ]
+        first = min(dates) if dates else None
+        age = (dt.date.today() - dt.date.fromisoformat(first)).days if first else None
+        urls = info.get("project_urls") or {}
+        repo = next(
+            (u for k, u in urls.items() if re.search(r"source|repo|code|github|home", k, re.I)),
+            info.get("home_page") or "",
+        )
+        headline = f"{canonical} {info.get('version', '?')} — {info.get('summary') or ''}"
+    except (AttributeError, TypeError, KeyError, ValueError):
+        # ADR-0014 / threat model, boundary 3: the answer is untrusted data.
+        print(f"{indent}❓ {name}: PyPI answered in an unexpected shape. Verify by hand.")
+        return 2
     print(f"   on PyPI: {headline}{label}" if on_index else f"📦 {headline}")
     print(f"   first release: {first or '?'} ({age if age is not None else '?'} days ago){label}")
     print(f"   repository: {repo or '(not declared)'}  ·  releases: {len(releases)}{label}")
@@ -846,7 +862,10 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
 
 
 def cmd_verify_dep(args: argparse.Namespace) -> int:
-    index = resolve_index(args.index, os.environ)
+    try:
+        index = resolve_index(args.index, os.environ)
+    except ValueError as exc:
+        return _err(str(exc))
     code = 0
     for name in args.packages:
         if index is not None:

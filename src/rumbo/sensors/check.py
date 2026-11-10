@@ -201,7 +201,7 @@ def resolve_changed(base: str, root: Path, full: bool) -> Changed:
     diff = ["diff", "-z", "--relative", "--name-only", "--diff-filter=ACMR"]
     queries = [
         [*diff, f"{base}...HEAD"],
-        diff,
+        [*diff, "HEAD"],  # uncommitted: staged AND unstaged (plain `git diff` misses the index)
         ["ls-files", "-z", "--others", "--exclude-standard"],
     ]
     found: set[str] = set()

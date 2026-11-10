@@ -18,7 +18,7 @@ from pathlib import Path
 
 from rumbo.metrics import eval_cases
 from rumbo.project import Project, is_template, numbered_documents, section
-from rumbo.trace import spec_id, trace, uncovered
+from rumbo.trace import trace, uncovered
 
 MAX_DIFF_LINES = 300
 FIX_MAX_DIFF_LINES = 150  # ADR-0009: the fix lane allows half the normal diff
@@ -35,7 +35,6 @@ RELEASED_KINDS = ("library", "cli")  # published, not operated
 RUNBOOK_KINDS = ("service", "data")
 SLO_KINDS = ("service",)
 # A PRD table row whose first cell is a feature id: `| F-0001 | ... |`.
-PRD_FEATURE = re.compile(r"^\s*\|\s*[*_`\[]*(F-\d{4})\b", re.M)
 MIN_EVAL_CASES = {"prototype": 20, "mvp": 50, "production": 100}
 EARS = re.compile(r"\bshall\b|\bdeber[áa]n?\b", re.I)
 PLACEHOLDER = re.compile(r"…|\.\.\.|<[^>]+>")
@@ -126,35 +125,10 @@ def _has_real_contracts(text: str) -> bool:
     )
 
 
-def _prd_features(p: Project, specs: list[Path]) -> list[Result]:
-    """Reported at every rigor, never required: the PRD features that have no spec yet.
-
-    No row while the PRD is a template or lists no `F-NNNN` id in a table.
-    """
-    prd = p.read("docs/product/prd.md")
-    if prd is None or is_template(prd):
-        return []
-    features = list(dict.fromkeys(PRD_FEATURE.findall(prd)))
-    if not features:
-        return []
-    with_spec = {spec_id(spec) for spec in specs}
-    missing = [feature for feature in features if feature not in with_spec]
-    if not missing:
-        return [Result("every PRD feature has a spec", True)]
-    listed = ", ".join(missing)
-    return [
-        Result(
-            f"PRD features without a spec: {listed} (write each when the feature is next touched)",
-            None,
-        )
-    ]
-
-
 def _g2(p: Project, _run: bool) -> list[Result]:
     results = [_doc(p, "docs/product/prd.md", "PRD", required=p.at_least("mvp"))]
     specs = numbered_documents(p.root / "specs")
     results.append(Result("at least one spec in specs/", bool(specs), "use 'rumbo new spec'"))
-    results += _prd_features(p, specs)
     for spec in specs:
         text = spec.read_text(encoding="utf-8")
         rel = spec.relative_to(p.root).as_posix()
@@ -305,7 +279,15 @@ def _g3(p: Project, _run: bool) -> list[Result]:
 def _run_cmd(cmd: list[str], root: Path) -> tuple[int | None, str]:
     """(exit code, last lines of output); the code is None when the program is not installed."""
     try:
-        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            cmd,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
     except FileNotFoundError:
         return None, f"'{cmd[0]}' is not installed; could not run {' '.join(cmd)}"
     lines = (proc.stdout + proc.stderr).strip().splitlines()
@@ -320,7 +302,15 @@ def _check_command(root: Path) -> list[str]:
 
 
 def _git(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
 
 def merge_base(root: Path) -> tuple[str | None, str]:

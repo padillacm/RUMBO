@@ -38,8 +38,25 @@ ADR-0021).
   SLOs, a runbook or a canary.
 - `rumbo init` printed `provider=` and `rigor=` twice in its summary line.
 
+- On Windows `rumbo init` took a process without a terminal for a human (`isatty()` is true
+  for the NUL device) and declared `rumbo.human`; it now asks the console API and requires
+  both standard input and output to be consoles.
+
+- Found while writing the specs below:
+  - git output is decoded as UTF-8 everywhere. With the locale encoding (cp1252 on Windows)
+    the sensor dropped from the base a test file holding a byte that encoding lacks, so
+    emptying its tests passed, and such a byte in a commit message crashed the approval check.
+  - `{changed}` includes files that are staged but not committed; `git add` hid them from
+    the strict steps of an adopted project.
+  - `rumbo verify-dep` no longer raises on a JSON answer of an unexpected shape (PyPI or OSV)
+    nor on an index URL that cannot be parsed; a port that is not a number is refused
+    instead of dropped.
+
 ### Added
-- Gate G2 lists the features of the PRD that have no spec (reported, never failing).
+- Specs for the features that were already built: F-0002 (the runner), F-0003 (the sensor),
+  F-0004 (mount, adopt, update, promote), F-0005 (gates and traceability), F-0006 (`rumbo
+  tour`) and F-0007 (`rumbo verify-dep`), each requirement traced to a test. Every feature
+  of the PRD now has its spec.
 
 ## [0.4.0] - 2026-11-09
 
