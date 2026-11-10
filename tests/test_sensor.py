@@ -338,6 +338,196 @@ def test_skip_inside_a_resolved_helper_counts_as_a_skip() -> None:
     assert any("skip" in p for p in _problems(base, {"tests/test_a.py": skipping}))
 
 
+# ----------------------------------------------- ADR-0007: helper methods of a test class
+def _method_test(*members: str, bases: str = "", prelude: str = "") -> str:
+    """A module with ``class TestX`` made of those members (already dedented, one per def)."""
+    body = "\n".join(
+        "".join(f"    {line}\n" for line in dedent(member).strip("\n").splitlines())
+        for member in members
+    )
+    return f"{prelude}\nclass TestX{bases}:\n{body}"
+
+
+TEST_X = "tests/test_a.py::TestX.test_one"
+
+
+def test_helper_methods_are_resolved_on_self_cls_and_the_class_name() -> None:
+    source = _method_test(
+        """
+        def _on_self(self, x):
+            assert x
+        """,
+        """
+        @classmethod
+        def _on_cls(cls, x):
+            assert x
+            cls._static(x)
+        """,
+        """
+        @staticmethod
+        def _static(x):
+            assert x
+            assert x == 1
+        """,
+        """
+        async def test_one(self):
+            self._on_self(1)
+            self._on_cls(1)
+            TestX._static(1)
+        """,
+    )
+    inv = sensor.analyze({"tests/test_a.py": source})
+    assert inv.tests[TEST_X].asserts == 6
+    assert inv.asserts == 6, "a reached method is not counted again outside the tests"
+
+
+def test_a_self_call_resolves_only_inside_a_class_and_only_to_its_methods() -> None:
+    source = dedent(
+        """
+        def check(x):
+            assert x
+
+        def test_one(self):
+            self.check(1)
+
+        class TestX:
+            def test_one(self):
+                self.check(1)
+                self.other.check(1)
+        """
+    )
+    inv = sensor.analyze({"tests/test_a.py": source})
+    assert inv.tests["tests/test_a.py::test_one"].asserts == 0
+    assert inv.tests[TEST_X].asserts == 0
+    assert inv.asserts == 1
+
+
+def test_a_self_assert_method_still_counts_one_and_is_not_resolved() -> None:
+    """``self.assert*`` is a counted form (ADR-0007, rule 3): one, whatever its body holds."""
+    source = _method_test(
+        """
+        def assertValid(self, x):
+            assert x
+            assert x == 1
+            self.assertEqual(x, 1)
+        """,
+        """
+        def test_one(self):
+            self.assertValid(1)
+            self.assertEqual(1, 1)
+        """,
+        bases="(unittest.TestCase)",
+        prelude="import unittest\n",
+    )
+    assert _asserts({"tests/test_a.py": source}, TEST_X) == 2
+
+
+def test_helper_methods_keep_the_cycle_guard_and_the_depth_limit() -> None:
+    cycle = _method_test(
+        """
+        def _h1(self, x):
+            assert x
+            self._h2(x)
+        """,
+        """
+        def _h2(self, x):
+            assert x
+            self._h1(x)
+        """,
+        """
+        def test_one(self):
+            self._h1(1)
+        """,
+    )
+    assert _asserts({"tests/test_a.py": cycle}, TEST_X) == 2
+
+    def chain(depth_with_assert: int) -> dict[str, str | None]:
+        members = [
+            f"def _h{i}(self, x):\n"
+            + ("    assert x\n" if i == depth_with_assert else "    pass\n")
+            + (f"    self._h{i + 1}(x)\n" if i < 4 else "")
+            for i in range(1, 5)
+        ]
+        return {"tests/test_a.py": _method_test(*members, "def test_one(self):\n    self._h1(1)\n")}
+
+    assert _asserts(chain(3), TEST_X) == 1
+    assert _asserts(chain(4), TEST_X) == 0
+
+
+def test_inherited_helper_methods_follow_the_bases_inside_the_tests_directory() -> None:
+    checks = dedent(
+        """
+        class Root:
+            def _verify(self, x):
+                assert x
+                self._extra(x)
+
+            def _extra(self, x):
+                pass
+
+        class Checks(Root):
+            pass
+        """
+    )
+    test = _method_test(
+        """
+        def _extra(self, x):
+            assert x == 1
+            assert x > 0
+        """,
+        """
+        def test_one(self):
+            self._verify(1)
+        """,
+        bases="(Checks)",
+    )
+    layouts = {
+        "same module": {"tests/test_a.py": checks + test},
+        "from tests.checks import Checks": {
+            "tests/checks.py": checks,
+            "tests/test_a.py": "from tests.checks import Checks\n" + test,
+        },
+        "from .checks import Checks as Base": {
+            "tests/checks.py": checks,
+            "tests/test_a.py": "from .checks import Checks as Base\n"
+            + test.replace("(Checks)", "(Base)"),
+        },
+        "import checks": {
+            "tests/checks.py": checks,
+            "tests/test_a.py": "import checks\n" + test.replace("(Checks)", "(checks.Checks)"),
+        },
+    }
+    for name, snapshot in layouts.items():
+        # Root._verify (1) and, through ``self``, the override of _extra in TestX (2)
+        assert _asserts(snapshot, TEST_X) == 3, name
+        assert sensor.analyze(snapshot).asserts == 3, name
+    outside = {"tests/test_a.py": "from somewhere_else import Checks\n" + test}
+    assert _asserts(outside, TEST_X) == 0
+    looped = "class A(B):\n    pass\n\nclass B(A):\n    pass\n" + test.replace("(Checks)", "(A)")
+    assert _asserts({"tests/test_a.py": looped}, TEST_X) == 0
+
+
+def test_moving_asserts_between_a_test_method_and_its_helper_method_is_accepted() -> None:
+    asserts = ("assert x == 2", "assert x > 1", "assert x < 3", "assert x")
+    inline = _method_test(
+        "def test_one(self):\n    x = 2\n" + "".join(f"    {a}\n" for a in asserts)
+    )
+    extracted = _method_test(
+        "def _verify(self, x):\n" + "".join(f"    {a}\n" for a in asserts),
+        "def test_one(self):\n    x = 2\n    self._verify(x)\n",
+    )
+    gutted = _method_test(
+        "def _verify(self, x):\n    pass\n", "def test_one(self):\n    x = 2\n    self._verify(x)\n"
+    )
+    base, current = {"tests/test_a.py": inline}, {"tests/test_a.py": extracted}
+    assert _problems(base, current) == []
+    assert _problems(current, base) == []
+    assert _problems(current, {"tests/test_a.py": gutted}) == [
+        "tests/test_a.py::TestX.test_one: asserts dropped from 4 to 0",
+        "total asserts in the tests directory dropped from 4 to 0",
+    ]
+
+
 # ------------------------------------------------------------ ADR-0007: tests directory
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(
