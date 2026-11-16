@@ -493,22 +493,26 @@ def test_trace_and_gate_g4_requirements(
     )
     test = llm_project / "tests" / "unit" / "test_spot.py"
     test.write_text(
-        'def test_spot_price() -> None:\n    """F-0001.R1: price for a date."""\n', encoding="utf-8"
+        'def test_spot_price() -> None:\n    """F-0001' + '.R1: price for a date."""\n',
+        encoding="utf-8",
     )
     assert main(["trace", "--dir", str(llm_project)]) == 0
     out = capsys.readouterr().out
-    assert "| F-0001.R1 |" in out and "tests/unit/test_spot.py:2" in out
-    assert "| F-0001.R2 |" in out and "**missing**" in out and "1/2 requirements" in out
+    assert "| F-0001" + ".R1 |" in out and "tests/unit/test_spot.py:2" in out
+    assert "| F-0001" + ".R2 |" in out and "**missing**" in out and "1/2 requirements" in out
     assert main(["trace", "--dir", str(llm_project), "--strict"]) == 1
     capsys.readouterr()
-    # F-0001.R10 must not count as a reference to R1
+    # R10 must not count as a reference to R1
     test.write_text(
-        'def test_other() -> None:\n    """F-0001.R10 and F-0001.R2."""\n', encoding="utf-8"
+        'def test_other() -> None:\n    """F-0001' + ".R10 and F-0001" + '.R2."""\n',
+        encoding="utf-8",
     )
     main(["trace", "--dir", str(llm_project)])
     out = capsys.readouterr().out
-    assert "| F-0001.R1 | When a date is given, the system shall return the spot price |" in out
-    assert "| F-0001.R2 |" in out and out.count("**missing**") == 1
+    assert (
+        "| F-0001" + ".R1 | When a date is given, the system shall return the spot price |" in out
+    )
+    assert "| F-0001" + ".R2 |" in out and out.count("**missing**") == 1
 
     row = "every spec requirement is referenced by a test or eval case"
     _, results = evaluate("G4", Project.load(llm_project), run=False)
@@ -691,7 +695,9 @@ def test_trace_ignores_nested_items_and_lookalikes(simple_project: Path) -> None
         encoding="utf-8",
     )
     (simple_project / "tests" / "unit" / "test_edge.py").write_text(
-        'def test_x() -> None:\n    """F-0001.R10a is not R10; F-0001.R1. ends a sentence"""\n',
+        'def test_x() -> None:\n    """F-0001'
+        + ".R10a is not R10; F-0001"
+        + '.R1. ends a sentence"""\n',
         encoding="utf-8",
     )
     reqs = trace(simple_project)
@@ -730,6 +736,16 @@ def test_gate_g3_ignores_sections_of_untouched_templates(llm_project: Path) -> N
     tm.write_text(
         "\n".join(original.splitlines()[1:]) + "\n", encoding="utf-8"
     )  # human removes the mark
+    _, results = evaluate("G3", Project.load(llm_project))
+    by_desc = {r.description: r for r in results}
+    # Removing the mark is not an assessment: the table still equals the template.
+    assert by_desc["threat model: lethal trifecta assessed"].ok is False
+    unsigned = tm.read_text(encoding="utf-8")
+    filled = unsigned.replace(
+        "| Private data | | | |", "| Private data | yes | removed: no user data | test_x |"
+    )
+    assert filled != unsigned
+    tm.write_text(filled, encoding="utf-8")
     _, results = evaluate("G3", Project.load(llm_project))
     by_desc = {r.description: r for r in results}
     assert by_desc["threat model: lethal trifecta assessed"].ok is True
@@ -1037,6 +1053,7 @@ def template_context(**overrides: object) -> dict[str, object]:
         "arch": False,
         "packaged": False,  # library or cli (released to a package index)
         "deployable": False,  # service or data (shipped as an image)
+        "adopted": False,  # ADR-0013: the hygiene step of CI depends on it
         # ADR-0014: the minimum Python and the matrix a package's CI runs on.
         "python": "3.11",
         "python_nodot": "311",

@@ -27,6 +27,9 @@ DEFAULT_TYPE_CHECKER = "pyright"
 # root (".") when an adopted project keeps its package there.
 SRC_DIRS = ("src", ".")
 DEFAULT_SRC = "src"
+DEFAULT_TESTS = "tests"
+NOT_UTF8 = "not UTF-8 (save it as UTF-8)"
+_FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _LAYER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -75,6 +78,31 @@ def validate_src(src: str) -> None:
         )
 
 
+class NotUTF8(ValueError):
+    """A file of the project is not UTF-8 text; the message names the file and the remedy."""
+
+
+def read_utf8(path: Path, name: str = "") -> str:
+    """The text of a UTF-8 file, without a BOM and with LF newlines; NotUTF8 otherwise.
+
+    PowerShell 5 writes UTF-16 with `>` and an editor on Windows may write cp1252: neither is
+    a reason for a traceback. A NUL means UTF-16 without a BOM, never a document.
+    """
+    try:
+        text = path.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = "\x00"
+    if "\x00" in text:
+        raise NotUTF8(f"{name or path.name}: {NOT_UTF8}")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def normalise_tests_dir(value: object) -> str:
+    """`[tool.rumbo].tests` as a relative POSIX path: `./tests/` and backslashes are accepted."""
+    parts = [x for x in str(value or "").replace("\\", "/").split("/") if x not in ("", ".")]
+    return "/".join(parts) or DEFAULT_TESTS
+
+
 def code_root(src: str, package: str) -> str:
     """What the tools scan (ADR-0020): `src`, or the package itself when it lives at the root."""
     return package if src == "." else src
@@ -116,7 +144,7 @@ class Project:
         pyproject = root / "pyproject.toml"
         if not pyproject.exists():
             raise FileNotFoundError(f"no pyproject.toml in {root}; did you run 'rumbo init'?")
-        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        data = tomllib.loads(read_utf8(pyproject, "pyproject.toml"))
         cfg = data.get("tool", {}).get("rumbo")
         if not isinstance(cfg, dict):
             raise ValueError(
@@ -163,15 +191,16 @@ class Project:
             sdk_env_key=str(cfg.get("sdk_env_key", "")),
             harness_version=str(cfg.get("version", "")),
             adopted=bool(cfg.get("adopted", False)),
-            tests_dir=str(cfg.get("tests", "tests")) or "tests",
+            tests_dir=normalise_tests_dir(cfg.get("tests")),
             python=python,
             types=types,
             src=src,
         )
 
     def read(self, rel: str) -> str | None:
+        """The text of a file of the project; None when it is missing, NotUTF8 when unreadable."""
         path = self.root / rel
-        return path.read_text(encoding="utf-8") if path.is_file() else None
+        return read_utf8(path, rel) if path.is_file() else None
 
     def at_least(self, rigor: str) -> bool:
         return rigor_rank(self.rigor) >= rigor_rank(rigor)
@@ -210,6 +239,14 @@ class Project:
         return names[-1] if names else ""
 
 
+def tests_dir(root: Path) -> str:
+    """`[tool.rumbo].tests` of the project in `root`; `tests` when its state cannot be read."""
+    try:
+        return Project.load(root).tests_dir
+    except (OSError, ValueError):  # no pyproject.toml, not TOML, no or invalid [tool.rumbo]
+        return DEFAULT_TESTS
+
+
 def is_template(text: str | None) -> bool:
     """True when the document is missing or still carries the template mark."""
     return text is None or TEMPLATE_MARK in text
@@ -229,6 +266,26 @@ def section(text: str, title: str) -> str:
         return ""
     body = re.sub(r"<!--.*?-->", "", match.group(1), flags=re.S)
     return body.strip()
+
+
+def prose(text: str) -> str:
+    """`text` with its HTML comments and fenced code blocks blanked; line numbers are kept.
+
+    An example inside a fence is not a requirement, a placeholder or a diagram of the document.
+    """
+    text = re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)
+    kept: list[str] = []
+    fence = ""
+    for line in text.split("\n"):
+        mark = _FENCE.match(line)
+        if not fence:
+            fence = mark.group(1) if mark else ""
+            kept.append("" if mark else line)
+            continue
+        closes = mark is not None and mark.group(1).startswith(fence) and line.strip() == mark[1]
+        fence = "" if closes else fence
+        kept.append("")
+    return "\n".join(kept)
 
 
 def numbered_documents(folder: Path) -> list[Path]:
