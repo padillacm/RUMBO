@@ -31,7 +31,7 @@ evals-live:  ; uv run python evals/run_evals.py --suite all --live --k {{#produc
 {{/llm}}
 {{#arch}}
 # POSIX only: mutmut needs os.fork, so this stays out of the runner (nightly runs it on Linux).
-mutation:    ; @if find src/{{package}}/{{inner_layer}} -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo '{{inner_layer}}/ is still empty: nothing to mutate'; fi
+mutation:    ; @if find {{package_path}}/{{inner_layer}} -name '*.py' ! -name '__init__.py' | grep -q .; then uv run mutmut run && uv run mutmut results; else echo '{{inner_layer}}/ is still empty: nothing to mutate'; fi
 {{/arch}}
 sbom:        ; uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
 hooks:       ; uv run pre-commit install

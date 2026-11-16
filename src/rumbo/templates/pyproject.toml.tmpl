@@ -16,7 +16,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/{{package}}"]
+packages = ["{{package_path}}"]
 
 [tool.rumbo]
 # RUMBO harness configuration, read by `rumbo gate`, `rumbo doctor` and `rumbo update`.
@@ -42,6 +42,9 @@ python = "{{python}}"
 # ADR-0015: the type checker (pyright or mypy); it drives the dev tool, the `types` step
 # and the [tool.pyright] / [tool.mypy] section below.
 types = "{{types}}"
+# ADR-0020: the directory that holds the package: "src", or "." when it lives at the
+# project root. The paths below (bandit, the type checker, coverage) follow it.
+src = "{{src}}"
 {{#adopted}}
 # ADR-0013: the harness was mounted on an existing project; lint, format and types run on the
 # changed files (`{changed}` below), the nightly measures the whole tree with --full.
@@ -73,7 +76,7 @@ test = "uv run pytest{{#mvp_or_more}} --cov --cov-report=term-missing:skip-cover
 arch = "uv run lint-imports"
 {{/arch}}
 {{#mvp_or_more}}
-security = "uv run bandit -q -r src{{#evals}} evals{{/evals}}"
+security = "uv run bandit -q -r {{code_root}}{{#evals}} evals{{/evals}}"
 security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
 audit = "uv run pip-audit --skip-editable"
 {{/mvp_or_more}}
@@ -87,6 +90,8 @@ sensor = "uv run python scripts/check_tests_not_weakened.py --base {base}"
 line-length = 100
 target-version = "py{{python_nodot}}"
 extend-exclude = ["spikes"]
+# ADR-0020: the exclusions also hold for a file that is named on the command line.
+force-exclude = true
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
@@ -98,10 +103,10 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
 
 {{#pyright}}
 [tool.pyright]
-include = ["src", "{{tests_dir}}"]
+include = ["{{code_root}}", "{{tests_dir}}"]
 typeCheckingMode = "standard"
 {{#arch}}
-strict = ["src/{{package}}/{{inner_layer}}"]
+strict = ["{{package_path}}/{{inner_layer}}"]
 {{/arch}}
 {{#evals}}
 extraPaths = ["evals"]
@@ -109,9 +114,9 @@ extraPaths = ["evals"]
 {{/pyright}}
 {{#mypy}}
 [tool.mypy]
-# ADR-0015: the same contract as [tool.pyright]: src and {{tests_dir}} checked{{#arch}}, the
+# ADR-0015: the same contract as [tool.pyright]: {{code_root}} and {{tests_dir}} checked{{#arch}}, the
 # {{inner_layer}} layer strict{{/arch}}.
-files = ["src", "{{tests_dir}}"]
+files = ["{{code_root}}", "{{tests_dir}}"]
 python_version = "{{python}}"
 check_untyped_defs = true
 warn_unused_ignores = true
@@ -144,7 +149,7 @@ testpaths = ["{{tests_dir}}"]
 addopts = "-q --strict-markers"
 
 [tool.coverage.run]
-source = ["src/{{package}}"]
+source = ["{{package_path}}"]
 branch = true
 {{#arch}}
 
@@ -164,12 +169,12 @@ source_modules = ["{{package}}.{{inner_layer}}"]
 forbidden_modules = [{{forbidden_toml}}]
 
 [tool.mutmut]
-# Everything under src/ is copied, only the {{inner_layer}} layer (critical modules) is mutated.
-source_paths = ["src/"]
-only_mutate = ["src/{{package}}/{{inner_layer}}/*"]
+# Everything under {{code_root}}/ is copied, only the {{inner_layer}} layer (critical modules) is mutated.
+source_paths = ["{{code_root}}/"]
+only_mutate = ["{{package_path}}/{{inner_layer}}/*"]
 also_copy = [{{#evals}}"evals/", {{/evals}}"scripts/"]
 {{/arch}}
 
 [tool.bandit]
-# asserts in evals/ and tests/ are intended (B101); ruff S101 still guards src/.
+# asserts in evals/ and tests/ are intended (B101); ruff S101 still guards {{code_root}}/.
 skips = ["B101"]

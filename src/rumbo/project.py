@@ -23,6 +23,10 @@ DEFAULT_PYTHON = SUPPORTED_PYTHONS[0]
 # ADR-0015: the type checker is a setting; `ty` joins when it leaves preview.
 TYPE_CHECKERS = ("pyright", "mypy")
 DEFAULT_TYPE_CHECKER = "pyright"
+# ADR-0020: the directory that holds the package ([tool.rumbo].src): `src/`, or the project
+# root (".") when an adopted project keeps its package there.
+SRC_DIRS = ("src", ".")
+DEFAULT_SRC = "src"
 _LAYER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
@@ -62,6 +66,25 @@ def validate_python(python: str) -> None:
         )
 
 
+def validate_src(src: str) -> None:
+    """Raises ValueError unless `src` is a supported source directory (ADR-0020)."""
+    if src not in SRC_DIRS:
+        raise ValueError(
+            f'[tool.rumbo].src must be "src" or "." (the directory that holds the package), '
+            f"got {src!r}"
+        )
+
+
+def code_root(src: str, package: str) -> str:
+    """What the tools scan (ADR-0020): `src`, or the package itself when it lives at the root."""
+    return package if src == "." else src
+
+
+def package_path(src: str, package: str) -> str:
+    """The package directory relative to the project root (ADR-0020): `src/<pkg>` or `<pkg>`."""
+    return package if src == "." else f"{src}/{package}"
+
+
 @dataclass(frozen=True)
 class Project:
     root: Path
@@ -84,6 +107,8 @@ class Project:
     python: str = DEFAULT_PYTHON
     # ADR-0015: the type checker ([tool.rumbo].types); older projects use pyright.
     types: str = DEFAULT_TYPE_CHECKER
+    # ADR-0020: the directory that holds the package ([tool.rumbo].src); "src" when absent.
+    src: str = DEFAULT_SRC
 
     @classmethod
     def load(cls, root: Path) -> Project:
@@ -121,6 +146,8 @@ class Project:
         types = str(cfg.get("types", DEFAULT_TYPE_CHECKER))
         if types not in TYPE_CHECKERS:
             raise ValueError(f"[tool.rumbo].types must be one of {TYPE_CHECKERS}, got {types!r}")
+        src = str(cfg.get("src", DEFAULT_SRC))
+        validate_src(src)
         return cls(
             root=root,
             package=str(package),
@@ -139,6 +166,7 @@ class Project:
             tests_dir=str(cfg.get("tests", "tests")) or "tests",
             python=python,
             types=types,
+            src=src,
         )
 
     def read(self, rel: str) -> str | None:
@@ -147,6 +175,16 @@ class Project:
 
     def at_least(self, rigor: str) -> bool:
         return rigor_rank(self.rigor) >= rigor_rank(rigor)
+
+    @property
+    def code_root(self) -> str:
+        """What the tools scan (ADR-0020): `src`, or the package when it lives at the root."""
+        return code_root(self.src, self.package)
+
+    @property
+    def package_path(self) -> str:
+        """The package directory relative to the root (ADR-0020): `src/<pkg>` or `<pkg>`."""
+        return package_path(self.src, self.package)
 
     @property
     def evals(self) -> bool:

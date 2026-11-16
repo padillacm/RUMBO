@@ -27,9 +27,14 @@ What it enforces, and how strongly
   `rm -rf` on the tree root or home, redirections/sed/tee into protected files. Regexes cannot
   win against a shell, so:
 - Bash, after the command, and Stop (deterministic): any protected file that differs from HEAD
-  (or is new) blocks with the list of files. `uv add`/`uv lock` are the exception: pyproject.toml
-  and uv.lock may change through Bash. The binding layer outside Claude Code is CODEOWNERS plus
-  the CI sensors.
+  (or is new) blocks with the list of files. `uv add`/`uv remove`/`uv lock` are the exception,
+  and a narrow one (ADR-0019): uv.lock is free, and pyproject.toml may change only in its
+  dependency tables (`project.dependencies`, `project.optional-dependencies`,
+  `dependency-groups`, `tool.uv`). The version in HEAD and the current one are parsed and
+  compared without those keys; anything else that differs (`tool.rumbo`, `tool.ruff`,
+  `project.version`...) is reported by its dotted path, and so is a pyproject.toml that cannot
+  be parsed or that HEAD does not have. The binding layer outside Claude Code is CODEOWNERS
+  plus the CI sensors.
 - Stop: if Python/TOML/JSONL files changed since the last commit, the verification runner
   (`python scripts/rumbo_check.py --brief`, ADR-0006) must be green before the agent declares
   itself done (skipped when RUMBO_GUARD_SKIP_CHECK is set). Exit 1 (a verification failure)
@@ -40,10 +45,11 @@ What it enforces, and how strongly
   the runner existed fall back to `make check-brief`; without `make` the same environment route
   asks for `rumbo update`.
 - Git hooks (deterministic, exit 1, the git convention): the actor is an agent when any variable
-  of `[tool.rumbo].agent_env` is set (default: CLAUDECODE, GEMINI_CLI, CURSOR_AGENT,
-  CODEX_SANDBOX_NETWORK_DISABLED), the human when `git config rumbo.human` is `true` in the
-  clone (`rumbo init` sets it), and unknown otherwise, which counts as an agent. For an agent,
-  `pre-commit` refuses a staged protected file (pyproject.toml and uv.lock excepted, as above)
+  of `[tool.rumbo].agent_env` is set (default: the keys of `AGENT_ENV_SOURCES`, ADR-0021), the
+  human when `git config rumbo.human` is `true` in the clone (`rumbo init` sets it for a human
+  at a terminal), and unknown otherwise, which counts as an agent. For an agent,
+  `pre-commit` refuses a staged protected file (uv.lock and the dependency tables of
+  pyproject.toml excepted, as above, comparing HEAD with the staged blob)
   and a staged document whose `<!-- rumbo:template` mark was in HEAD and is gone; `commit-msg`
   refuses `[tests-change-approved]`. The human's commits, the root commit of a repository (the
   harness itself, nothing to protect yet) and a run with nothing staged (`pre-commit run
@@ -82,15 +88,53 @@ PROTECTED_FILES = (
     "evals/run_evals.py",
 )
 PROTECTED_PREFIXES = (".github/", "infra/", ".claude/", ".env")
-# Bash may change these (uv add / uv lock); Edit/Write may not.
-BASH_MAY_CHANGE = ("pyproject.toml", "uv.lock")
+# ADR-0019: what `uv add`, `uv remove` and `uv lock` write. uv.lock is not protected at all;
+# in pyproject.toml only these keys may change through Bash or in an agent's commit (an allow
+# list: every other table, known today or not, is protected). Edit/Write may change none.
+PYPROJECT = "pyproject.toml"
+PYPROJECT_FREE_KEYS = (
+    ("project", "dependencies"),
+    ("project", "optional-dependencies"),
+    ("dependency-groups",),
+    ("tool", "uv"),
+)
+PYPROJECT_UNPARSEABLE = f"{PYPROJECT} (cannot be parsed)"
+PYPROJECT_NEW = f"{PYPROJECT} (new file)"
+PYPROJECT_DELETED = f"{PYPROJECT} (deleted)"
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 # ADR-0017: a numbered ADR or spec committed without the template mark is signed by the human
 # and read-only for the agent; the 0000 templates and documents under the mark are not.
 SIGNED_DOC = re.compile(r"^(?:specs|docs/adr)/(?!0000-)\d{4}-[^/]+\.md$")
 CODE_SUFFIXES = (".py", ".toml", ".jsonl")
 # Environment variables that mark a coding agent's shell; `[tool.rumbo].agent_env` overrides.
-DEFAULT_AGENT_ENV = ("CLAUDECODE", "GEMINI_CLI", "CURSOR_AGENT", "CODEX_SANDBOX_NETWORK_DISABLED")
+# ADR-0021: each one is confirmed in the tool's own documentation or source, never from memory.
+AGENT_ENV_SOURCES = {
+    "CLAUDECODE": "https://code.claude.com/docs/en/env-vars",
+    "GEMINI_CLI": (
+        "https://github.com/google-gemini/gemini-cli/blob/main/"
+        "packages/core/src/services/shellExecutionService.ts"
+    ),
+    "CURSOR_AGENT": "https://cursor.com/docs/agent/tools/terminal",
+    # Only set when the network is sandboxed; the next two are unconditional.
+    "CODEX_SANDBOX_NETWORK_DISABLED": (
+        "https://github.com/openai/codex/blob/main/codex-rs/core/src/spawn.rs"
+    ),
+    "CODEX_THREAD_ID": (
+        "https://github.com/openai/codex/blob/main/codex-rs/protocol/src/shell_environment.rs"
+    ),
+    "CODEX_CI": (
+        "https://github.com/openai/codex/blob/main/"
+        "codex-rs/core/src/unified_exec/process_manager.rs"
+    ),
+    "ROO_ACTIVE": (
+        "https://github.com/RooCodeInc/Roo-Code/blob/main/src/integrations/terminal/Terminal.ts"
+    ),
+    "CLINE_ACTIVE": (
+        "https://github.com/cline/cline/blob/main/"
+        "apps/vscode/src/hosts/vscode/terminal/VscodeTerminalRegistry.ts"
+    ),
+}
+DEFAULT_AGENT_ENV = tuple(AGENT_ENV_SOURCES)
 HUMAN_HINT = (
     "no agent marker in the environment and rumbo.human is not set in this clone, so the "
     "commit is treated as an agent's. A human declares themself once per clone with: "
@@ -243,6 +287,8 @@ def changed_files(root: Path) -> list[str]:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except FileNotFoundError:
@@ -256,9 +302,89 @@ def changed_code_files(root: Path) -> list[str]:
     return [f for f in changed_files(root) if f.endswith(CODE_SUFFIXES)]
 
 
+def _toml_differences(head: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """Dotted paths (at most two levels) that differ, the free keys of ADR-0019 left out.
+
+    A table missing on one side counts as an empty one, so `uv add` creating `[tool.uv]` in a
+    file without a `[tool]` table is not a change to `tool`.
+    """
+    paths: list[str] = []
+    for key in sorted(head.keys() | current.keys()):
+        if (key,) in PYPROJECT_FREE_KEYS:
+            continue
+        old, new = head.get(key, {}), current.get(key, {})
+        if isinstance(old, dict) and isinstance(new, dict):
+            before: dict[str, Any] = old
+            after: dict[str, Any] = new
+            paths += [
+                f"{key}.{sub}"
+                for sub in sorted(before.keys() | after.keys())
+                if (key, sub) not in PYPROJECT_FREE_KEYS and before.get(sub) != after.get(sub)
+            ]
+        elif old != new:
+            paths.append(key)
+    return paths
+
+
+def pyproject_change(root: Path, staged: bool) -> list[str]:
+    """What changed in pyproject.toml outside its dependency tables (ADR-0019); empty if nothing.
+
+    Compares the version in HEAD with the staged blob (`staged`, the git hook) or with the
+    working tree (after a shell command), both parsed, without `PYPROJECT_FREE_KEYS`. Fails
+    closed: a version that does not parse, a file that HEAD does not have and a deleted file
+    are protected changes, under a label instead of a dotted path. Only a repository with no
+    commit yet (or no git at all) has nothing to compare with: the root commit is exempt.
+
+    Costs one or two `git show` and two parses: callers ask only when the file changed.
+    """
+    head_text = _blob(root, f"HEAD:{PYPROJECT}")
+    if head_text is None:
+        return [PYPROJECT_NEW] if has_head(root) else []
+    if staged:
+        current_text = _blob(root, f":{PYPROJECT}")
+    else:
+        try:
+            current_text = (root / PYPROJECT).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            current_text = None
+        except (OSError, UnicodeDecodeError):
+            return [PYPROJECT_UNPARSEABLE]
+    if current_text is None:
+        return [PYPROJECT_DELETED]
+    try:
+        head = tomllib.loads(head_text)
+        current = tomllib.loads(current_text)
+    except (tomllib.TOMLDecodeError, RecursionError):
+        return [PYPROJECT_UNPARSEABLE]
+    return _toml_differences(head, current)
+
+
+def _protected_changes(root: Path, files: list[str], staged: bool) -> tuple[list[str], list[str]]:
+    """(protected files among `files`, what `pyproject_change` reports if pyproject.toml is one).
+
+    pyproject.toml is never in the first list: it is judged by its tables, and only when it is
+    in `files`, so the usual event pays for no extra subprocess.
+    """
+    protected = [f for f in files if is_protected(f) and f != PYPROJECT]
+    tables = pyproject_change(root, staged) if PYPROJECT in files else []
+    return protected, tables
+
+
+def _pyproject_reason(tables: list[str], what: str, undo: str) -> str:
+    free = ", ".join(".".join(key) for key in PYPROJECT_FREE_KEYS)
+    return (
+        f"{PYPROJECT} {what} outside its dependency tables: "
+        + ", ".join(tables)
+        + f". It is a protected file: an agent changes only {free} (what uv add, uv remove "
+        f"and uv lock write). Restore everything else ({undo}) and ask the human to make "
+        "that change."
+    )
+
+
 def changed_protected_files(root: Path) -> list[str]:
     """Protected files changed since HEAD (the deterministic check behind the Bash heuristics)."""
-    return [f for f in changed_files(root) if is_protected(f) and f not in BASH_MAY_CHANGE]
+    protected, tables = _protected_changes(root, changed_files(root), staged=False)
+    return protected + ([PYPROJECT] if tables else [])
 
 
 def changed_documents(root: Path, changed: list[str]) -> tuple[list[str], list[str]]:
@@ -289,7 +415,7 @@ def changed_documents(root: Path, changed: list[str]) -> tuple[list[str], list[s
 
 def check_post_bash(root: Path) -> str | None:
     changed = changed_files(root)
-    touched = [f for f in changed if is_protected(f) and f not in BASH_MAY_CHANGE]
+    touched, tables = _protected_changes(root, changed, staged=False)
     unmarked, signed = changed_documents(root, changed)
     reasons: list[str] = []
     if touched:
@@ -298,6 +424,14 @@ def check_post_bash(root: Path) -> str | None:
             + ", ".join(touched)
             + ". Revert them (git checkout -- <file>, or delete the new file) and ask the human "
             "to make that change; the agent does not modify the harness."
+        )
+    if tables:
+        reasons.append(
+            _pyproject_reason(
+                tables,
+                "changed since the last commit",
+                f"git checkout -- {PYPROJECT}, then repeat the uv command if there was one",
+            )
         )
     if unmarked:
         reasons.append(
@@ -351,6 +485,8 @@ def run_verification(root: Path, changed: int) -> tuple[int, str]:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
         if proc.returncode == 0:
@@ -366,7 +502,13 @@ def run_verification(root: Path, changed: int) -> tuple[int, str]:
         )
     try:
         proc = subprocess.run(
-            ["make", "check-brief"], cwd=root, capture_output=True, text=True, check=False
+            ["make", "check-brief"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
     except FileNotFoundError:
         return _environment(
@@ -484,15 +626,22 @@ def check_pre_commit(root: Path) -> str | None:
     if not staged:
         return None
     reason: str | None = None
-    protected = [f for f in staged if is_protected(f) and f not in BASH_MAY_CHANGE]
+    protected, tables = _protected_changes(root, staged, staged=True)
+    refusals: list[str] = []
     if protected:
-        reason = (
+        refusals.append(
             "protected file(s) staged: "
             + ", ".join(protected)
             + ". They are protected by AGENTS.md (hard rules): the agent does not edit the "
             "Makefile, pyproject.toml, CI, infra/, hooks, the sensors or .env files. Unstage them "
             "(git restore --staged <file>) and ask the human to make that change."
         )
+    if tables:
+        refusals.append(
+            _pyproject_reason(tables, "is staged with changes", f"git restore --staged {PYPROJECT}")
+        )
+    if refusals:
+        reason = " ".join(refusals)
     elif signed := [f for f in staged if is_signed(root, f)]:
         reason = _signed_reason(", ".join(signed))
     elif unmarked := _unmarked(root, staged):

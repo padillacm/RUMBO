@@ -101,6 +101,8 @@ def _commits(root: Path, since: dt.date) -> list[str]:
             cwd=root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
         )
     except OSError:  # git not installed

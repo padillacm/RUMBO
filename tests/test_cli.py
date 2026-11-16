@@ -20,6 +20,7 @@ from rumbo.gates import evaluate
 from rumbo.project import TEMPLATE_MARK, Project, is_template, section, slug
 
 
+# Covers F-0004.R1, F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_non_interactive(tmp_path: Path) -> None:
     rc = main(
         [
@@ -43,6 +44,7 @@ def test_init_non_interactive(tmp_path: Path) -> None:
     assert "provider anthropic" in (tmp_path / "docs" / "decisions.md").read_text(encoding="utf-8")
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_yes_requires_a0_answers(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["init", "--dir", str(tmp_path), "--yes", "--no-install", "--rigor", "mvp"]) == 2
     assert "--llm or --no-llm" in capsys.readouterr().err
@@ -50,6 +52,45 @@ def test_init_yes_requires_a0_answers(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "--rigor" in capsys.readouterr().err
 
 
+# Covers F-0004.R9, F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_summary_prints_each_setting_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression (audit of v0.4.0): the summary line printed `provider=` and `rigor=` twice,
+    glued to `python=3.11` with no space."""
+    init = ["init", "--yes", "--no-install", "--name", "Demo", "--rigor", "mvp"]
+    assert main([*init, "--dir", str(tmp_path / "plain"), "--no-llm"]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line == (
+        "  package=demo kind=service layout=hexagonal llm=False provider=- rigor=mvp "
+        "python=3.11 types=pyright"
+    )
+    keys = [setting.split("=")[0] for setting in line.split()]
+    assert keys == ["package", "kind", "layout", "llm", "provider", "rigor", "python", "types"]
+    llm = [*init, "--llm", "--provider", "anthropic", "--types", "mypy", "--python", "3.12"]
+    assert main([*llm, "--dir", str(tmp_path / "llm")]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line.endswith("llm=True provider=anthropic rigor=mvp python=3.12 types=mypy")
+    assert line.count("provider=") == 1 and line.count("rigor=") == 1
+    # An adopted project adds its part at the end; `src=` appears only when it is not "src".
+    under_src = tmp_path / "under_src"
+    (under_src / "src" / "legacy_app").mkdir(parents=True)
+    (under_src / "src" / "legacy_app" / "__init__.py").write_text("", encoding="utf-8")
+    at_root = tmp_path / "at_root"
+    (at_root / "legacy_app").mkdir(parents=True)
+    (at_root / "legacy_app" / "__init__.py").write_text("", encoding="utf-8")
+    (at_root / "test").mkdir()
+    adopt = ["init", "--adopt", "--yes", "--no-install", "--no-llm", "--rigor", "mvp"]
+    assert main([*adopt, "--dir", str(under_src)]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line.endswith("python=3.11 types=pyright adopted=true tests=tests")
+    assert main([*adopt, "--dir", str(at_root)]) == 0
+    line = capsys.readouterr().out.split("Mounting the RUMBO harness in")[1].splitlines()[1]
+    assert line.endswith("python=3.11 types=pyright adopted=true tests=test src=.")
+    assert len(line.split()) == len({setting.split("=")[0] for setting in line.split()}) == 11
+
+
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_llm_without_provider_fails(tmp_path: Path) -> None:
     assert (
         main(["init", "--dir", str(tmp_path), "--yes", "--no-install", "--llm", "--rigor", "mvp"])
@@ -57,6 +98,7 @@ def test_init_llm_without_provider_fails(tmp_path: Path) -> None:
     )
 
 
+# Covers F-0004.R1 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_rejects_bad_package(tmp_path: Path) -> None:
     assert (
         main(
@@ -76,6 +118,7 @@ def test_init_rejects_bad_package(tmp_path: Path) -> None:
     )
 
 
+# Covers F-0005.R14 (specs/0005-gates-and-traceability.md).
 def test_doctor(llm_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (llm_project / "uv.lock").write_text("", encoding="utf-8")
     assert main(["doctor", "--dir", str(llm_project)]) == 0
@@ -100,6 +143,7 @@ def test_new_numbers_and_titles(simple_project: Path, capsys: pytest.CaptureFixt
     assert main(["new", "adr", "  ", "--dir", d]) == 2
 
 
+# Covers F-0005.R3 (specs/0005-gates-and-traceability.md).
 def test_decision(simple_project: Path) -> None:
     assert (
         main(["decision", "Use DuckDB", "--why", "time series", "--dir", str(simple_project)]) == 0
@@ -114,6 +158,7 @@ def _complete(path: Path) -> None:
     )
 
 
+# Covers F-0005.R7 (specs/0005-gates-and-traceability.md).
 def test_gate_g1(simple_project: Path) -> None:
     project = Project.load(simple_project)
     _, results = evaluate("G1", project)
@@ -128,6 +173,7 @@ def test_gate_g1(simple_project: Path) -> None:
     assert any(r.ok is False and "spikes" in r.description for r in results)
 
 
+# Covers F-0005.R4, F-0005.R7 (specs/0005-gates-and-traceability.md).
 def test_gate_g2_scales_with_rigor(llm_project: Path, simple_project: Path) -> None:
     _, results = evaluate("G2", Project.load(llm_project))
     by_desc = {r.description: r for r in results}
@@ -137,6 +183,7 @@ def test_gate_g2_scales_with_rigor(llm_project: Path, simple_project: Path) -> N
     assert {r.description: r.ok for r in results}["PRD complete"] is None  # prototype: optional
 
 
+# Covers F-0005.R7 (specs/0005-gates-and-traceability.md).
 def test_gate_g2_ears_ignores_template_placeholders(llm_project: Path) -> None:
     assert main(["new", "spec", "Query", "--dir", str(llm_project)]) == 0
     spec = llm_project / "specs" / "0001-query.md"
@@ -155,6 +202,7 @@ def test_gate_g2_ears_ignores_template_placeholders(llm_project: Path) -> None:
     assert next(r for r in results if r.description.endswith("EARS requirements")).ok is True
 
 
+# Covers F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g3_workflow_adr_by_title(llm_project: Path) -> None:
     d = str(llm_project)
     assert main(["new", "adr", "CI pipeline", "--dir", d]) == 0
@@ -170,6 +218,7 @@ def test_gate_g3_workflow_adr_by_title(llm_project: Path) -> None:
     assert next(r for r in results if r.description == "import-linter contracts").ok is True
 
 
+# Covers F-0005.R15 (specs/0005-gates-and-traceability.md).
 def test_gate_g2_skips_malformed_dataset_lines(llm_project: Path) -> None:
     dataset = llm_project / "evals" / "datasets" / "odd.jsonl"
     dataset.write_text(
@@ -183,6 +232,7 @@ def test_gate_g2_skips_malformed_dataset_lines(llm_project: Path) -> None:
     assert "found 1 " in cases.detail  # only the object line counts; nothing crashed
 
 
+# Covers F-0005.R4 (specs/0005-gates-and-traceability.md).
 def test_gate_g3_tolerates_empty_or_comment_only_adrs(llm_project: Path) -> None:
     adrs = llm_project / "docs" / "adr"
     (adrs / "0007-empty.md").write_text("", encoding="utf-8")
@@ -198,6 +248,7 @@ def test_gate_g3_tolerates_empty_or_comment_only_adrs(llm_project: Path) -> None
     assert by_desc["docs/adr/0008-stub.md: complete"].ok is True
 
 
+# Covers F-0005.R1, F-0005.R2, F-0005.R10 (specs/0005-gates-and-traceability.md).
 def test_gate_g4_reports_unmeasured_instead_of_green(
     simple_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -207,6 +258,7 @@ def test_gate_g4_reports_unmeasured_instead_of_green(
     assert "could not be measured" in out and "NOT SIGNED" in out
 
 
+# Covers F-0005.R10 (specs/0005-gates-and-traceability.md).
 def test_gate_g4_without_make_is_unmeasured_not_a_traceback(
     simple_project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -229,12 +281,13 @@ def test_gate_g4_without_make_is_unmeasured_not_a_traceback(
     finally:
         runner.write_bytes(original)
     check = next(r for r in results if r.description == "rumbo check green")
-    assert check.ok is None and "not installed" in check.detail
+    assert check.ok is False and "not installed" in check.detail  # ADR-0018: not measured fails
 
 
+# Covers F-0005.R10 (specs/0005-gates-and-traceability.md).
 @pytest.mark.parametrize(
     ("exit_code", "ok", "detail"),
-    [(0, True, ""), (1, False, "FAIL lint (exit 1)"), (3, None, "environment broken (exit 3)")],
+    [(0, True, ""), (1, False, "FAIL lint (exit 1)"), (3, False, "environment broken (exit 3)")],
 )
 def test_gate_g4_runs_the_runner_and_tells_red_from_broken(
     simple_project: Path,
@@ -278,6 +331,7 @@ def test_gate_g3_requires_ci_to_run_the_runner(llm_project: Path) -> None:
     assert check.ok is False and "ADR-0006" in check.detail
 
 
+# Covers F-0005.R8 (specs/0005-gates-and-traceability.md).
 def test_diff_size_is_unmeasured_when_head_is_the_base(tmp_path: Path) -> None:
     from rumbo.gates import diff_size
 
@@ -305,11 +359,14 @@ def test_diff_size_is_unmeasured_when_head_is_the_base(tmp_path: Path) -> None:
     assert diff_size(clone) == (3, "origin/main")
 
 
+# Covers F-0005.R4 (specs/0005-gates-and-traceability.md).
 def test_gate_g5_prototype_does_not_require_dependabot(simple_project: Path) -> None:
     _, results = evaluate("G5", Project.load(simple_project))
     assert all(r.ok is not False for r in results if "dependency updates" in r.description)
 
 
+# Covers F-0007.R1, F-0007.R3 and F-0007.R8
+# (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_verify_dep_handles_bad_json_and_typos(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -328,6 +385,7 @@ def test_verify_dep_handles_bad_json_and_typos(
     assert "does NOT exist" in out
 
 
+# Covers F-0007.R8 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_verify_dep_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(name: str) -> None:
         raise ValueError("bad url")
@@ -343,6 +401,8 @@ def test_project_load_errors(tmp_path: Path) -> None:
     assert main(["gate", "G1", "--dir", str(tmp_path)]) == 2
 
 
+# Covers F-0006.R1, F-0006.R2, F-0006.R4, F-0006.R5, F-0006.R6, F-0006.R8 and F-0006.R9
+# (specs/0006-guided-review-of-a-change.md).
 def test_tour(simple_project: Path, capsys: pytest.CaptureFixture[str]) -> None:
     def git(*args: str) -> None:
         subprocess.run(
@@ -393,6 +453,7 @@ def test_helpers() -> None:
     json.dumps({"ok": True})
 
 
+# Covers F-0005.R4 (specs/0005-gates-and-traceability.md).
 def test_gate_g2_data_contracts_recommended_then_required(llm_project: Path) -> None:
     assert main(["new", "spec", "Contracts", "--dir", str(llm_project)]) == 0
     _, results = evaluate("G2", Project.load(llm_project))
@@ -415,6 +476,7 @@ def test_gate_g2_data_contracts_recommended_then_required(llm_project: Path) -> 
     )
 
 
+# Covers F-0005.R11, F-0005.R12 (specs/0005-gates-and-traceability.md).
 def test_trace_and_gate_g4_requirements(
     llm_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -466,6 +528,7 @@ def test_trace_and_gate_g4_requirements(
     spec.unlink()
 
 
+# Covers F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g5_requires_budget_and_telemetry_for_llm_products(
     llm_project: Path, simple_project: Path
 ) -> None:
@@ -517,6 +580,7 @@ def test_eval_add_needs_an_llm_project(simple_project: Path) -> None:
     assert main([*args, "--input", "{}", "--expected", "{}"]) == 2
 
 
+# Covers F-0005.R15 (specs/0005-gates-and-traceability.md).
 def test_metrics_reads_decisions_specs_and_evals(
     simple_project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,6 +612,7 @@ def test_metrics_reads_decisions_specs_and_evals(
     (simple_project / "specs" / "0001-alpha.md").unlink()
 
 
+# Covers F-0004.R12 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_update_diff_shows_harness_drift_only(
     llm_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -568,6 +633,7 @@ def test_update_diff_shows_harness_drift_only(
     assert "Everything matches" in capsys.readouterr().out
 
 
+# Covers F-0005.R15 (specs/0005-gates-and-traceability.md).
 def test_decisions_parsing_tolerates_hand_written_headings(tmp_path: Path) -> None:
     from rumbo.metrics import parse_decisions
 
@@ -608,6 +674,7 @@ def test_eval_add_escapes_the_log_table(llm_project: Path) -> None:
     (llm_project / "evals" / "datasets" / "pipes.jsonl").unlink()
 
 
+# Covers F-0005.R11 (specs/0005-gates-and-traceability.md).
 def test_trace_ignores_nested_items_and_lookalikes(simple_project: Path) -> None:
     from rumbo.trace import trace
 
@@ -639,6 +706,7 @@ def test_trace_ignores_nested_items_and_lookalikes(simple_project: Path) -> None
     (simple_project / "tests" / "unit" / "test_edge.py").unlink()
 
 
+# Covers F-0005.R2, F-0005.R3 (specs/0005-gates-and-traceability.md).
 def test_gate_header_is_green_when_no_check_failed(simple_project: Path) -> None:
     from rumbo.gates import report
 
@@ -650,6 +718,7 @@ def test_gate_header_is_green_when_no_check_failed(simple_project: Path) -> None
     assert not ok and text.startswith("🛑 Gate G2")
 
 
+# Covers F-0005.R7 (specs/0005-gates-and-traceability.md).
 def test_gate_g3_ignores_sections_of_untouched_templates(llm_project: Path) -> None:
     _, results = evaluate("G3", Project.load(llm_project))
     by_desc = {r.description: r for r in results}
@@ -673,6 +742,7 @@ def test_no_arguments_prints_help_and_a_hint(capsys: pytest.CaptureFixture[str])
     assert "rumbo init" in out and "rumbo doctor" in out
 
 
+# Covers F-0005.R14 (specs/0005-gates-and-traceability.md).
 def test_doctor_warns_about_placeholders(
     simple_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -683,6 +753,7 @@ def test_doctor_warns_about_placeholders(
     (simple_project / "uv.lock").unlink()
 
 
+# Covers F-0006.R1 and F-0006.R2 (specs/0006-guided-review-of-a-change.md).
 def test_tour_falls_back_to_a_known_base(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -774,6 +845,7 @@ def _branch_repo(root: Path) -> tuple[Callable[..., str], str]:
     return git, git("rev-parse", "HEAD")
 
 
+# Covers F-0005.R8 (specs/0005-gates-and-traceability.md).
 @pytest.mark.parametrize(
     ("subjects", "expected"),
     [
@@ -810,6 +882,7 @@ def _fix_lane_results(root: Path) -> dict[str, Any]:
     return {r.description: r for r in results}
 
 
+# Covers F-0005.R8, F-0005.R9 (specs/0005-gates-and-traceability.md).
 def test_gate_g4_fix_lane_is_green_for_a_tested_small_fix(simple_project: Path) -> None:
     """ADR-0009: regression test added, diff ≤ 150, no new dependency; heading names the lane."""
     from rumbo.gates import report
@@ -846,6 +919,7 @@ def test_gate_g4_fix_lane_is_green_for_a_tested_small_fix(simple_project: Path) 
     assert not any(d.startswith("fix lane:") for d in by_desc)
 
 
+# Covers F-0005.R9 (specs/0005-gates-and-traceability.md).
 def test_gate_g4_fix_lane_requires_a_regression_test(simple_project: Path) -> None:
     """ADR-0009 rule 1: a fix that adds no line under the tests directory is red."""
     git, _ = _branch_repo(simple_project)
@@ -858,6 +932,7 @@ def test_gate_g4_fix_lane_requires_a_regression_test(simple_project: Path) -> No
     assert by_desc["fix lane: diff ≤ 150 lines"].ok is True
 
 
+# Covers F-0005.R9 (specs/0005-gates-and-traceability.md).
 def test_gate_g4_fix_lane_limits_the_diff_to_150_lines(simple_project: Path) -> None:
     """ADR-0009 rule 2: half the normal limit; the normal 300-line rule still passes."""
     git, _ = _branch_repo(simple_project)
@@ -873,6 +948,7 @@ def test_gate_g4_fix_lane_limits_the_diff_to_150_lines(simple_project: Path) -> 
     assert by_desc["small diff (≤300 lines, lockfiles excluded)"].ok is True
 
 
+# Covers F-0005.R9 (specs/0005-gates-and-traceability.md).
 def test_gate_g4_fix_lane_forbids_a_new_runtime_dependency(simple_project: Path) -> None:
     """ADR-0009 rule 3: [project].dependencies is compared by normalised name."""
     pyproject = simple_project / "pyproject.toml"
@@ -904,6 +980,7 @@ def test_gate_g4_fix_lane_forbids_a_new_runtime_dependency(simple_project: Path)
     assert red.ok is False and red.detail.endswith("added since main: requests")
 
 
+# Covers F-0005.R8 (specs/0005-gates-and-traceability.md).
 def test_gate_g4_without_a_merge_base_is_the_normal_lane(simple_project: Path) -> None:
     """ADR-0009: no git history means the normal lane and no fix-lane result."""
     by_desc = _fix_lane_results(simple_project)
@@ -1027,6 +1104,7 @@ def _by_description(code: str, project: Project) -> dict[str, bool | None]:
     return {r.description: r.ok for r in results}
 
 
+# Covers F-0005.R4, F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g2_counts_eval_cases_for_a_data_project_without_llm(tmp_path: Path) -> None:
     data = _by_description("G2", _kind_project(tmp_path / "data", "data", "prototype"))
     assert "≥20 real cases in evals/datasets/ (rigor prototype)" in data
@@ -1035,6 +1113,7 @@ def test_gate_g2_counts_eval_cases_for_a_data_project_without_llm(tmp_path: Path
     assert not any("real cases" in d or d.startswith("Eval plan") for d in service)
 
 
+# Covers F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g3_flat_layout_asks_for_the_architecture_test_not_the_contracts(
     tmp_path: Path,
 ) -> None:
@@ -1049,6 +1128,7 @@ def test_gate_g3_flat_layout_asks_for_the_architecture_test_not_the_contracts(
     assert _by_description("G3", project)["architecture test present"] is True
 
 
+# Covers F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g3_hexagonal_layout_requires_the_two_contracts(tmp_path: Path) -> None:
     project = _kind_project(tmp_path, "service", "mvp", layout="hexagonal")
     rows = _by_description("G3", project)
@@ -1063,6 +1143,7 @@ def test_gate_g3_hexagonal_layout_requires_the_two_contracts(tmp_path: Path) -> 
     assert _by_description("G3", project)["import-linter contracts"] is True
 
 
+# Covers F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g5_service_keeps_the_ops_trio(tmp_path: Path) -> None:
     rows = _by_description("G5", _kind_project(tmp_path, "service", "mvp"))
     assert rows["Runbook complete"] and rows["SLOs complete"] and rows["Dockerfile in infra/"]
@@ -1072,6 +1153,7 @@ def test_gate_g5_service_keeps_the_ops_trio(tmp_path: Path) -> None:
     )
 
 
+# Covers F-0005.R5 (specs/0005-gates-and-traceability.md).
 @pytest.mark.parametrize("kind", ["library", "cli"])
 def test_gate_g5_library_and_cli_pass_with_the_generated_release_files(
     tmp_path: Path, kind: str
@@ -1086,6 +1168,7 @@ def test_gate_g5_library_and_cli_pass_with_the_generated_release_files(
     }
 
 
+# Covers F-0005.R4, F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g5_library_red_cases(tmp_path: Path) -> None:
     changelog = "CHANGELOG.md with an 'Unreleased' section"
     release = "release workflow publishes with Trusted Publishing (no PyPI token secret)"
@@ -1146,6 +1229,7 @@ def test_gate_g5_library_red_cases(tmp_path: Path) -> None:
     assert rows[matrix] is None and rows["automatic dependency updates"] is True
 
 
+# Covers F-0005.R4, F-0005.R5 (specs/0005-gates-and-traceability.md).
 def test_gate_g5_data_requires_runbook_and_datasets_but_only_recommends_a_dockerfile(
     tmp_path: Path,
 ) -> None:
@@ -1239,6 +1323,7 @@ def _list_dev_tools(root: Path, tools: list[str]) -> None:
 PROTOTYPE_TOOLS = ["ruff", "pyright", "pytest", "hypothesis", "pre-commit", "import-linter"]
 
 
+# Covers F-0004.R13 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_promote_refuses_equal_and_lower_rigor(
     llm_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1253,6 +1338,7 @@ def test_promote_refuses_equal_and_lower_rigor(
     assert main(["promote", "mvp", "--dir", str(llm_project / "nowhere")]) == 2  # usage error
 
 
+# Covers F-0004.R13 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_promote_prototype_to_mvp_then_production(
     simple_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1301,6 +1387,7 @@ def test_promote_prototype_to_mvp_then_production(
     assert "AGENTS.md" in out  # listed under "Differ from the current template"
 
 
+# Covers F-0004.R13 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_promote_runs_uv_add_unless_no_install(
     simple_project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1347,6 +1434,7 @@ def _legacy_project(root: Path) -> Path:
     return root
 
 
+# Covers F-0004.R9, F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_adopt_detects_the_project_and_writes_only_the_harness(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1393,6 +1481,7 @@ def test_init_adopt_detects_the_project_and_writes_only_the_harness(
     assert "Harness complete" in capsys.readouterr().out
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_adopt_flags_win_over_detection(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1406,6 +1495,7 @@ def test_init_adopt_flags_win_over_detection(
     assert (project.package, project.kind, project.adopted) == ("other", "library", True)
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_adopt_ambiguous_package_asks_for_the_flag(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1422,6 +1512,7 @@ def test_init_adopt_ambiguous_package_asks_for_the_flag(
     assert main([*ADOPT, "--dir", str(root), "--package", "other"]) == 0
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_adopt_interactive_defaults_are_the_detected_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1456,6 +1547,7 @@ def test_init_adopt_interactive_defaults_are_the_detected_values(
     assert "package=legacy_app kind=cli layout=flat tests=test" in capsys.readouterr().out
 
 
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_adopt_needs_an_existing_directory(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1499,6 +1591,7 @@ def test_main_reconfigures_a_legacy_console_to_utf8(
 
 
 # --------------------------------------------------------------------------- ADR-0014
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_python_flag_feeds_every_place(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1513,6 +1606,7 @@ def test_init_python_flag_feeds_every_place(
     assert 'python: ["3.12", "3.13"]' in ci
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 @pytest.mark.parametrize("python", ["3.10", "3.99"])
 def test_init_refuses_an_unsupported_python(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], python: str
@@ -1589,6 +1683,7 @@ OLD_ON_PYPI: dict[str, Any] = {
 }
 
 
+# Covers F-0007.R6 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_verify_dep_reads_a_pep691_index(
     index: _Index, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1627,6 +1722,7 @@ def test_verify_dep_reads_a_pep691_index(
     assert all(accept.startswith(PEP691) for _, accept, _ in index.handler.requests)
 
 
+# Covers F-0007.R6 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_verify_dep_reads_a_pep503_html_index(
     index: _Index, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1645,6 +1741,7 @@ def test_verify_dep_reads_a_pep503_html_index(
     assert f"versions on 127.0.0.1:{index.port}: 2 (latest 2.0)" in out
 
 
+# Covers F-0007.R6 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_verify_dep_reports_a_404_as_absent_from_the_index(
     index: _Index, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1654,6 +1751,7 @@ def test_verify_dep_reports_a_404_as_absent_from_the_index(
     assert index.handler.requests[0][0] == "/simple/ghost/"
 
 
+# Covers F-0007.R7 and F-0007.R8 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_verify_dep_never_prints_the_index_credentials(
     index: _Index, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1677,6 +1775,7 @@ def test_verify_dep_never_prints_the_index_credentials(
     assert "s3cret-t0ken" not in captured.out + captured.err
 
 
+# Covers F-0007.R5 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_index_resolution_order() -> None:
     assert cli.resolve_index(None, {}) is None
     assert cli.resolve_index(None, {"PIP_INDEX_URL": "http://p/"}) == "http://p/"
@@ -1693,6 +1792,7 @@ def test_index_resolution_order() -> None:
     assert cli.resolve_index("https://user:pw@pypi.org/simple/", env) is None
 
 
+# Covers F-0007.R5 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_verify_dep_resolves_the_index_from_the_environment_and_the_flag_wins(
     index: _Index, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1712,6 +1812,7 @@ def test_verify_dep_resolves_the_index_from_the_environment_and_the_flag_wins(
     assert len(index.handler.requests) == 1
 
 
+# Covers F-0007.R6 and F-0007.R7 (specs/0007-dependencies-verified-before-they-are-added.md).
 def test_simple_api_helpers() -> None:
     assert cli.sanitize_index("https://u:p@host.example:8443/api/pypi/simple/?x=1") == (
         "https://host.example:8443/api/pypi/simple/"
@@ -1732,6 +1833,7 @@ def test_simple_api_helpers() -> None:
         cli.index_versions("file:///etc/passwd", "x")
 
 
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_init_types_mypy_and_refuses_an_unknown_checker(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

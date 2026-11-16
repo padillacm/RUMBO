@@ -27,6 +27,14 @@ FIX_MAX_DIFF_LINES = 150  # ADR-0009: the fix lane allows half the normal diff
 FIX_TYPES = re.compile(r"^(fix|test|refactor|chore|docs|ci|perf|style|build)(\([^)]*\))?:")
 BASES = ("origin/main", "origin/master", "origin/HEAD", "@{upstream}", "main", "master")
 CHECK_ENV = 3  # scripts/rumbo_check.py: the verification environment is broken (ADR-0006)
+# ADR-0018: a gate cannot be green on a verification that did not happen.
+ENV_REPAIR = "this is the environment, not the code: the human repairs it and runs the gate again"
+# ADR-0010: what each kind has in operation. `_g5` and the G5 checklist read the same tuples,
+# so the human is never asked to sign a document the automatic checks do not expect.
+RELEASED_KINDS = ("library", "cli")  # published, not operated
+RUNBOOK_KINDS = ("service", "data")
+SLO_KINDS = ("service",)
+# A PRD table row whose first cell is a feature id: `| F-0001 | ... |`.
 MIN_EVAL_CASES = {"prototype": 20, "mvp": 50, "production": 100}
 EARS = re.compile(r"\bshall\b|\bdeber[áa]n?\b", re.I)
 PLACEHOLDER = re.compile(r"…|\.\.\.|<[^>]+>")
@@ -49,6 +57,9 @@ class Item:
     min_rigor: str = "prototype"
     llm_only: bool = False
     max_rigor: str = "production"
+    # ADR-0010: the same conditions as the automatic checks, so both ask about the same things.
+    arch_only: bool = False  # only when the layout has layers (`Project.arch`, as in `_g3`)
+    kinds: tuple[str, ...] = ()  # only for these kinds (as in `_g5`); empty means every kind
 
 
 @dataclass(frozen=True)
@@ -65,6 +76,8 @@ class Gate:
             if project.at_least(item.min_rigor)
             and not (project.at_least(item.max_rigor) and item.max_rigor != "production")
             and (project.llm or not item.llm_only)
+            and (project.arch or not item.arch_only)
+            and (not item.kinds or project.kind in item.kinds)
         ]
 
 
@@ -80,7 +93,7 @@ def _doc(p: Project, rel: str, label: str, required: bool = True) -> Result:
 # ------------------------------------------------------------------ G1 Recognize
 def _g1(p: Project, _run: bool) -> list[Result]:
     results = [_doc(p, "docs/product/brief.md", "Brief")]
-    src = p.root / "src"
+    src = p.root / p.code_root  # ADR-0020: `src`, or the package itself when it is at the root
     offenders: list[str] = []
     if src.is_dir():
         pattern = re.compile(r"^\s*(from|import)\s+spikes\b", re.M)
@@ -90,7 +103,11 @@ def _g1(p: Project, _run: bool) -> list[Result]:
             if pattern.search(f.read_text(encoding="utf-8", errors="replace"))
         ]
     results.append(
-        Result("nothing in spikes/ is imported from src/", not offenders, ", ".join(offenders))
+        Result(
+            f"nothing in spikes/ is imported from {p.code_root}/",
+            not offenders,
+            ", ".join(offenders),
+        )
     )
     return results
 
@@ -238,11 +255,13 @@ def _g3(p: Project, _run: bool) -> list[Result]:
         )
     else:
         # ADR-0010: a flat package has no layers to contract; the spikes rule still applies.
+        # ADR-0020: in the project's own tests directory, not a hard-coded `tests/`.
+        arch_test = f"{p.tests_dir}/architecture/test_architecture.py"
         results.append(
             Result(
                 "architecture test present",
-                (p.root / "tests" / "architecture" / "test_architecture.py").is_file(),
-                "missing tests/architecture/test_architecture.py",
+                (p.root / arch_test).is_file(),
+                f"missing {arch_test}",
             )
         )
     ci = p.read(".github/workflows/ci.yml") or ""
@@ -260,7 +279,15 @@ def _g3(p: Project, _run: bool) -> list[Result]:
 def _run_cmd(cmd: list[str], root: Path) -> tuple[int | None, str]:
     """(exit code, last lines of output); the code is None when the program is not installed."""
     try:
-        proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            cmd,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
     except FileNotFoundError:
         return None, f"'{cmd[0]}' is not installed; could not run {' '.join(cmd)}"
     lines = (proc.stdout + proc.stderr).strip().splitlines()
@@ -275,7 +302,15 @@ def _check_command(root: Path) -> list[str]:
 
 
 def _git(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
 
 def merge_base(root: Path) -> tuple[str | None, str]:
@@ -396,6 +431,11 @@ def _fix_lane(p: Project, base: str, info: str) -> list[Result]:
     return results
 
 
+def _not_measured(why: str, output: str) -> str:
+    """Detail of a G4 check whose verification did not happen (ADR-0018)."""
+    return f"environment broken ({why}); {ENV_REPAIR}\n{output}"
+
+
 def _g4(p: Project, run: bool) -> list[Result]:
     results: list[Result] = []
     base, info = merge_base(p.root)
@@ -415,7 +455,7 @@ def _g4(p: Project, run: bool) -> list[Result]:
         )
         if current == "fix":
             results += _fix_lane(p, base, info)
-    reqs = trace(p.root)
+    reqs = trace(p.root, p.tests_dir)
     if reqs:
         missing = uncovered(reqs)
         results.append(
@@ -430,15 +470,20 @@ def _g4(p: Project, run: bool) -> list[Result]:
         results.append(Result("sensor and rumbo check", None, "skipped (--no-run)"))
         return results
     sensor = p.root / "scripts" / "check_tests_not_weakened.py"
+    # ADR-0018: the run was requested, so a check that could not be measured fails the gate.
+    # The failure is the environment's: the detail hands the repair to the human, not the agent.
     code, out = _run_cmd([sys.executable, str(sensor), "--strict"], p.root)
-    results.append(Result("no test weakened", None if code is None else code == 0, out))
-    code, out = _run_cmd(_check_command(p.root), p.root)
-    if code == CHECK_ENV:
-        # A broken environment is not a red check: it is reported, never handed to the agent.
-        results.append(Result("rumbo check green", None, f"environment broken (exit 3):\n{out}"))
+    if code is None:
+        results.append(Result("no test weakened", False, _not_measured("could not run", out)))
     else:
-        ok = None if code is None else code == 0  # None = unmeasured
-        results.append(Result("rumbo check green", ok, "" if ok else out))
+        results.append(Result("no test weakened", code == 0, out))
+    code, out = _run_cmd(_check_command(p.root), p.root)
+    if code is None:
+        results.append(Result("rumbo check green", False, _not_measured("could not run", out)))
+    elif code == CHECK_ENV:
+        results.append(Result("rumbo check green", False, _not_measured("exit 3", out)))
+    else:
+        results.append(Result("rumbo check green", code == 0, "" if code == 0 else out))
     if p.at_least("production"):
         nightly = (p.root / ".github" / "workflows" / "nightly.yml").exists()
         results.append(Result("nightly workflow present (mutation, evals k=3)", nightly))
@@ -527,20 +572,19 @@ def _g5_release(p: Project, ops: bool) -> list[Result]:
 def _g5(p: Project, _run: bool) -> list[Result]:
     ops = p.at_least("mvp")
     results: list[Result]
-    if p.kind in ("library", "cli"):
+    if p.kind in RELEASED_KINDS:
         results = _g5_release(p, ops)
-    elif p.kind == "data":
-        results = [
-            _doc(p, "docs/ops/runbook.md", "Runbook", required=ops),
-            # Recommended, never required: a pipeline may run where no image is built.
-            Result("Dockerfile in infra/", (p.root / "infra" / "Dockerfile").exists() or None),
-        ]
     else:
-        results = [
-            _doc(p, "docs/ops/runbook.md", "Runbook", required=ops),
-            _doc(p, "docs/ops/slos.md", "SLOs", required=ops),
-            Result("Dockerfile in infra/", (p.root / "infra" / "Dockerfile").exists()),
-        ]
+        results = []
+        if p.kind in RUNBOOK_KINDS:
+            results.append(_doc(p, "docs/ops/runbook.md", "Runbook", required=ops))
+        if p.kind in SLO_KINDS:
+            results.append(_doc(p, "docs/ops/slos.md", "SLOs", required=ops))
+        dockerfile = (p.root / "infra" / "Dockerfile").exists()
+        # Recommended, never required, for a pipeline: it may run where no image is built.
+        results.append(
+            Result("Dockerfile in infra/", (dockerfile or None) if p.kind == "data" else dockerfile)
+        )
     results.append(_dependency_updates(p, ops))
     if p.kind == "data":
         n = eval_cases(p.root)
@@ -552,9 +596,9 @@ def _g5(p: Project, _run: bool) -> list[Result]:
             )
         )
     if p.llm:
-        app = p.root / "src" / p.package / "app"
+        app = p.root / p.package_path / "app"
         instrumented = (app / "budget.py").exists() and (app / "telemetry.py").exists()
-        entry = p.read(f"src/{p.package}/app/entrypoint.py") or ""
+        entry = p.read(f"{p.package_path}/app/entrypoint.py") or ""
         wired = "Meter(" in entry and "span(" in entry
         results.append(
             Result(
@@ -611,7 +655,7 @@ GATES: dict[str, Gate] = {
         "M — Model",
         (
             Item("ADR 'workflow vs. agent' decided by the human", "mvp", llm_only=True),
-            Item("Import-linter contracts enforced in CI"),
+            Item("Import-linter contracts enforced in CI", arch_only=True),
             Item("C4 levels 1–2", "mvp"),
             Item(
                 "Threat model with lethal trifecta and OWASP LLM/Agentic reviewed by the human",
@@ -648,13 +692,17 @@ GATES: dict[str, Gate] = {
         (
             Item("Prototype: runs locally, logs are enough", max_rigor="mvp"),
             Item("Rollback rehearsed", "mvp"),
-            Item("SLOs and alerts active", "mvp"),
+            Item("SLOs and alerts active", "mvp", kinds=SLO_KINDS),
             Item("GenAI traces with cost", "mvp", llm_only=True),
             Item("Cost limits configured", "mvp", llm_only=True),
-            Item("Runbook with one entry per failure mode", "mvp"),
+            Item("Runbook with one entry per failure mode", "mvp", kinds=RUNBOOK_KINDS),
             Item("Weekly trace-review ritual scheduled", "mvp", llm_only=True),
             Item("Automatic dependency updates", "mvp"),
-            Item("Canary or feature flags per cohort; SLOs with error budget", "production"),
+            Item(
+                "Canary or feature flags per cohort; SLOs with error budget",
+                "production",
+                kinds=SLO_KINDS,
+            ),
         ),
         (_g5,),
     ),

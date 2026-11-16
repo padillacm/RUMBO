@@ -4,6 +4,7 @@ A spec `specs/NNNN-title.md` is `F-NNNN`; each line `- Rk (...)` under "Requirem
 requirement with the full id `F-NNNN.Rk`. A test (or an eval case) covers a requirement by
 mentioning that full id anywhere in its text: a docstring, a comment, a case id. `rumbo trace`
 builds the table; gate G4 reads it (recommendation below production, required in production).
+The tests are read from the project's own tests directory, `[tool.rumbo].tests` (ADR-0020).
 """
 
 from __future__ import annotations
@@ -12,12 +13,13 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rumbo.project import numbered_documents, section
+from rumbo.project import Project, numbered_documents, section
 
 # `- R1 (event): text`; nested items such as `R1.1` are not requirements.
 # `- R1 (event): text` or `- R1: text`; the parenthetical may itself contain colons.
 REQ_LINE = re.compile(r"^\s*-\s*(R\d+)(?![\w.])\s*(?:\([^)]*\))?\s*:\s*(.*)$")
-SOURCE_GLOBS = ("tests/**/*.py", "evals/datasets/*.jsonl")
+DEFAULT_TESTS_DIR = "tests"
+EVAL_GLOB = "evals/datasets/*.jsonl"
 
 
 @dataclass
@@ -49,12 +51,22 @@ def requirements(spec: Path) -> list[Requirement]:
     return found
 
 
-def trace(root: Path) -> list[Requirement]:
+def tests_dir(root: Path) -> str:
+    """`[tool.rumbo].tests` of the project in `root`; `tests` when its state cannot be read."""
+    try:
+        return Project.load(root).tests_dir
+    except (OSError, ValueError):  # no pyproject.toml, not TOML, no or invalid [tool.rumbo]
+        return DEFAULT_TESTS_DIR
+
+
+def trace(root: Path, tests: str | None = None) -> list[Requirement]:
+    """Every requirement with the places that mention it; `tests` defaults to the project's."""
     reqs = [r for spec in numbered_documents(root / "specs") for r in requirements(spec)]
     if not reqs:
         return []
+    tests = tests or tests_dir(root)
     sources: list[tuple[str, list[str]]] = []
-    for pattern in SOURCE_GLOBS:
+    for pattern in (f"{tests}/**/*.py", EVAL_GLOB):
         for file in sorted(root.glob(pattern)):
             rel = file.relative_to(root).as_posix()
             sources.append((rel, file.read_text(encoding="utf-8", errors="replace").splitlines()))

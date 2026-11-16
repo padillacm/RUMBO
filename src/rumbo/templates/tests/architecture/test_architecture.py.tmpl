@@ -4,14 +4,14 @@
 - {{inner_layer}}/ stays pure: no I/O or infrastructure imports (standard library included) and
   no call to the builtin open(). Pure in-memory types (PurePath, StringIO...) are allowed by name.
 {{/arch}}
-- Nothing in src/ imports spikes/.
+- Nothing in {{code_root}}/ imports spikes/.
 """
 
 import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "src" / "{{package}}"
+SRC = ROOT / {{package_path_py}}
 {{#arch}}
 INNER = SRC / "{{inner_layer}}"
 # Same modules as the "The {{inner_layer}} layer is pure" import-linter contract…
