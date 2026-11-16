@@ -33,8 +33,10 @@ echo "x: ; echo" >> Makefile; rc=0; echo '{"tool_name":"Bash","tool_input":{"com
 echo '{"tool_name":"Bash","tool_input":{"command":"uv run python scripts/rumbo_check.py --brief"}}' | uv run python scripts/rumbo_guard.py pre-tool
 echo '{}' | RUMBO_GUARD_SKIP_CHECK=1 uv run python scripts/rumbo_guard.py stop
 # ADR-0008: the same guard runs as git hooks (installed by `rumbo init` through pre-commit), so any
-# agent is refused at commit time; the human (rumbo init set rumbo.human in this clone) passes.
-test "$(git config --get rumbo.human)" = "true"
+# agent is refused at commit time; the human passes. ADR-0021: init declares rumbo.human only
+# for a human at a terminal, so a scripted run leaves it unset and the human declares it here.
+if [ ! -t 0 ]; then test -z "$(git config --get rumbo.human || true)"; fi
+git config rumbo.human true
 echo "x: ; echo" >> Makefile; git add Makefile
 rc=0; CLAUDECODE=1 git commit -qm "chore: touch the Makefile" || rc=$?; test "$rc" -ne 0
 git restore --staged Makefile; git checkout -- Makefile
