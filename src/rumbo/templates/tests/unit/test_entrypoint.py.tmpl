@@ -9,15 +9,39 @@ from typing import Any
 import pytest
 
 from {{package}}.app.entrypoint import answer
+from {{package}}.app.ports import OfflineError, live, require_live
+
+
+@pytest.fixture
+def offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neither live variable is set: the state of the check and of CI."""
+    monkeypatch.delenv("RUMBO_LIVE", raising=False)
+    monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
 
 
 def test_example_case() -> None:
     assert asyncio.run(answer({"question": "ping"})) == {"answer": "pong"}
 
 
-def test_abstains_when_offline(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
+def test_abstains_when_offline(offline: None) -> None:
     assert asyncio.run(answer({"question": "something else"}))["abstain"] is True
+
+
+def test_the_model_is_unreachable_without_a_live_variable(offline: None) -> None:
+    assert not live()
+    with pytest.raises(OfflineError, match=r"RUMBO_LIVE=1.*RUMBO_EVALS_LIVE=1"):
+        require_live()
+
+
+@pytest.mark.parametrize("variable", ["RUMBO_LIVE", "RUMBO_EVALS_LIVE"])
+def test_either_live_variable_opens_the_guard_only_when_it_is_1(
+    offline: None, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.setenv(variable, "true")
+    assert not live()
+    monkeypatch.setenv(variable, "1")
+    assert live()
+    require_live()
 
 
 def test_abstains_when_the_budget_is_exceeded(monkeypatch: pytest.MonkeyPatch) -> None:

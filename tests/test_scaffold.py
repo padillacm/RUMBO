@@ -191,10 +191,11 @@ def test_checks_table_lists_the_steps_in_order(cfg: Config) -> None:
         "security": " security security-scripts audit",
         "sensor": " sensor",
     }.items():
-        line = next(ln for ln in makefile.splitlines() if ln.startswith(f"{target}:"))
-        assert line.split(";", 1)[1].strip() == RUNNER + steps
+        lines = [ln for ln in makefile.splitlines() if ln.startswith(f"{target}:")]
         if target == "security" and cfg.rigor == "prototype":
-            continue  # ADR-0011: a prototype has no security steps; the alias waits for promote
+            assert lines == []  # no alias for steps the table does not have yet
+            continue
+        assert lines[0].split(";", 1)[1].strip() == RUNNER + steps
         assert all(step in checks for step in steps.split() if step != "--brief")
 
 
@@ -218,7 +219,8 @@ def test_generated_ci_runs_the_runner_on_linux_and_windows_without_make(cfg: Con
     nightly = plan.get(".github/workflows/nightly.yml")
     if nightly is not None:
         make_lines = [ln for ln in str(nightly).splitlines() if re.search(r"\bmake\b", ln)]
-        assert make_lines == ["        run: make mutation"]  # mutmut needs os.fork: POSIX only
+        mutation = ["        run: make mutation"]  # mutmut needs os.fork: POSIX only
+        assert make_lines == (mutation if cfg.rigor == "production" else [])
         if cfg.llm:
             assert "run: uv run python evals/run_evals.py --suite all --live" in str(nightly)
 
@@ -923,7 +925,8 @@ def test_each_layout_has_its_contracts_or_none(
     assert "arch:" in makefile and f"find src/x/{inner}" in makefile
     assert f'INNER = SRC / "{inner}"' in arch_test
     assert "lint-imports" in pre_commit
-    assert f"mutmut on src/x/{inner}" in nightly
+    production = plan_files(dataclasses.replace(cfg, rigor="production"))
+    assert f"mutmut on src/x/{inner}" in str(production[".github/workflows/nightly.yml"])
     assert src_files == sorted(
         [
             "src/x/__init__.py",
@@ -1553,7 +1556,9 @@ def test_adopting_a_root_package_points_every_tool_at_it(
     cfg = Config.from_project(project)
     assert (cfg.src, cfg.code_root, cfg.package_path) == (".", "legacy_app", "legacy_app")
     # The checks table, the type checker, coverage: the package, never `src`.
-    assert tool["rumbo"]["checks"]["security"] == "uv run bandit -q -r legacy_app"
+    assert tool["rumbo"]["checks"]["security"] == (
+        "uv run bandit -c pyproject.toml -q -r legacy_app"
+    )
     assert tool["pyright"]["include"] == ["legacy_app", "test"]
     assert tool["coverage"]["run"]["source"] == ["legacy_app"]
     assert tool["ruff"]["force-exclude"] is True and tool["ruff"]["extend-exclude"] == ["spikes"]
@@ -1586,7 +1591,7 @@ def test_adopting_a_root_package_points_every_tool_at_it(
     report = update(Project.load(proto), proto)
     assert "pyproject.toml (+checks: security, security-scripts, audit)" in report.merged
     checks = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]["checks"]
-    assert checks["security"] == "uv run bandit -q -r legacy_app"
+    assert checks["security"] == "uv run bandit -c pyproject.toml -q -r legacy_app"
 
     # A project adopted before the key existed: `update` looks once and writes what it finds.
     pyproject.write_text(
@@ -1640,7 +1645,7 @@ def test_a_src_project_renders_as_before(simple_project: Path, tmp_path: Path) -
         plan = plan_files(cfg)
         pyproject = str(plan["pyproject.toml"])
         for literal in (
-            'security = "uv run bandit -q -r src"\n',
+            'security = "uv run bandit -c pyproject.toml -q -r src"\n',
             'include = ["src", "tests"]\n',
             'strict = ["src/demo/domain"]\n',
             'source = ["src/demo"]\n',
@@ -1657,7 +1662,8 @@ def test_a_src_project_renders_as_before(simple_project: Path, tmp_path: Path) -
     mypy = Config(name="Demo", package="demo", llm=False, rigor="mvp", types="mypy")
     assert 'files = ["src", "tests"]\n' in str(plan_files(mypy)["pyproject.toml"])
     llm = Config(name="Demo", package="demo", llm=True, provider="anthropic", rigor="mvp")
-    assert 'security = "uv run bandit -q -r src evals"\n' in str(plan_files(llm)["pyproject.toml"])
+    security = 'security = "uv run bandit -c pyproject.toml -q -r src evals"\n'
+    assert security in str(plan_files(llm)["pyproject.toml"])
     runner = str(plan_files(llm)["evals/run_evals.py"])
     assert 'prompts = root / "src" / "demo" / "prompts"\n' in runner
     # The one new line of `[tool.ruff]`: a project's exclusions hold for a file named by path.

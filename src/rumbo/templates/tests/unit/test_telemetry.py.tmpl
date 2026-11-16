@@ -7,6 +7,7 @@ tasks each get their own, an explicit id wins and is restored when its span clos
 import asyncio
 import json
 import logging
+import sys
 
 import pytest
 
@@ -40,6 +41,21 @@ def test_span_logs_attributes_cost_and_status(caplog: pytest.LogCaptureFixture) 
     line = json.loads(JsonFormatter().format(record))
     assert line["message"] == "answer" and line["gen_ai.operation.name"] == "answer"
     assert line["ts"].endswith("+00:00")
+
+
+def test_json_formatter_keeps_the_traceback_of_an_exception() -> None:
+    try:
+        raise ZeroDivisionError("the query divided by zero")
+    except ZeroDivisionError:
+        record = logging.LogRecord("db", logging.ERROR, __file__, 1, "query failed", None, None)
+        record.exc_info = sys.exc_info()
+    text = JsonFormatter().format(record)
+    line = json.loads(text)
+    assert "\n" not in text and line["message"] == "query failed"
+    assert line["exception"].startswith("Traceback (most recent call last):")
+    assert line["exception"].endswith("ZeroDivisionError: the query divided by zero")
+    plain = logging.LogRecord("db", logging.INFO, __file__, 1, "fine", None, None)
+    assert "exception" not in json.loads(JsonFormatter().format(plain))
 
 
 def test_configure_json_logging_is_idempotent() -> None:

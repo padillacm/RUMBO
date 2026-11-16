@@ -20,14 +20,17 @@ test:        ; uv run python scripts/rumbo_check.py test
 {{#arch}}
 arch:        ; uv run python scripts/rumbo_check.py arch
 {{/arch}}
+{{#mvp_or_more}}
 security:    ; uv run python scripts/rumbo_check.py security security-scripts audit
+{{/mvp_or_more}}
 sensor:      ; uv run python scripts/rumbo_check.py sensor
 {{#evals}}
 # Smoke evals run OFFLINE (recorded fixtures){{#llm}}; the model is only called with `make evals-live`{{/llm}}.
 evals:       ; uv run python scripts/rumbo_check.py evals
 {{/evals}}
 {{#llm}}
-evals-live:  ; uv run python evals/run_evals.py --suite all --live --k {{#production}}3{{/production}}{{^production}}1{{/production}}
+# Loads .env when it exists (the provider key, the RUMBO_BUDGET_* limits: see .env.example).
+evals-live:  ; uv run $(if $(wildcard .env),--env-file .env) python evals/run_evals.py --suite all --live --k {{#production}}3{{/production}}{{^production}}1{{/production}}
 {{/llm}}
 {{#arch}}
 # POSIX only: mutmut needs os.fork, so this stays out of the runner (nightly runs it on Linux).

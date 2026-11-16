@@ -5,22 +5,54 @@ CLAUDE_CODE_OAUTH_TOKEN. Every call is bounded (timeout, max_tokens) and goes th
 offline guard so the check never reaches the network. The CLI runs as an asyncio subprocess
 (ADR-0012) with a fixed binary, list arguments and no shell, so awaiting it never blocks the
 event loop and several calls can be in flight under `asyncio.gather`.
+
+The prompt travels on standard input, never on the command line. Print mode reads stdin
+(https://code.claude.com/docs/en/headless, "Pipe data through Claude") and the arguments are
+the constants of `ARGS`. On Windows `claude` can be an npm `.cmd` shim, whose arguments
+`cmd.exe` parses a second time: nothing a caller or a user wrote may ever be added to `ARGS`.
+
+The run is isolated from this project. Its working directory is an empty temporary directory,
+so the CLI finds no CLAUDE.md, hooks, permissions or `.mcp.json` of the repository, and the
+flags (https://code.claude.com/docs/en/cli-reference) leave it no built-in tool (`--tools ""`),
+no MCP server (`--strict-mcp-config`), no skill or slash command (`--disable-slash-commands`),
+no project settings (`--setting-sources user`) and no saved session. `--bare` would say all of
+it in one flag, but it ignores the subscription login, which is the point of this provider.
+
+The subprocess never outlives the call: on a timeout, on cancellation and on any other error
+it is killed and waited for. Under an npm `.cmd` shim the kill reaches the shim; the node
+process it started ends with its single turn.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
+import tempfile
 
 from {{package}}.app.ports import require_live
 
 DEFAULT_TIMEOUT_S = 120.0
 
+# Fixed flags only (see the module docstring). `--tools` takes a list: keep a flag after its "".
+ARGS: tuple[str, ...] = (
+    "-p",
+    "--output-format",
+    "json",
+    "--max-turns",
+    "1",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--setting-sources",
+    "user",
+    "--no-session-persistence",
+)
 
-async def complete(
-    prompt: str, *, max_tokens: int = 1024, timeout_s: float = DEFAULT_TIMEOUT_S
-) -> str:
+
+async def complete(prompt: str, *, max_tokens: int = 1024, timeout_s: float | None = None) -> str:
     """One prompt in, one text out; `timeout_s` is typically `meter.remaining_seconds`."""
     require_live("Claude Code")
     binary = shutil.which("claude")
@@ -28,27 +60,32 @@ async def complete(
         raise RuntimeError(
             "the `claude` CLI is not installed (npm install -g @anthropic-ai/claude-code)"
         )
-    proc = await asyncio.create_subprocess_exec(
-        binary,
-        "-p",
-        prompt,
-        "--output-format",
-        "json",
-        "--max-turns",
-        "1",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout_s)
-    except TimeoutError:
-        proc.kill()  # the CLI does not outlive its budget
-        await proc.wait()
-        raise
+    limit = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
+    with tempfile.TemporaryDirectory(prefix="claude-p-", ignore_cleanup_errors=True) as empty:
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            *ARGS,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=empty,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), limit)
+        finally:
+            await _reap(proc)  # timeout, cancellation, any error: the CLI does not outlive the call
     if proc.returncode != 0:
-        detail = stderr.decode(errors="replace").strip()[:500]
-        raise RuntimeError(f"claude -p failed ({proc.returncode}): {detail}")
+        detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+        raise RuntimeError(f"claude -p failed ({proc.returncode}): {detail[:500]}")
     return parse_result(stdout.decode(errors="replace"), max_chars=max_tokens * 4)
+
+
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Kills the CLI when it is still running, and waits for it either way."""
+    if proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    await proc.wait()
 
 
 def parse_result(stdout: str, *, max_chars: int) -> str:
