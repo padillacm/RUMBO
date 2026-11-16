@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # F-0007: Dependencies verified before they are added (`rumbo verify-dep`)
 Story: As a developer working with a coding agent I want every package name checked before it is
 added (does it exist, how old is it, does it imitate a popular name, does it have known

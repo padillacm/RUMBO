@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # F-0004: Mount, adopt, update and promote the harness
 Story: As a developer who starts or inherits a Python project that a coding agent will work on
 I want one command that mounts the RUMBO harness, and later refreshes it or raises its rigor, so

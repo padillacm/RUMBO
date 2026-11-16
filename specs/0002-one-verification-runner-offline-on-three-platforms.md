@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # F-0002: One verification runner, offline, on three platforms (`rumbo check`)
 Story: As a developer working with a coding agent I want one command that runs the project's
 verification steps the same way on Windows, macOS and Linux, without a shell, `make` or network,

@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # F-0003: Tests cannot be weakened unnoticed
 Story: As a developer who reviews the work of a coding agent I want every change that leaves the
 tests weaker than the base to fail the check until I approve it myself, so that the agent cannot

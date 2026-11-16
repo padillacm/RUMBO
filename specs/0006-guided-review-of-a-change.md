@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # F-0006: Guided review of a change (`rumbo tour`)
 Story: As the human who reviews a branch written by a coding agent I want a guide of that
 branch, one commit at a time, with the risky files first, the tests before the code, the

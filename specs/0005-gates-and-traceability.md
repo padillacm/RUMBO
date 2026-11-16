@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # F-0005: Gates and traceability
 Story: As the human who signs each phase of a project built with a coding agent I want every
 gate to tell me what was verified, what failed and what could not be measured, and to show me
