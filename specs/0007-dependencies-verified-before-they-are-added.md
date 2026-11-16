@@ -78,7 +78,8 @@ download counts, ecosystems other than PyPI. Keeping `POPULAR_PACKAGES` current.
 
 Not verified by any test, so not stated as a requirement: what happens on an HTTP redirect
 (`urllib` follows it with its default handler), TLS certificate checking (`urllib` defaults),
-and the transport of a plain-`http` index, which the threat model accepts as a risk.
+and the transport of a plain-`http` index without credentials, which the threat model accepts
+as a risk (only the package name travels in clear).
 
 ## Questions raised while writing the spec (for the human; behaviour today, not requirements)
 - A PyPI answer that is JSON of the wrong shape ends in a traceback, not in verdict 2: a list
@@ -94,7 +95,5 @@ and the transport of a plain-`http` index, which the threat model accepts as a r
   skipped. Intended?
 - With an index in use, the name of every package, private ones included, is still sent to
   `pypi.org` and, when PyPI knows it, to `api.osv.dev`; there is no switch to stay on the index.
-- With a plain-`http` index that carries credentials, the Basic header travels in clear; the
-  accepted risk in `docs/security/threat-model.md` names only the package name.
 - `pip` and `six` are within two edits of each other: `verify-dep pip` warns that it looks like
   `six`, and the reverse, so two popular packages get verdict 1.
