@@ -44,19 +44,19 @@ repository; a hosted service or a GitHub App; a baseline file of accepted lint f
 
 ## Requirements
 <!-- IDs linking to specs/: F-0001, F-0002… -->
-Specs are written feature by feature. The code predates them (the project adopted its own method
-at v0.3), so each spec is written when its feature is next touched, starting with the one the
-brief names as the core pain.
+Every feature has its spec. The code predated them (the project adopted its own method at
+v0.3); F-0002 to F-0007 were written from the code on 2026-11-16, and each one records where
+the code and the decisions disagree.
 
 | ID | Feature | Spec |
 |---|---|---|
 | F-0001 | The agent cannot cheat its way to green (the guard: Claude Code and git hooks) | `specs/0001-…` |
-| F-0002 | One verification runner, offline, on three platforms (`rumbo check`) | on next touch |
-| F-0003 | Tests cannot be weakened unnoticed (the anti-cheat sensor) | on next touch |
-| F-0004 | Mount, adopt, update and promote the harness (`init`, `--adopt`, `update`, `promote`) | on next touch |
-| F-0005 | Gates and traceability (`gate`, `trace`, `doctor`, `metrics`) | on next touch |
-| F-0006 | Guided review of a change (`tour`) | on next touch |
-| F-0007 | Dependencies verified before they are added (`verify-dep`) | on next touch |
+| F-0002 | One verification runner, offline, on three platforms (`rumbo check`) | `specs/0002-…` |
+| F-0003 | Tests cannot be weakened unnoticed (the anti-cheat sensor) | `specs/0003-…` |
+| F-0004 | Mount, adopt, update and promote the harness (`init`, `--adopt`, `update`, `promote`) | `specs/0004-…` |
+| F-0005 | Gates and traceability (`gate`, `trace`, `doctor`, `metrics`) | `specs/0005-…` |
+| F-0006 | Guided review of a change (`tour`) | `specs/0006-…` |
+| F-0007 | Dependencies verified before they are added (`verify-dep`) | `specs/0007-…` |
 
 ## Non-functional requirements (with numbers)
 | NFR | Target | How it is measured |
@@ -85,11 +85,10 @@ brief names as the core pain.
   Windows job in the framework's CI since v0.4.
 
 ## Launch (flags)
-No feature flags: the CLI is installed by tag (`uv tool install git+…@vX.Y.Z`). v0.4.0 is cut
-after PRs #6 and #7 merge and the pilots start; PyPI publication (Trusted Publishing, already
-wired in `release.yml`) waits for G1 to be signed with ≥ 5 users.
+No feature flags: the CLI is installed from PyPI (`uv tool install rumbo==X.Y.Z`). v0.4.0 was
+cut on 2026-11-09 and published the same day by Trusted Publishing, before the five
+interviews (one recorded); the pilots install it from there.
 
 ## Open questions
-- Are specs written retroactively for F-0002…F-0007 now, or on next touch as proposed above?
 - Does the guard need live hooks for Cursor once its hook protocol is stable (ADR-0008)?
 - Who are the three pilots, and which one is brownfield?
