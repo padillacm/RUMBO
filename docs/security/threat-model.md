@@ -78,16 +78,24 @@ RUMBO is not an LLM application, so the LLM Top 10 applies to the projects it ge
 | Secrets committed | gitleaks as a pre-commit hook and as a full-history CI job | CI job `secrets` |
 
 ## Accepted risks (signed by the human)
-- **An agent outside Claude Code can unset its marker or run with no marker we know.** The git
-  hooks then rely on `rumbo.human` being unset (fail-closed); a determined agent that sets it is
-  breaking a rule, and CI plus CODEOWNERS are the binding layer (ADR-0008).
+- **An agent outside Claude Code can unset its marker or run with no marker we know.** Aider and
+  Amp set none we could confirm; in a clone the human declared they are the human to the git
+  hook, and only their commit attribution identifies them, in CI (ADR-0021). The git hooks rely
+  on `rumbo.human` being unset (fail-closed), and `rumbo init` no longer sets it for an agent; a
+  determined agent that sets it is breaking a rule, and CI plus CODEOWNERS are the binding layer.
+- **Gemini CLI turns git hooks off in its own shell** (an empty hooks path through
+  `GIT_CONFIG_*`; measured). The git hook never runs for it: CI and CODEOWNERS are its only
+  binding layers. Candidate for a spec: a live hook through Gemini CLI's own hook system.
 - **The review guide (`rumbo tour`) quotes commit messages and file names verbatim.** A hostile
   commit message could try to instruct the agent that reads the guide. Today the only
   mitigation is that the guide is for the human; no sensor. Candidate for a spec.
-- **`rumbo` is installed from a git tag, not yet from PyPI with attestations.** A compromised
+- **`rumbo` is published to PyPI by Trusted Publishing** (OIDC from `release.yml`, environment
+  `pypi`, no token stored), since v0.4.0. A compromised GitHub account could still push a tag
+  and publish; the `pypi` environment has no required reviewer while there is one maintainer.
   GitHub account could move a tag. Mitigation planned: Trusted Publishing once G1 is signed.
 - **The runner executes whatever `tool.rumbo.checks` says.** The table is a protected file, so
   only a human's commit changes it; a malicious contributor's PR that edits it is caught by
-  review and CODEOWNERS, not mechanically.
+  review and CODEOWNERS, not mechanically. Since ADR-0019 the guard enforces it for agents: `pyproject.toml` is compared table by table
+  and only its dependency tables may change without the human.
 - **A private index may be plain `http`.** `verify-dep` accepts it for the index lookup (PyPI
   and OSV are HTTPS only); the package name travels in clear on that network.

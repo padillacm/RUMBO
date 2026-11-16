@@ -9,6 +9,13 @@ All notable changes to this project are documented here. The format follows
 Fixes from an external audit of v0.4.0 (eight findings), in four decisions (ADR-0018 to
 ADR-0021).
 
+### Security
+- `rumbo verify-dep` no longer sends the credentials of a private index over plain `http`:
+  Basic authentication is not encryption, so a URL with a user name on an `http` index that
+  is not on this machine (loopback) is refused before any request, the index lookup is
+  reported as "verify by hand" and the PyPI measurements still run. `https`, loopback and an
+  `http` index without credentials are unchanged.
+
 ### Fixed
 - ADR-0018: a step whose tool started and rejected the code is **red**, not a broken
   environment. pytest exits `2` on an import or syntax error while collecting and `5` when it

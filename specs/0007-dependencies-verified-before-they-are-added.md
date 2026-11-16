@@ -20,7 +20,7 @@ not handle.
 - R4 (event): When PyPI knows the requested name, `verify-dep` shall ask OSV (`POST https://api.osv.dev/v1/query`, ecosystem `PyPI`) about the canonical name and warn with the number of vulnerabilities returned; if OSV cannot be reached or does not answer JSON, it shall print `(OSV not reachable: vulnerability check skipped)` and leave the verdict unchanged.
 - R5 (optional): Where `--index URL` is given, or else where one of `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `PIP_INDEX_URL` is set and not empty (the first in that order), `verify-dep` shall use that URL as the private index, unless its host is `pypi.org`, in which case it shall behave as if none were set.
 - R6 (state): While a private index is in use, `verify-dep` shall first request `<index>/<normalised-name>/` asking for PEP 691 JSON and accepting PEP 503 HTML, read the versions from `versions`, else from the file names in `files`, else from the file names in the HTML anchors, and print `index: <url>`, then `exists on <host>: yes` with `versions on <host>: N (latest X)` or, on a 404, `exists on <host>: no` (verdict 1); it shall then run the PyPI checks of R2 to R4 with `(measured against PyPI, not against your index)` at the end of every line that reports one of them, and report a name PyPI does not know as `not on PyPI`, which is not a failure.
-- R7 (ubiquitous): `verify-dep` shall never write the user name or the password of an index URL to stdout or stderr: the index is printed as `scheme://host[:port]/path`, an error message is printed with the raw URL replaced by that form, and the credentials are sent only to the index, as a Basic `Authorization` header.
+- R7 (ubiquitous): `verify-dep` shall never write the user name or the password of an index URL to stdout or stderr: the index is printed as `scheme://host[:port]/path`, an error message is printed with the raw URL replaced by that form, and the credentials are sent only to the index, as a Basic `Authorization` header, and never over plain `http` unless the index is on this machine (loopback).
 - R8 (unwanted): If a source cannot be read (a connection error, a timeout, an HTTP status other than 404, a PyPI body that is not JSON, an index URL that is neither `http` nor `https`), then `verify-dep` shall print `could not query <source> (<reason>). Verify by hand.`, give the package the verdict 2 and go on, without a traceback, with the PyPI checks of that package when it is the index that failed and with the next package in every case; every request shall carry a 15-second timeout, and a PyPI document with missing fields shall be printed with `?` and `(not declared)` in their place.
 - R9 (ubiquitous): The only project data `verify-dep` shall put in a request is the package name: `GET https://pypi.org/pypi/<name>/json` with the name percent-encoded into one path segment, `POST https://api.osv.dev/v1/query` with `{"package": {"name": <canonical name>, "ecosystem": "PyPI"}}` and, where an index is in use, `GET <index>/<normalised-name>/` with the credentials of R7; the PyPI and OSV requests shall be refused unless their URL is `https`, and no other code of the CLI shall call `urlopen`.
 - R10 (ubiquitous): `verify-dep` shall examine every package named on the command line and exit with the worst verdict among them (0 when nothing was flagged, 1 when a package does not exist or carries a warning, 2 when a source could not be queried), and whatever the verdict its last line shall be `Reminder: the human approves every new dependency; justify it in the PR.`
@@ -78,7 +78,8 @@ download counts, ecosystems other than PyPI. Keeping `POPULAR_PACKAGES` current.
 
 Not verified by any test, so not stated as a requirement: what happens on an HTTP redirect
 (`urllib` follows it with its default handler), TLS certificate checking (`urllib` defaults),
-and the transport of a plain-`http` index, which the threat model accepts as a risk.
+and the transport of a plain-`http` index without credentials, which the threat model accepts
+as a risk (only the package name travels in clear).
 
 ## Questions raised while writing the spec (for the human; behaviour today, not requirements)
 - A PyPI answer that is JSON of the wrong shape ends in a traceback, not in verdict 2: a list
@@ -94,7 +95,5 @@ and the transport of a plain-`http` index, which the threat model accepts as a r
   skipped. Intended?
 - With an index in use, the name of every package, private ones included, is still sent to
   `pypi.org` and, when PyPI knows it, to `api.osv.dev`; there is no switch to stay on the index.
-- With a plain-`http` index that carries credentials, the Basic header travels in clear; the
-  accepted risk in `docs/security/threat-model.md` names only the package name.
 - `pip` and `six` are within two edits of each other: `verify-dep pip` warns that it looks like
   `six`, and the reverse, so two popular packages get verdict 1.

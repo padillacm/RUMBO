@@ -24,6 +24,7 @@ import base64
 import contextlib
 import datetime as dt
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -718,15 +719,31 @@ def parse_simple(body: str, content_type: str) -> list[str]:
     return _versions_from_files(parser.names)
 
 
+def _is_loopback(host: str | None) -> bool:
+    """`localhost` or a loopback address: traffic that never leaves this machine."""
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def index_versions(index: str, name: str) -> list[str] | None:
     """The versions of `name` on a simple-API index; None when the index answers 404.
 
     Credentials in the URL travel as a Basic Authorization header, never in the request line,
-    and never reach a message: every error is raised with the URL already sanitised.
+    and never reach a message: every error is raised with the URL already sanitised. Over plain
+    `http` they are not sent at all, unless the index is on this machine (loopback): Basic is
+    not encryption, and the network between here and the index could read them.
     """
     parts = urllib.parse.urlsplit(index)
     if parts.scheme not in ("http", "https"):
         raise ValueError(f"the index URL must be http(s), got {sanitize_index(index)!r}")
+    if parts.username is not None and parts.scheme == "http" and not _is_loopback(parts.hostname):
+        raise ValueError("refusing to send the index credentials over plain http; use https")
     url = sanitize_index(index).rstrip("/") + "/" + _normalize(name) + "/"
     headers = {"Accept": f"{SIMPLE_JSON}, text/html;q=0.1"}
     if parts.username is not None:
