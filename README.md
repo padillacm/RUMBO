@@ -314,7 +314,8 @@ is in `RUMBO.md`, Part E "Scaling the rigor".
   `.env` ignored, `detect-private-key`.
 - Supply chain: `rumbo verify-dep` before adding a package (existence and versions on the
   index the project installs from, `--index` or `UV_INDEX_URL`/`UV_DEFAULT_INDEX`/
-  `PIP_INDEX_URL`, with credentials never printed; age, repository, typosquatting against
+  `PIP_INDEX_URL`, with credentials never printed and never sent over plain `http` unless the
+  index is on this machine; age, repository, typosquatting against
   popular names and OSV measured against PyPI and labelled so), `pip-audit` and `bandit`
   in the check,
   lockfile, Dependabot with cooldown, actions pinned by SHA, SBOM in production.

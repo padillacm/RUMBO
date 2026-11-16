@@ -299,6 +299,56 @@ def test_a_pypi_document_with_missing_fields_is_shown_as_unknown(
     assert "younger than 90 days" not in out  # an unknown age is not reported as young
 
 
+# Covers F-0007.R7 (specs/0007-dependencies-verified-before-they-are-added.md).
+@pytest.mark.parametrize(
+    "index",
+    [
+        "http://alice:s3cret-t0ken@index.example/simple/",
+        "http://alice@index.example/simple/",  # a token as the user name, no password
+        "http://alice:s3cret-t0ken@10.0.0.5:8080/simple/",
+    ],
+)
+def test_index_credentials_are_never_sent_over_plain_http(
+    net: _Network, capsys: pytest.CaptureFixture[str], index: str
+) -> None:
+    """Decided by the human (2026-11-16), not accepted as a risk: Basic is not encryption, so
+    over plain http the credentials are refused before any request. PyPI is still measured."""
+    net.answers[PYPI.format("demo-pkg")] = _document()
+    assert main(["verify-dep", "--index", index, "demo-pkg"]) == 2
+    captured = capsys.readouterr()
+    assert "refusing to send the index credentials over plain http; use https" in captured.out
+    assert "Verify by hand." in captured.out
+    assert "alice" not in captured.out + captured.err
+    assert "s3cret-t0ken" not in captured.out + captured.err
+    assert net.urls == [PYPI.format("demo-pkg"), OSV], "nothing was sent to the index"
+    assert all(not request.has_header("Authorization") for request in net.sent)
+
+
+# Covers F-0007.R7 (specs/0007-dependencies-verified-before-they-are-added.md).
+@pytest.mark.parametrize(
+    "index",
+    [
+        "http://index.example/simple/",  # plain http without credentials: allowed
+        "https://alice:s3cret-t0ken@index.example/simple/",  # credentials over https: sent
+        "http://alice:s3cret-t0ken@localhost:3141/simple/",  # loopback: never leaves the machine
+        "http://alice:s3cret-t0ken@127.0.0.1:3141/simple/",
+        "http://alice:s3cret-t0ken@[::1]:3141/simple/",
+    ],
+)
+def test_https_or_loopback_or_no_credentials_still_query_the_index(
+    net: _Network, capsys: pytest.CaptureFixture[str], index: str
+) -> None:
+    shown = cli.sanitize_index(index)
+    net.answers[shown + "demo-pkg/"] = json.dumps({"versions": ["1.0"]})
+    net.answers[PYPI.format("demo-pkg")] = _document()
+    assert main(["verify-dep", "--index", index, "demo-pkg"]) == 0
+    out = capsys.readouterr().out
+    assert "exists on " in out and ": yes" in out
+    assert net.urls[0] == shown + "demo-pkg/"
+    sent_basic = net.sent[0].has_header("Authorization")
+    assert sent_basic == ("alice" in index)
+
+
 # Covers F-0007.R8 (specs/0007-dependencies-verified-before-they-are-added.md).
 @pytest.mark.parametrize(
     "body",
