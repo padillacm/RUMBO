@@ -265,12 +265,19 @@ def test_security_step_reads_tool_bandit(name: str) -> None:
     """P3: without `-c pyproject.toml` bandit never reads `[tool.bandit]`."""
     cfg = CONFIGS[name]
     pyproject = tomllib.loads(_plan(name)["pyproject.toml"])
-    assert pyproject["tool"]["bandit"] == {"skips": ["B101"]}
+    # An adopted project names files to bandit, so its table keeps the environment and the
+    # harness scripts out (ADR-0029).
+    folders = (".venv", "scripts", "spikes", cfg.tests_dir)
+    globs = [f"{prefix}{name}/*" for name in folders for prefix in ("./", "")]
+    excluded = {"exclude_dirs": globs} if cfg.adopted else {}
+    assert pyproject["tool"]["bandit"] == {"skips": ["B101"], **excluded}
     checks = pyproject["tool"]["rumbo"]["checks"]
     if cfg.rigor == "prototype":
         assert "security" not in checks
         return
     scanned = f"{cfg.code_root} evals" if cfg.evals else cfg.code_root
+    if cfg.adopted:  # the files a change touches; `--full` makes it the whole tree
+        scanned = "{changed}"
     assert checks["security"] == f"uv run bandit -c pyproject.toml -q -r {scanned}"
     assert checks["security-scripts"] == "uv run bandit -q -r scripts -s B404,B603,B607"
 

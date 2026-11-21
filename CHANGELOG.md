@@ -210,6 +210,11 @@ in `docs/audits/2026-11-16-pre-0.4.1.md` and answered in ADR-0022 to ADR-0032.
     single-module project, layers or an evals entry that do not exist) before writing
     anything; `app`, `api` and `domain` are reserved only for new projects whose layout
     generates them.
+  - The `security` step of an adopted project judges the files a change touches, like `lint`,
+    `format` and `types`: scanning the whole package made a stock Django project red on its
+    first day (bandit reports the framework's sample secret key). `--full` still measures the
+    whole tree. Adoption no longer adds runtime dependencies: a Flask or Django service was
+    being handed `fastapi`, `uvicorn` and `httpx`, which exist for the skeleton RUMBO writes.
   - Adopting over an existing `.claude/settings.json` or `.pre-commit-config.yaml` left the
     guard unwired while `doctor` said "complete": the snippets are printed and `doctor` checks
     that the guard is wired and that its matchers name every shell tool.

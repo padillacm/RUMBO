@@ -91,7 +91,15 @@ arch = "uv run lint-imports"
 {{/arch}}
 {{#mvp_or_more}}
 # `-c pyproject.toml`: bandit reads [tool.bandit] (below) only when it is told where it is.
+{{#adopted}}
+# ADR-0013, ADR-0029: like lint, format and types, bandit judges the files a change touches.
+# What the project already had (a framework's sample secret key, say) is measured by `--full`
+# in the nightly; it does not make the first check red.
+security = "uv run bandit -c pyproject.toml -q -r {changed}"
+{{/adopted}}
+{{^adopted}}
 security = "uv run bandit -c pyproject.toml -q -r {{code_root}}{{#evals}} evals{{/evals}}"
+{{/adopted}}
 security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
 audit = "uv run pip-audit --skip-editable"
 {{/mvp_or_more}}
@@ -219,3 +227,15 @@ also_copy = [{{#evals}}"evals/", {{/evals}}"scripts/"]
 # Read by the `security` step (`-c pyproject.toml`). Asserts in evals/ and tests/ are intended
 # (B101); ruff S101 still guards {{code_root}}/.
 skips = ["B101"]
+{{#adopted}}
+# The step names files, or `.` with --full. As in a new project, bandit judges the code: not
+# the environment, the tests, spikes/ nor scripts/ (which has its own step). Globs, in both
+# spellings bandit meets (`-r .` and a named file): measured with bandit 1.9.4, a plain name
+# such as "tests" is matched anywhere in a path and would silently skip `pkg/contests.py`.
+exclude_dirs = [
+    "./.venv/*", ".venv/*",
+    "./scripts/*", "scripts/*",
+    "./spikes/*", "spikes/*",
+    "./{{tests_dir}}/*", "{{tests_dir}}/*",
+]
+{{/adopted}}

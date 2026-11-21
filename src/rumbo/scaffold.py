@@ -1699,7 +1699,14 @@ def missing_dev_dependencies(cfg: Config, pyproject_text: str) -> list[str]:
 
 
 def runtime_dependencies(cfg: Config) -> list[str]:
-    """Runtime dependencies by kind and capability (ADR-0010): HTTP for a service, SDK for LLM."""
+    """Runtime dependencies by kind and capability (ADR-0010): HTTP for a service, SDK for LLM.
+
+    They exist for the skeleton RUMBO writes (`api/http.py`, the adapters). An adopted project
+    gets no skeleton, so it gets none of them (ADR-0029): what its code runs on is its own
+    choice, and a Flask or Django service was being handed FastAPI.
+    """
+    if cfg.adopted:
+        return []
     deps: list[str] = []
     if cfg.kind == "service":
         deps += SERVICE_DEPS

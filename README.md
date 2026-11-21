@@ -125,7 +125,7 @@ where the package lives (under `src/` or at the root, kept in `[tool.rumbo].src`
 writes the harness without the `src/` and tests skeleton, keeps an existing CI workflow and
 prints the two steps to add, leaves an existing pytest configuration,
 `.claude/settings.json` and `.pre-commit-config.yaml` as they are and prints what to add
-to them, refuses to configure what is not on disk (ADR-0029), and writes `lint`, `format` and `types` with `{changed}` so the
+to them, refuses to configure what is not on disk (ADR-0029), adds no runtime dependency, and writes `lint`, `format`, `types` and `security` with `{changed}` so the
 strict tools run on the files a change touches; `uv run python scripts/rumbo_check.py --full`
 (or `rumbo check --full`) measures the whole tree and the nightly runs it. Nothing is
 overwritten: the missing `[tool.*]` sections are merged into `pyproject.toml`, missing lines

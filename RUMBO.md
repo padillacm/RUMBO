@@ -89,7 +89,8 @@ kind, the layout, the tests directory and whether the package lives under `src/`
 `.claude/settings.json` and `.pre-commit-config.yaml` alone and prints what to add to them,
 detects the Python version from `requires-python`, refuses to configure a package or a
 module that is not on disk (ADR-0029),
-and makes `lint`, `format` and `types` run on the changed files only (`{changed}`), so the
+adds no runtime dependency, and makes `lint`, `format`, `types` and `security` run on the
+changed files only (`{changed}`), so the
 legacy debt is measured nightly with `--full` instead of blocking every change. The adoption
 commit touches protected files, so the **human** makes it; from then on the hooks apply.
 

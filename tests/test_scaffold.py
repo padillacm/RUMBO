@@ -971,6 +971,26 @@ def test_axes_validation(kwargs: dict[str, Any]) -> None:
         Config(name="x", package="x", llm=False, **kwargs)
 
 
+def test_an_adopted_project_is_given_no_runtime_dependency() -> None:
+    """ADR-0029 fitness: the runtime dependencies serve the skeleton RUMBO writes. An adopted
+    project gets no skeleton; a Flask or Django service was being handed FastAPI."""
+    for kind, llm in (("service", False), ("service", True), ("cli", True), ("data", False)):
+        provider = "anthropic" if llm else ""
+        adopted = Config(
+            name="Legacy",
+            package="legacy_app",
+            llm=llm,
+            provider=provider,
+            kind=kind,
+            layout="flat",
+            adopted=True,
+        )
+        assert runtime_dependencies(adopted) == []
+        assert "pytest" in dev_dependencies(adopted)  # the tools of the harness still come
+    fresh = Config(name="New", package="new_app", llm=False, kind="service")
+    assert runtime_dependencies(fresh) == ["fastapi", "uvicorn", "httpx"]
+
+
 # Covers F-0004.R3, F-0004.R4, F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_service_dependencies_do_not_depend_on_llm() -> None:
     assert runtime_dependencies(_axes("service")) == ["fastapi", "uvicorn", "httpx"]
@@ -1398,11 +1418,14 @@ def test_adoption_plan_writes_the_harness_and_no_skeleton() -> None:
     assert checks["lint"] == "uv run ruff check {changed}"
     assert checks["format"] == "uv run ruff format --check {changed}"
     assert checks["types"] == "uv run pyright {changed}"
+    # ADR-0029: bandit too judges the files a change touches, not the legacy tree.
+    assert checks["security"] == "uv run bandit -c pyproject.toml -q -r {changed}"
     plain = _rendered_checks_of(
         Config(name="Legacy", package="legacy_app", llm=False, rigor="mvp", kind="cli")
     )
-    assert {k: v for k, v in checks.items() if k not in ("lint", "format", "types")} == {
-        k: v for k, v in plain.items() if k not in ("lint", "format", "types")
+    on_changed = ("lint", "format", "types", "security")
+    assert {k: v for k, v in checks.items() if k not in on_changed} == {
+        k: v for k, v in plain.items() if k not in on_changed
     }
     assert list(checks) == list(plain) == check_steps(cfg)
     assert "--full" in pyproject and "{changed}` is the changed .py files" in pyproject
@@ -1555,10 +1578,15 @@ def test_adopting_a_root_package_points_every_tool_at_it(
     )
     cfg = Config.from_project(project)
     assert (cfg.src, cfg.code_root, cfg.package_path) == (".", "legacy_app", "legacy_app")
-    # The checks table, the type checker, coverage: the package, never `src`.
-    assert tool["rumbo"]["checks"]["security"] == (
-        "uv run bandit -c pyproject.toml -q -r legacy_app"
-    )
+    # The checks table, the type checker, coverage: the package, never `src`. Bandit
+    # judges the changed files of an adopted project, like the other strict tools.
+    assert tool["rumbo"]["checks"]["security"] == "uv run bandit -c pyproject.toml -q -r {changed}"
+    # Globs: a plain name is matched anywhere in a path by bandit (measured).
+    assert tool["bandit"]["exclude_dirs"] == [
+        f"{prefix}{name}/*"
+        for name in (".venv", "scripts", "spikes", "test")
+        for prefix in ("./", "")
+    ]
     assert tool["pyright"]["include"] == ["legacy_app", "test"]
     assert tool["coverage"]["run"]["source"] == ["legacy_app"]
     assert tool["ruff"]["force-exclude"] is True and tool["ruff"]["extend-exclude"] == ["spikes"]
@@ -1591,7 +1619,7 @@ def test_adopting_a_root_package_points_every_tool_at_it(
     report = update(Project.load(proto), proto)
     assert "pyproject.toml (+checks: security, security-scripts, audit)" in report.merged
     checks = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]["checks"]
-    assert checks["security"] == "uv run bandit -c pyproject.toml -q -r legacy_app"
+    assert checks["security"] == "uv run bandit -c pyproject.toml -q -r {changed}"
 
     # A project adopted before the key existed: `update` looks once and writes what it finds.
     pyproject.write_text(
@@ -1644,8 +1672,9 @@ def test_a_src_project_renders_as_before(simple_project: Path, tmp_path: Path) -
         assert (cfg.src, cfg.code_root, cfg.package_path) == ("src", "src", "src/demo")
         plan = plan_files(cfg)
         pyproject = str(plan["pyproject.toml"])
+        scanned = "{changed}" if cfg.adopted else "src"  # ADR-0029: the files of a change
         for literal in (
-            'security = "uv run bandit -c pyproject.toml -q -r src"\n',
+            f'security = "uv run bandit -c pyproject.toml -q -r {scanned}"\n',
             'include = ["src", "tests"]\n',
             'strict = ["src/demo/domain"]\n',
             'source = ["src/demo"]\n',

@@ -81,6 +81,23 @@ outside the tests directory: pytest collects them, but the sensor, `rumbo trace`
 the one directory `[tool.rumbo].tests` names. That directory stays a single top-level folder:
 the architecture test locates the project root from its own depth.
 
+**What was already there is not judged on day one, nor changed.** Two things an adopted
+project met on its first day, found by the internal audit of this slice:
+- The `security` step scanned the whole package, so a stock Django project was red at once
+  (bandit reports the framework's sample secret key). Like `lint`, `format` and `types`
+  (ADR-0013), the `security` step of an adopted project names `{changed}`: the files a change
+  touches. `--full`, which the nightly runs, makes it the whole tree. As in a new project,
+  bandit judges the code only: `[tool.bandit]` keeps the environment, the tests directory,
+  `spikes/` and `scripts/` (which has its own step) out, also when one of their files is named
+  on the command line; otherwise the tests the harness itself adds, which start processes,
+  made the first check red. The exclusions are globs: measured with bandit 1.9.4, a plain
+  name such as `tests` is matched anywhere in a path and would silently skip
+  `pkg/contests.py`.
+- The runtime dependencies of a kind (`fastapi`, `uvicorn`, `httpx` for a service; `pydantic`
+  and the SDK for an LLM product) exist for the skeleton RUMBO writes. An adopted project gets
+  no skeleton, so it gets none of them: a Flask or Django service was being handed FastAPI.
+  The development tools of the harness are still added.
+
 **Python (C3).** `rumbo init`, adopting or not, reads `[project].requires-python` and
 `.python-version` when the directory has them. Without `--python` the harness uses the lowest
 supported Python that `requires-python` allows (clauses `>=`, `>`, `<=`, `<`, `==`, `!=`,
@@ -198,6 +215,8 @@ project lacks, and rewrite neither (ADR-0011: the table and the Makefile are the
 `::test_install_updates_only_its_own_hook_configuration_and_knows_a_sub_directory`,
 `::test_reserved_names_are_only_the_ones_that_collide`,
 `::test_adoption_configures_only_what_is_on_disk`,
+`::test_an_adopted_project_is_given_no_runtime_dependency`,
+`::test_adoption_plan_writes_the_harness_and_no_skeleton` (the `security` step on `{changed}`),
 `::test_what_the_project_already_had_is_decided_once_at_adoption`,
 `::test_update_follows_the_tests_directory_and_finds_the_version_key`;
 `tests/test_cli.py::test_promote_is_atomic_and_a_bad_table_is_one_line`,
