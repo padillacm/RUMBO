@@ -209,6 +209,16 @@ def test_checklists_follow_kind_and_layout(tmp_path: Path) -> None:
     assert contracts in checklist("G3", "service", "hexagonal")
     assert contracts in checklist("G3", "library", "layered")
     assert "C4 levels 1–2" in checklist("G3", "cli", "flat"), "the other items stay"
+    # The OWASP LLM and Agentic lists are about a model, like the automatic check (ADR-0010):
+    # a project without one is asked to review the lethal trifecta only.
+    trifecta = "Threat model with the lethal trifecta reviewed by the human"
+    owasp = "Threat model with lethal trifecta and OWASP LLM/Agentic reviewed by the human"
+    without_model = checklist("G3", "service", "hexagonal")
+    assert trifecta in without_model and owasp not in without_model
+    with_model = GATES["G3"].checklist(
+        Project(root=tmp_path, package="demo", llm=True, rigor="mvp", kind="service")
+    )
+    assert owasp in with_model and trifecta not in with_model
 
     for kind in ("library", "cli"):
         asked = checklist("G5", kind, "flat")

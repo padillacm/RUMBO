@@ -86,6 +86,7 @@ class Item:
     min_rigor: str = "prototype"
     llm_only: bool = False
     max_rigor: str = "production"
+    no_llm_only: bool = False  # only for a project without a model: the twin of `llm_only`
     # ADR-0010: the same conditions as the automatic checks, so both ask about the same things.
     arch_only: bool = False  # only when the layout has layers (`Project.arch`, as in `_g3`)
     kinds: tuple[str, ...] = ()  # only for these kinds (as in `_g5`); empty means every kind
@@ -105,6 +106,7 @@ class Gate:
             if project.at_least(item.min_rigor)
             and not (project.at_least(item.max_rigor) and item.max_rigor != "production")
             and (project.llm or not item.llm_only)
+            and (not project.llm or not item.no_llm_only)
             and (project.arch or not item.arch_only)
             and (not item.kinds or project.kind in item.kinds)
         ]
@@ -949,9 +951,16 @@ GATES: dict[str, Gate] = {
             Item("ADR 'workflow vs. agent' decided by the human", "mvp", llm_only=True),
             Item("Import-linter contracts enforced in CI", arch_only=True),
             Item("C4 levels 1–2", "mvp"),
+            # ADR-0010: the OWASP LLM and Agentic lists are about a model, like the check.
             Item(
                 "Threat model with lethal trifecta and OWASP LLM/Agentic reviewed by the human",
                 "mvp",
+                llm_only=True,
+            ),
+            Item(
+                "Threat model with the lethal trifecta reviewed by the human",
+                "mvp",
+                no_llm_only=True,
             ),
             Item("Tools typed and least-privilege", llm_only=True),
             Item("Every significant ADR has a fitness function", "production"),
