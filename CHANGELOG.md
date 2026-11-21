@@ -10,9 +10,27 @@ Fixes from two external audits of v0.4.0. The first had eight findings, answered
 decisions (ADR-0018 to ADR-0021). The second had about a hundred, listed with their evidence
 in `docs/audits/2026-11-16-pre-0.4.1.md` and answered in ADR-0022 to ADR-0032.
 
-After upgrading, run `rumbo update` (it refreshes the three scripts under `scripts/`) and
-`rumbo doctor`: a project created before this version has hook matchers that do not name
-PowerShell, and `doctor` says what to add to `.claude/settings.json`.
+### Upgrading a project
+1. Run `rumbo update` yourself, with no agent working in the project, and **commit the result
+   before the agent goes on**. It rewrites protected files (`scripts/`, the workflows), and
+   the guard stops an agent that finds them changed and not committed.
+2. Run `rumbo doctor` and do what it says. `rumbo update` never rewrites an existing
+   `.claude/settings.json`, so a project created before this version keeps two things that
+   `doctor` now names: hook matchers that do not name `PowerShell`, and the pre-approved
+   commands `make rumbo *` and `rumbo decision *`, which you should remove.
+3. `rumbo update` replaces `RUMBO.md`, which now describes two things your own code does not
+   have until you port them, because files under `src/` and `evals/graders/` are yours and
+   are never replaced:
+   - `RUMBO_LIVE=1` as the production switch: copy `live()` and `LIVE_VARIABLES` from the
+     new template of `app/ports.py`.
+   - Graders that take the case input and may be coroutines: take the new
+     `evals/run_evals.py` together with the new `evals/graders/__init__.py` (the first
+     imports `grade` from the second), and make a judge you registered asynchronous.
+   `rumbo update --diff` shows each of these files against the new template. Until you port
+   them your project keeps working as before: nothing forces the port.
+4. `--strict` in the anti-cheat sensor now exits `2` when it finds no base other than `HEAD`.
+   The generated CI and `[tool.rumbo.checks]` pass a base and are not affected; a force push
+   to the default branch, whose previous commit is unreachable, is.
 
 ### Security
 - `rumbo verify-dep` no longer sends the credentials of a private index over plain `http`:
