@@ -51,8 +51,10 @@ The edit rule stays pure logic (no subprocess, F-0001.R12).
 - Names are compared without case and without the spellings Windows opens as the same file
   (`Makefile.`, `Makefile::$DATA`): on Windows and macOS `Ruff.toml` is `ruff.toml`.
 - All three layers apply the same list: the edit tool (blocked), the check after a shell
-  command and at Stop (reported, also when an ignore rule hides the new file from `git
-  status`), and the `pre-commit` hook (refused for an agent).
+  command and at Stop (reported; after a command also when an ignore rule hides from `git
+  status` a file that appeared or changed while it ran, ADR-0024), and the `pre-commit` hook
+  (refused for an agent, except a path staged exactly as it is in `MERGE_HEAD` while a merge is
+  concluded: that change comes from the merged branch).
 - `conftest.py` stays editable. What it can do to the tests (new `pytest_*` hooks,
   `collect_ignore`) is the anti-cheat sensor's to report (audit finding S4).
 - The exception of ADR-0019 does not grow: `uv add` writes none of these files.

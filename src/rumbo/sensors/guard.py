@@ -34,12 +34,19 @@ What it enforces, and how strongly
   `GIT_CONFIG_*` that disables the hooks, declares the human or defines an alias, force pushes,
   `git reset --hard`, recursive rm on the tree root or home, writes into protected files or the
   git directory (redirections, sed -i, tee, Set-Content, Out-File, Remove-Item...),
-  `rumbo verify-dep --index` and `git diff --no-index`. Regexes cannot win against a shell, so:
+  `rumbo verify-dep --index` and `git diff --no-index`. A rule reads one simple command, as
+  the shell does: across a line continuation, and across the line breaks and separators inside
+  quotes and `$(...)` (the heredoc commit message). Regexes cannot win against a shell, so:
 - Shell tools, after the command, and Stop (deterministic): any protected file that differs
-  from HEAD (or is new) blocks with the list of files, including the ones `git status` cannot
-  see: a tracked file under `--skip-worktree` or `--assume-unchanged`, and a new Makefile or
-  tool configuration hidden by an ignore rule. `uv add`/`uv remove`/`uv lock` are the exception,
-  and a narrow one (ADR-0019): uv.lock is free, and pyproject.toml may change only in its
+  from HEAD (or is new) blocks with the list of files; every reason says what to do if the
+  change is the agent's and that a change the human made (`rumbo update`) is not to be
+  reverted. A repository with no commit on any ref has nothing to protect yet. After a command
+  (not at Stop) the files `git status` cannot see are judged too, when they appear or change
+  while the command runs: a tracked file under `--skip-worktree` or `--assume-unchanged`, a
+  new Makefile or tool configuration hidden by an ignore rule; one that was there before (the
+  human's ignored pyrightconfig.json) is never reported. `uv add`/`uv remove`/`uv lock` are
+  the exception, and a narrow one (ADR-0019): uv.lock is free, and pyproject.toml may change
+  only in its
   dependency tables (`project.dependencies`, `project.optional-dependencies`,
   `dependency-groups`, `tool.uv`). The version in HEAD and the current one are parsed and
   compared without those keys; anything else that differs (`tool.rumbo`, `tool.ruff`,
@@ -74,15 +81,21 @@ What it enforces, and how strongly
   was in HEAD and is gone, and a new numbered ADR or spec without the mark; `commit-msg`
   refuses `[tests-change-approved]`. The human's commits, the first commit of a repository with
   no commit on any ref (the harness itself, nothing to protect yet) and a run with nothing
-  staged (`pre-commit run --all-files` in CI) pass silently.
+  staged (`pre-commit run --all-files` in CI) pass silently. While a merge is being concluded,
+  a path staged exactly as it is in `MERGE_HEAD` comes from the merged branch and is not the
+  agent's change; content that is in neither parent is judged as always.
 - Signed documents (ADR-0017): a numbered ADR or spec committed without the template mark is
   signed by the human and read-only for the agent: an edit is blocked, a change or deletion
   through the shell is reported after the command (with any removed template mark), and the
   git hook refuses it. Documents still under the mark stay editable.
 
 When the guard itself fails
-- No information is not a failure: without git, outside a repository or with an unreadable
-  state file, the checks that need it are skipped and the action goes through.
+- No information is not a failure: without git or outside a repository, the checks that need
+  it are skipped and the action goes through.
+- The state file is shared by parallel hooks. A read or a replace that fails is retried; a
+  state that stays unreadable is unknown, not empty: nothing is reported from it, nothing is
+  saved over it, and Stop runs the verification whatever changed. The same holds for a state
+  that cannot be decoded, which the next save repairs.
 - An internal error never reads as "allow" (Claude Code treats any exit code other than 0 and 2
   as a non-blocking error). `pre-tool` refuses the call and `post-tool` reports, both with exit
   2 and the error; `stop` takes the environment route (the agent reports it and stops instead
@@ -93,12 +106,14 @@ When the guard itself fails
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -165,7 +180,8 @@ PYPROJECT_NEW = f"{PYPROJECT} (new file)"
 PYPROJECT_DELETED = f"{PYPROJECT} (deleted)"
 # ADR-0017: a numbered ADR or spec committed without the template mark is signed by the human
 # and read-only for the agent; the 0000 templates and documents under the mark are not.
-SIGNED_DOC = re.compile(r"^(?:specs|docs/adr)/(?!0000-)\d{4}-[^/]+\.md$")
+# Without case, like the protected names: on Windows and macOS `SPECS/0001-x.md` is that spec.
+SIGNED_DOC = re.compile(r"^(?:specs|docs/adr)/(?!0000-)\d{4}-[^/]+\.md$", re.I)
 CODE_SUFFIXES = (".py", ".toml", ".jsonl")
 # ADR-0024: the guard's memory, one small JSON file inside the git directory.
 STATE_FILE = "rumbo-guard-head"
@@ -225,7 +241,10 @@ def _rule(pattern: str, reason: str, flags: int = 0) -> tuple[re.Pattern[str], s
     return re.compile(pattern, flags), reason
 
 
-MAX_SIMPLE_COMMAND = 5000  # characters between two of `| ; &` or line breaks
+# The rules cost the square of the length of a simple command (the text between two of
+# `| ; &` or line breaks). The sum of those squares is bounded: about 20 000 characters in one
+# simple command, or any number of ordinary lines.
+MAX_RULE_WORK = 400_000_000
 RULES_BUDGET = 3.0  # seconds; the hook's own timeout is 20
 _SEPARATOR = re.compile(r"[|;&\n]")
 _SEG = r"[^|;&\n]*"  # the rest of one simple command
@@ -256,17 +275,31 @@ _ROOTISH = (
     r"""["']?(?:/\*?|~(?:[/\\]\*?)?|\.{1,2}[/\\]?|\.[/\\]\*|\*|[a-zA-Z]:[/\\]?\*?"""
     r"""|\$\{?(?:HOME|PWD|env:USERPROFILE)\}?(?:[/\\]\*?)?|\$\(pwd\))["']?(?=\s|$|[;&|)])"""
 )
-# Commands that write, truncate or remove their arguments, in Bash and in PowerShell.
+# Where a command word stands: at the start, after a separator, after a wrapper (`sudo`,
+# `xargs`, `find -exec`), or opening the string of `sh -c '...'`; environment assignments may
+# precede it. Named anywhere else (a commit message, a grep pattern) a writer is only a word.
+_AT_COMMAND = (
+    r"(?:(?:^|[;&|(){`\n])\s*"
+    r"|\b(?:sudo|xargs|env|command|exec|time|nohup|then|do|else)\s+(?:-\S+\s+)*"
+    r"|\b(?:ba|z|da|k)?sh\b" + _SEG + r"""\s-\w*c\s+["']\s*"""
+    r"|\b(?:pwsh|powershell)(?:\.exe)?\b" + _SEG + r"""\s-c\w*\s+["']\s*"""
+    r"|\s-exec(?:dir)?\s+)(?:\w+=\S*\s+)*"
+)
+# Commands that write, truncate or remove their arguments, in Bash and in PowerShell. `sed -i`
+# and `tee` are matched anywhere, as they always were; the others where a command stands.
 _WRITERS = (
     r"(?:\bsed\b" + _ARGS + r"\s(?:-[a-zA-Z]*i\S*|--in-place\S*)"
-    r"|\bperl\b" + _ARGS + r"\s-[a-zA-Z]*i[a-zA-Z]*"
-    r"|(?<!git )\b(?:tee|rm|unlink|truncate|Set-Content|Add-Content|Clear-Content|Out-File"
-    r"|Remove-Item|Rename-Item|Move-Item)\b)"
+    r"|\btee\b"
+    r"|" + _AT_COMMAND + r"(?:perl\b" + _ARGS + r"\s-[a-zA-Z]*i[a-zA-Z]*"
+    r"|(?:rm|unlink|truncate|Set-Content|Add-Content|Clear-Content|Out-File"
+    r"|Remove-Item|Rename-Item|Move-Item)\b))"
 )
 _MOVERS = (
-    r"(?<!git )\b(?:rm|mv|cp|chmod|chown|ln|unlink|truncate|rmdir|del|Remove-Item|Move-Item"
+    _AT_COMMAND + r"(?:rm|mv|cp|chmod|chown|ln|unlink|truncate|rmdir|Remove-Item|Move-Item"
     r"|Copy-Item|Rename-Item|New-Item|Set-Content|Add-Content|Clear-Content|Out-File)\b"
 )
+_RECURSIVE = r"\s(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)"
+_RM_ROOT = "recursive rm on the tree root, home or a glob: ask the human"
 # `git config` that only reads: `get`/`list` as the subcommand, or a --get*/--list/-l option.
 _CONFIG_READS = (
     r"(?!(?>(?:\s+--?\w[\w-]*(?:=\S+)?)*)\s+(?:get|list)\b)"
@@ -327,21 +360,32 @@ BASH_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
         "only the human declares rumbo.human (git config); the agent leaves it alone",
     ),
     _rule(r"\bpre-commit\s+uninstall\b", _NO_HOOKS),
+    _rule(r"\brm\b" + _SEG + r"\.git[/\\]hooks", "do not delete the git hooks"),
     _rule(
         _MOVERS + _SEG + _GIT_DIR,
         "the git directory holds the hooks and the clone's configuration; the agent does not "
         "change it by hand",
         re.I,
     ),
+    # `rm`, its options and a root as the first operand, wherever the words stand (as always);
+    # as a command, also with the root after other operands, and in PowerShell's spellings.
     _rule(
-        r"(?<!git )\b(?:rm|rmdir|rd|ri|del|Remove-Item)\b"
-        r"(?="
+        r"(?<!git )\brm\b(?:\s+-{1,2}[\w-]+)*?"
+        + _RECURSIVE
+        + r"(?:\s+-{1,2}[\w-]+)*\s+(?:--\s+)?"
+        + _ROOTISH,
+        _RM_ROOT,
+    ),
+    _rule(
+        _AT_COMMAND
+        + r"(?:rm|rmdir|Remove-Item)\b(?="
         + _SEG
-        + r"\s(?:-[a-zA-Z]*r[a-zA-Z]*|--recursive)(?=\s|$))"
+        + _RECURSIVE
+        + r"(?=\s|$))"
         + _SEG
         + r"\s(?:--\s+)?"
         + _ROOTISH,
-        "recursive rm on the tree root, home or a glob: ask the human",
+        _RM_ROOT,
         re.I,
     ),
     _rule(r"(?:>>?|>\|)\s*" + _TARGET, _PROTECTED, re.I),
@@ -515,8 +559,27 @@ def is_signed(root: Path, rel: str) -> bool:
     """
     if not SIGNED_DOC.match(rel):
         return False
-    head = _blob(root, f"HEAD:./{rel}")
+    head = _blob(root, f"HEAD:./{_listed_name(root, rel)}")
     return head is not None and TEMPLATE_MARK not in head
+
+
+def _listed_name(root: Path, rel: str) -> str:
+    """`rel` spelled as its directories list it. On a case-insensitive file system
+    `SPECS/0001-x.md` opens `specs/0001-x.md`; Windows resolves a path to its real case, POSIX
+    `resolve()` (macOS) keeps the typed one, and git knows only the real one. A part is
+    respelled only when the file system finds it and the listing has it under another case, so
+    on a case-sensitive system a path is never taken for another."""
+    parts: list[str] = []
+    for part in rel.split("/"):
+        here = root.joinpath(*parts)
+        try:
+            names = os.listdir(here)
+        except OSError:
+            return rel
+        if part not in names and (here / part).exists():
+            part = next((name for name in names if name.casefold() == part.casefold()), part)
+        parts.append(part)
+    return "/".join(parts)
 
 
 def _protected_reason(rel: str) -> str:
@@ -610,29 +673,149 @@ def check_edit(tool_name: str, tool_input: dict[str, Any], root: Path) -> str | 
     return None
 
 
+_HEREDOC = re.compile(r"<<-?[ \t]*(?:'([^'\n]+)'|\"([^\"\n]+)\"|\\?([\w.-]+))")
+_CONTINUATION = re.compile(r"\\\n|`[ \t]*\n")
+_INSIDE = str.maketrans({"\n": " ", ";": " ", "|": " ", "&": " "})
+
+
+def _flat(command: str) -> str:
+    """Every line of the command as one line: what the rules read when in doubt."""
+    return _CONTINUATION.sub(" ", command).replace("\n", " ")
+
+
+def _shell_view(command: str) -> str:
+    """The command as the shell reads it: one simple command per line.
+
+    The rules look for a flag in the same simple command as `git`, and a simple command does not
+    end where a line does. Joined here: a backslash (or a PowerShell backtick) before a line
+    break; and, inside quotes, `$(...)` or backticks, the line breaks and the `; | &` that
+    separate nothing there (a here-document inside them included: the canonical
+    `git commit -m "$(cat <<'EOF' ... EOF)"`). Line breaks between commands stay, and so does a
+    here-document at the top level, whose lines are judged one by one as before.
+
+    A reading aid, not a parser. When it ends inside a quote, a substitution or a
+    here-document, it did not understand the command: every line is then joined (`_flat`), which
+    is how the rules read a command before they stopped at line breaks.
+    """
+    text = command.replace("\r\n", "\n").replace("\r", "\n")
+    out: list[str] = []
+    stack: list[str] = []  # open contexts, innermost last: ' (literal) a ($'...') " $( ` (
+    pending: list[str] = []  # here-document delimiters whose body starts at the next line break
+    index, end = 0, len(text)
+    while index < end:
+        char = text[index]
+        following = text[index + 1] if index + 1 < end else ""
+        top = stack[-1] if stack else ""
+        nested = any(context != "(" for context in stack)
+        if top == "'":
+            if char == "'":
+                stack.pop()
+            out.append(char.translate(_INSIDE))
+            index += 1
+        elif char == "\\" and following:
+            if following != "\n":  # a backslash and a line break vanish; anything else is kept
+                out.append(char + (" " if following in ";|&" and nested else following))
+            index += 2
+        elif char == "`" and _CONTINUATION.match(text, index):  # PowerShell's continuation
+            out.append(" ")
+            index = text.index("\n", index) + 1
+        elif top in ('"', "a"):
+            if (char == '"' and top == '"') or (char == "'" and top == "a"):
+                stack.pop()
+            elif top == '"' and char == "$" and following == "(":
+                stack.append("$(")
+                out.append(char)
+                index += 1
+                char = "("
+            elif top == '"' and char == "`":
+                stack.append("`")
+            out.append(char.translate(_INSIDE))
+            index += 1
+        elif char == "\n":
+            index += 1
+            body_start = index
+            for delimiter in pending:
+                while True:
+                    if index >= end:
+                        return _flat(text)  # a here-document that never ends
+                    stop = text.find("\n", index)
+                    stop = end if stop < 0 else stop
+                    line = text[index:stop]
+                    index = min(stop + 1, end)
+                    if line.strip() == delimiter:
+                        break
+            body = text[body_start:index]
+            pending.clear()
+            out.append((" " + body.translate(_INSIDE)) if nested else ("\n" + body))
+        elif char == "#" and (index == 0 or text[index - 1] in " \t\n;&|("):
+            stop = text.find("\n", index)
+            stop = end if stop < 0 else stop
+            comment = text[index:stop]  # a quote in a comment opens nothing
+            out.append(comment.translate(_INSIDE) if nested else comment)
+            index = stop
+        elif char == "<" and text.startswith("<<", index):
+            heredoc = None if text.startswith("<<<", index) else _HEREDOC.match(text, index)
+            if heredoc:
+                pending.append(next(group for group in heredoc.groups() if group))
+            out.append(heredoc.group(0) if heredoc else "<<")
+            index = heredoc.end() if heredoc else index + 2
+        else:
+            if char == "'":
+                stack.append("a" if index and text[index - 1] == "$" else "'")
+            elif char == '"':
+                stack.append('"')
+            elif char == "$" and following == "(":
+                stack.append("$(")
+                out.append(char)
+                index += 1
+                char = "("
+            elif char == "(":
+                stack.append("(")
+            elif char == ")" and top in ("(", "$("):
+                stack.pop()
+            elif char == "`":
+                if top == "`":
+                    stack.pop()
+                else:
+                    stack.append("`")
+            out.append(char.translate(_INSIDE) if nested else char)
+            index += 1
+    if pending or any(context != "(" for context in stack):
+        return _flat(text)
+    return "".join(out)
+
+
 def check_bash(command: str) -> str | None:
     """Reason to block a shell command (any tool of `SHELL_TOOLS`), or None to allow it.
 
-    The rules cost time in proportion to the square of the longest simple command, and a hook
-    that runs out of time lets the call through. So the work is bounded and fails closed: one
-    simple command over `MAX_SIMPLE_COMMAND` characters is refused, and so is a command the
-    rules could not judge within `RULES_BUDGET` seconds.
+    The rules are judged on the command as written and on `_shell_view` of it, so a flag on
+    another line of the same simple command is found.
+
+    They cost time in proportion to the square of the length of a simple command, and a hook
+    that runs out of time lets the call through. So the work is bounded and fails closed: a
+    command over `MAX_RULE_WORK` is refused, and so is one the rules could not judge within
+    `RULES_BUDGET` seconds.
     """
     blocked = "blocked by scripts/rumbo_guard.py: "
-    if max(len(part) for part in _SEPARATOR.split(command)) > MAX_SIMPLE_COMMAND:
-        return (
-            f"{blocked}one command of more than {MAX_SIMPLE_COMMAND} characters without a line "
-            "break cannot be judged in time; write the long text to a file and pass the file"
-        )
+    too_long = (
+        f"{blocked}one command of more than about {int(MAX_RULE_WORK**0.5)} characters without a "
+        "line break cannot be judged in time; write the long text to a file and pass the file"
+    )
     deadline = time.monotonic() + RULES_BUDGET
-    for pattern, reason in BASH_RULES:
-        if pattern.search(command):
-            return blocked + reason
-        if time.monotonic() > deadline:
-            return (
-                f"{blocked}the command could not be judged within {RULES_BUDGET:g} s; split it, "
-                "or write the long text to a file and pass the file"
-            )
+    if sum(len(part) ** 2 for part in _SEPARATOR.split(command)) > MAX_RULE_WORK:
+        return too_long
+    joined = _shell_view(command)
+    for view in (command,) if joined == command else (command, joined):
+        if sum(len(part) ** 2 for part in _SEPARATOR.split(view)) > MAX_RULE_WORK:
+            return too_long
+        for pattern, reason in BASH_RULES:
+            if pattern.search(view):
+                return blocked + reason
+            if time.monotonic() > deadline:
+                return (
+                    f"{blocked}the command could not be judged within {RULES_BUDGET:g} s; split "
+                    "it, or write the long text to a file and pass the file"
+                )
     return None
 
 
@@ -865,15 +1048,23 @@ def _protected_changes(root: Path, files: list[str], staged: bool) -> tuple[list
     return protected, tables
 
 
-def _pyproject_reason(tables: list[str], what: str, undo: str) -> str:
+def _pyproject_reason(
+    tables: list[str], what: str, undo: str, may_be_the_humans: bool = False
+) -> str:
     free = ", ".join(".".join(key) for key in PYPROJECT_FREE_KEYS)
-    return (
+    reason = (
         f"{PYPROJECT} {what} outside its dependency tables: "
         + ", ".join(tables)
         + f". It is a protected file: an agent changes only {free} (what uv add, uv remove "
-        f"and uv lock write). Restore everything else ({undo}) and ask the human to make "
-        "that change."
+        "and uv lock write)."
     )
+    if may_be_the_humans:  # the working tree: the human may have edited it, or run `rumbo update`
+        return reason + (
+            f" If you made this change, restore everything else ({undo}) and ask the human to "
+            "make it; if the human made it (for example `rumbo update`), ask them to commit it "
+            "and do not revert it."
+        )
+    return reason + f" Restore everything else ({undo}) and ask the human to make that change."
 
 
 # ------------------------------------------------- after a shell command, and Stop
@@ -886,48 +1077,56 @@ def _blob_id(data: bytes, hex_length: int) -> str:
     return digest.hexdigest()
 
 
-def hidden_changes(root: Path, changed: list[str]) -> list[str]:
-    """Protected files and signed documents that changed where `git status` does not look (G10).
+def _digest(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "unreadable"
 
-    - A tracked file flagged `--skip-worktree` or `--assume-unchanged`: its content is hashed
-      (`git hash-object`, so line-ending filters apply) and compared with the index. A flagged
-      file that is missing is reported unless the flag is skip-worktree, which is how a sparse
-      checkout looks.
-    - A new file hidden by an ignore rule (`.gitignore`, `.git/info/exclude`): the names that
-      change the local verification by existing (the Makefile family, pyproject.toml, the
-      sensors, the tool configuration of ADR-0023) are looked up in every directory that holds
-      tracked files. `.env*` files and `.claude/settings.local.json` are local by design.
 
+def hidden_files(root: Path) -> dict[str, str] | None:
+    """Protected files and signed documents that differ from the index, or are new, where
+    `git status` does not look (G10): each with a digest of its content. None without git.
+
+    - A tracked file flagged `--skip-worktree` or `--assume-unchanged` whose content (hashed by
+      `git hash-object`, so line-ending filters apply) is not the index's. A flagged file that
+      is missing counts unless the flag is skip-worktree, which is how a sparse checkout looks.
+    - A file that is not tracked and has a name that changes the local verification by existing
+      (the Makefile family, pyproject.toml, the sensors, the tool configuration of ADR-0023), in
+      any directory that holds tracked files: an ignore rule (`.gitignore`,
+      `.git/info/exclude`) hides it from `git status`. `.env*` files and
+      `.claude/settings.local.json` are local by design.
+
+    This is a description, not a verdict: the human keeps such files too (an ignored
+    `pyrightconfig.json`). The caller reports what appears or changes while a command runs.
     One `git ls-files` always; one `git hash-object` only when a flagged file exists.
     """
     proc = _git(root, "ls-files", "-v", "-s", "-z")
     if proc is None or proc.returncode != 0:
-        return []
+        return None
     tracked: dict[str, tuple[str, str, str]] = {}
     for entry in proc.stdout.split("\0"):
         match = _INDEX_ENTRY.fullmatch(entry)
         if match and match.group(4) == "0":
             tracked[match.group(5)] = (match.group(1), match.group(2), match.group(3))
     if not tracked:
-        return []
-    seen = set(changed)
-    hidden: list[str] = []
+        return None
+    hidden: dict[str, str] = {}
     to_hash: list[str] = []
     for rel, (tag, mode, object_id) in tracked.items():
         flagged = tag.islower() or tag == "S"
-        if not flagged or rel in seen or not (is_protected(rel) or SIGNED_DOC.match(rel)):
+        if not flagged or not (is_protected(rel) or SIGNED_DOC.match(rel)):
             continue
         path = root / rel
         if mode == "160000" or "\n" in rel:
             continue
         if mode == "120000" and path.is_symlink():
-            if _blob_id(os.readlink(path).encode("utf-8", "surrogateescape"), len(object_id)) != (
-                object_id
-            ):
-                hidden.append(rel)
+            link = _blob_id(os.readlink(path).encode("utf-8", "surrogateescape"), len(object_id))
+            if link != object_id:
+                hidden[rel] = link
         elif not path.exists():
             if tag.upper() != "S":
-                hidden.append(rel)
+                hidden[rel] = "missing"
         else:
             to_hash.append(rel)
     if to_hash:
@@ -936,10 +1135,12 @@ def hidden_changes(root: Path, changed: list[str]) -> list[str]:
         )
         hashes = out.decode("ascii", "replace").split() if out else []
         if len(hashes) == len(to_hash):
-            hidden += [
-                rel for rel, now in zip(to_hash, hashes, strict=True) if now != tracked[rel][2]
-            ]
-    known = {rel.casefold() for rel in tracked} | {rel.casefold() for rel in changed}
+            hidden.update(
+                (rel, now)
+                for rel, now in zip(to_hash, hashes, strict=True)
+                if now != tracked[rel][2]
+            )
+    known = {rel.casefold() for rel in tracked}
     directories = {""}
     for rel in tracked:
         parts = rel.split("/")[:-1]
@@ -952,15 +1153,13 @@ def hidden_changes(root: Path, changed: list[str]) -> list[str]:
         for name in names:
             rel = f"{directory}/{name}" if directory else name
             if _verifies_locally(rel) and rel.casefold() not in known:
-                hidden.append(rel)
-    return sorted(set(hidden))
+                hidden[rel] = _digest(root / rel)
+    return hidden
 
 
 def changed_protected_files(root: Path) -> list[str]:
     """Protected files changed since HEAD (the deterministic check behind the Bash heuristics)."""
-    changed = changed_files(root)
-    changed += hidden_changes(root, changed)
-    protected, tables = _protected_changes(root, changed, staged=False)
+    protected, tables = _protected_changes(root, changed_files(root), staged=False)
     return protected + ([PYPROJECT] if tables else [])
 
 
@@ -991,20 +1190,35 @@ def changed_documents(root: Path, changed: list[str]) -> tuple[list[str], list[s
     return unmarked, signed
 
 
-def check_post_bash(root: Path) -> str | None:
-    """What the working tree holds that an agent may not change, or None (also run by Stop)."""
+def _whose(undo: str) -> str:
+    """Both routes, always: the change may be the human's (he ran `rumbo update`, or edited the
+    file, and has not committed yet), and the agent must never be told to undo that."""
+    return (
+        f" If you made this change, revert it ({undo}) and ask the human to make it; if the "
+        "human made it (for example `rumbo update`), ask them to commit it and do not revert it."
+    )
+
+
+def check_post_bash(root: Path, hidden: tuple[str, ...] = ()) -> str | None:
+    """What the working tree holds that an agent may not change, or None (also run by Stop).
+
+    `hidden`: paths `git status` does not list, which the caller found to have appeared or
+    changed while a shell command ran (`check_post_shell`). A repository with no commit on any
+    ref has nothing to protect yet (the harness `rumbo init` just wrote is all untracked there),
+    as in the git hook.
+    """
     changed = changed_files(root)
-    hidden = hidden_changes(root, changed)
-    everything = changed + hidden
+    unseen = [rel for rel in hidden if rel not in changed]
+    everything = changed + unseen
     touched, tables = _protected_changes(root, everything, staged=False)
     unmarked, signed = changed_documents(root, everything)
     reasons: list[str] = []
     if touched:
         reasons.append(
             "protected file(s) changed since the last commit: "
-            + ", ".join(f + HIDDEN if f in hidden else f for f in touched)
-            + ". Revert them (git checkout -- <file>, or delete the new file) and ask the human "
-            "to make that change; the agent does not modify the harness."
+            + ", ".join(f + HIDDEN if f in unseen else f for f in touched)
+            + "."
+            + _whose("git checkout -- <file>, or delete the new file")
         )
     if tables:
         reasons.append(
@@ -1012,26 +1226,26 @@ def check_post_bash(root: Path) -> str | None:
                 tables,
                 "changed since the last commit",
                 f"git checkout -- {PYPROJECT}, then repeat the uv command if there was one",
+                may_be_the_humans=True,
             )
         )
     if unmarked:
         reasons.append(
             "the template mark was removed since the last commit from: "
             + ", ".join(unmarked)
-            + ". Only the human removes it; restore the first line (git checkout -- <file>), or "
-            "ask the human to commit the signature if they made it."
+            + ". Only the human removes it. If you removed it, restore the first line (git "
+            "checkout -- <file>); if the human did, ask them to commit the signature and do not "
+            "revert it."
         )
     if signed:
-        reasons.append(
-            _signed_reason(", ".join(signed))
-            + " Revert the change (git checkout -- <file>), or ask the human to commit it if "
-            "they made it."
-        )
-    if hidden and reasons:
+        reasons.append(_signed_reason(", ".join(signed)) + _whose("git checkout -- <file>"))
+    if unseen and reasons:
         reasons.append(
             "Some of them are hidden from git status by an index flag (skip-worktree, "
-            "assume-unchanged) or by an ignore rule: undo that too."
+            "assume-unchanged) or by an ignore rule."
         )
+    if reasons and not has_commits(root):
+        return None
     return " ".join(reasons) or None
 
 
@@ -1053,29 +1267,75 @@ def _where(root: Path) -> tuple[Path | None, str | None]:
     return root / lines[0], lines[1] if _SHA.fullmatch(lines[1]) else None
 
 
-def _load_state(state_file: Path | None) -> dict[str, Any]:
+UNVERIFIED = "unverified"  # state key: what was on disk could not be decoded; Stop verifies
+_RETRY_PAUSES = (0.0, 0.01, 0.03, 0.08, 0.2)  # seconds before each attempt at the state file
+_MAX_STATE = 1_000_000  # bytes; the state is a few hundred
+
+
+def _load_state(state_file: Path | None) -> dict[str, Any] | None:
+    """The guard's memory: {} when there is none yet, None when it exists and cannot be read.
+
+    Parallel hooks (three shell calls in one message) meet on this file, and on Windows a file
+    that another process is replacing cannot be opened: the read is retried. A state that stays
+    unreadable is unknown, not empty: the caller reports nothing from it and saves nothing over
+    it. A state that is read but cannot be decoded (garbage, hostile nesting, not an object) is
+    a state that says only `unverified`: the next save repairs the file, and Stop verifies.
+    """
     if state_file is None:
         return {}
+    raw: bytes | None = None
+    for pause in _RETRY_PAUSES:
+        time.sleep(pause)
+        try:
+            raw = state_file.read_bytes()
+            break
+        except FileNotFoundError:
+            return {}
+        except OSError:
+            continue
+    if raw is None:
+        return None
     try:
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return state if isinstance(state, dict) else {}
+        state = json.loads(raw.decode("utf-8")) if len(raw) <= _MAX_STATE else None
+    except (ValueError, RecursionError):
+        state = None
+    return state if isinstance(state, dict) else {UNVERIFIED: True}
 
 
-def _save_state(state_file: Path | None, state: dict[str, Any]) -> None:
-    if state_file is None:
+def _update_state(state_file: Path | None, changes: dict[str, Any]) -> None:
+    """Reads the state again, applies `changes` (None removes a key) and replaces the file.
+
+    Each hook changes only its own keys on a fresh copy, so a parallel hook's keys survive (the
+    green HEAD above all). Nothing is written over a state that could not be read. The replace
+    is retried while another process holds the file; the temporary file never stays behind.
+    """
+    state = _load_state(state_file)
+    if state_file is None or state is None:
         return
-    scratch = state_file.with_name(f"{state_file.name}.{os.getpid()}.tmp")
+    for key, value in changes.items():
+        if value is None:
+            state.pop(key, None)
+        else:
+            state[key] = value
+    scratch = state_file.with_name(f"{state_file.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         scratch.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(scratch, state_file)
+        for pause in _RETRY_PAUSES:
+            time.sleep(pause)
+            try:
+                os.replace(scratch, state_file)
+                break
+            except PermissionError:
+                continue
     except OSError:
         pass  # a read-only git directory: the guard works without memory
+    finally:
+        with contextlib.suppress(OSError):
+            scratch.unlink(missing_ok=True)
 
 
-def _recorded(state: dict[str, Any], key: str) -> str | None:
-    value = state.get(key)
+def _recorded(state: dict[str, Any] | None, key: str) -> str | None:
+    value = state.get(key) if state else None
     return value if isinstance(value, str) and _SHA.fullmatch(value) else None
 
 
@@ -1098,16 +1358,14 @@ def _local_settings(root: Path) -> str:
 
 
 def record_pre_shell(root: Path) -> None:
-    """Before a shell command: remember HEAD and the local settings (ADR-0024)."""
+    """Before a shell command: remember HEAD, the local settings and the files `git status`
+    cannot see (ADR-0024). What is there now is not the command's doing."""
     state_file, head = _where(root)
     if state_file is None:
         return
-    state = _load_state(state_file)
-    state.pop("head", None)
-    if head:
-        state["head"] = head
-    state["local"] = _local_settings(root)
-    _save_state(state_file, state)
+    _update_state(
+        state_file, {"head": head, "local": _local_settings(root), "hidden": hidden_files(root)}
+    )
 
 
 def _judge_documents(
@@ -1178,31 +1436,37 @@ def check_commits(root: Path, old: str, new: str) -> str | None:
 
 
 def check_post_shell(root: Path) -> str | None:
-    """After a shell command: what moved HEAD, what changed in the local settings, and the
-    working tree (`check_post_bash`). Each finding is reported once; the state is then renewed.
+    """After a shell command: what moved HEAD, what changed in the local settings, what
+    appeared or changed where `git status` does not look, and the working tree
+    (`check_post_bash`). The first three are judged against what `record_pre_shell` wrote, are
+    reported once, and are silent without a baseline (the first call ever, an unreadable state):
+    a file that was there before the command is not the command's. The state is then renewed.
     """
     state_file, head = _where(root)
-    state = _load_state(state_file)
+    state = _load_state(state_file) or {}
     reasons: list[str] = []
     before = _recorded(state, "head")
     if before and head and before != head and (moved := check_commits(root, before, head)):
         reasons.append(moved)
-    tree = check_post_bash(root)
+    hidden = hidden_files(root)
+    baseline = state.get("hidden")
+    appeared = (
+        sorted(rel for rel, digest in hidden.items() if baseline.get(rel) != digest)
+        if hidden and isinstance(baseline, dict)
+        else []
+    )
+    tree = check_post_bash(root, tuple(appeared))
     if tree:
         reasons.append(tree)
     local = _local_settings(root)
-    if state.get("local") not in (None, local) and LOCAL_SETTINGS not in (tree or ""):
+    recorded = state.get("local")
+    if isinstance(recorded, str) and recorded != local and LOCAL_SETTINGS not in (tree or ""):
         reasons.append(
             f"{LOCAL_SETTINGS} changed while this command ran (outside its permissions list): "
-            "local settings can switch the hooks off. Restore the file and ask the human to "
-            "make that change."
+            "local settings can switch the hooks off. If you changed it, restore the file and "
+            "ask the human to make that change; if the human did, there is nothing to undo."
         )
-    if state_file is not None:
-        state.pop("head", None)
-        if head:
-            state["head"] = head
-        state["local"] = local
-        _save_state(state_file, state)
+    _update_state(state_file, {"head": head, "local": local, "hidden": hidden})
     return " ".join(reasons) or None
 
 
@@ -1287,6 +1551,11 @@ def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
     last commit or were committed since the last HEAD that a Stop saw green (ADR-0024). That
     HEAD is recorded when the runner is green, and when there is nothing to verify; with no
     recorded value, or one git cannot compare, only the uncommitted code counts, as before.
+
+    A state that exists and cannot be read or decoded is not "no recorded value": what was
+    verified is unknown, so the runner runs whatever changed. Files that `git status` cannot
+    see are not judged here (`check_post_shell` reports them when they change): a file the
+    human keeps ignored must never stand between Stop and the runner.
     """
     if payload.get("stop_hook_active"):
         return 0, ""  # a previous Stop hook already asked for a fix: do not loop
@@ -1298,13 +1567,14 @@ def check_stop(payload: dict[str, Any], root: Path) -> tuple[int, str]:
     state_file, head = _where(root)
     state = _load_state(state_file)
     green = _recorded(state, "green")
+    unknown = state is None or UNVERIFIED in state or ("green" in state and green is None)
     if head and green and green != head:
         committed = _name_status(root, "--relative", green, head) or []
         code_files.update(path for _status, path in committed if path.endswith(CODE_SUFFIXES))
-    code, message = run_verification(root, len(code_files)) if code_files else (0, "")
-    if head and code == 0 and not message and green != head:
-        state["green"] = head
-        _save_state(state_file, state)
+    verify = bool(code_files) or unknown
+    code, message = run_verification(root, len(code_files)) if verify else (0, "")
+    if head and code == 0 and not message and (unknown or green != head):
+        _update_state(state_file, {"green": head, UNVERIFIED: None})
     return code, message
 
 
@@ -1359,6 +1629,25 @@ def check_pre_commit(root: Path) -> str | None:
     staged = staged_changes(root)
     if not staged:
         return None
+    reason = _judge_staged(root, staged)
+    if reason:
+        # Concluding a merge: what is staged exactly as it is in MERGE_HEAD comes from the
+        # merged branch (the human's Makefile on main), not from the agent. Content that is in
+        # neither parent is judged as at any other time. One or two git calls, only on refusal.
+        merging = _git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        in_merge = merging is not None and merging.returncode == 0
+        theirs = _name_status(root, "--cached", "MERGE_HEAD") if in_merge else None
+        if theirs is not None:
+            differing = {path for _status, path in theirs}
+            own = [(status, path) for status, path in staged if path in differing]
+            reason = _judge_staged(root, own) if own else None
+    if reason and who == "unknown":
+        reason += f"\n({HUMAN_HINT})"
+    return reason
+
+
+def _judge_staged(root: Path, staged: list[tuple[str, str]]) -> str | None:
+    """What an agent may not commit among the staged (status, path) entries, or None."""
     files = [path for _status, path in staged]
     reason: str | None = None
     protected, tables = _protected_changes(root, files, staged=True)
@@ -1389,8 +1678,6 @@ def check_pre_commit(root: Path) -> str | None:
             )
         elif created:
             reason = _created_reason(", ".join(created))
-    if reason and who == "unknown":
-        reason += f"\n({HUMAN_HINT})"
     return reason
 
 

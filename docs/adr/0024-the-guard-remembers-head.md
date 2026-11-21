@@ -40,10 +40,15 @@ Nothing new in the working tree. Standard library only.
 ## Decision and rationale
 - **State.** One small JSON file inside the git directory, at `git rev-parse --git-path
   rumbo-guard-head` (per worktree, never in the working tree, never committed). Keys: `head`
-  (HEAD before the last shell command), `green` (the last HEAD a Stop saw green) and `local`
-  (a digest of `.claude/settings.local.json`).
-- **Before a shell command** (`pre-tool`, every tool of `SHELL_TOOLS`): record HEAD and the
-  digest. One `git rev-parse`.
+  (HEAD before the last shell command), `green` (the last HEAD a Stop saw green), `local`
+  (a digest of `.claude/settings.local.json`) and `hidden` (the protected files `git status`
+  cannot see, each with a digest).
+- **The file is shared by parallel hooks.** Each hook changes its own keys on a fresh copy; a
+  read or a replace that fails is retried. A state that stays unreadable is unknown, not
+  empty: nothing is reported from it, nothing is saved over it, and Stop verifies whatever
+  changed. A state that cannot be decoded is treated the same and repaired by the next save.
+- **Before a shell command** (`pre-tool`, every tool of `SHELL_TOOLS`): record HEAD, the
+  digest and the hidden files. One `git rev-parse` and one `git ls-files`.
 - **After it** (`post-tool`): if HEAD is not the recorded one, judge `git diff --no-renames
   --name-status -z <old> <new>` by the rules of a staged change: protected files (ADR-0023), the
   tables of `pyproject.toml` from the blobs of the two commits (ADR-0019), signed documents
@@ -57,18 +62,28 @@ Nothing new in the working tree. Standard library only.
   `green` and HEAD. `green` is written when the runner is green, and when there was nothing to
   verify. With no recorded value, or one git cannot compare, Stop records HEAD and behaves as
   before. A red run does not move `green`: the next Stop verifies again.
-- **What `git status` cannot see** is looked up directly after each command and at Stop: the
+- **What `git status` cannot see** is looked up directly before and after each command: the
   tracked protected files and signed documents that carry an index flag are hashed against the
   index; the names that change the local verification by existing (the Makefile family,
   `pyproject.toml`, the sensors, the files of ADR-0023) are searched in every directory that
-  holds tracked files. `.env*` files are local by design and are not reported.
-  `.claude/settings.local.json` is reported only when its content outside `permissions`
-  changes while a command runs: the human's "always allow" writes that list at that moment.
+  holds tracked files. Only what appears or changes while the command runs is reported, once:
+  a file that was there before (the human's own ignored `pyrightconfig.json`) never is, and
+  with no baseline the first call records and stays silent. Stop does not judge these files,
+  so one of them can never stand between Stop and the runner. `.env*` files are local by
+  design and are not reported. `.claude/settings.local.json` is reported only when its content
+  outside `permissions` changes while a command runs: the human's "always allow" writes that
+  list at that moment.
+- **No commit yet, and whose change it is.** A repository with no commit on any ref has
+  nothing to protect: the check after a command and Stop report nothing there, like the git
+  hook. Every report about the working tree offers both routes: revert the change if the agent
+  made it; if the human made it (`rumbo update`, an edit by hand), ask them to commit it.
 
 ## Consequences (+/−)
 + A commit that skipped the hook is reported whatever command produced it, with a clean tree.
 + Committing red code no longer hides it from Stop.
-+ The cost is one `git rev-parse` before a command and one or two more git calls after it.
++ The cost is two git calls before a command and three or four after it.
+− A change hidden from `git status` is reported once, after the command that made it; it
+  does not block Stop afterwards, as a visible change to a protected file does.
 − A legitimate pull or checkout that brings the human's change to a protected file produces
   one report the agent has to read and set aside.
 − The state can be rewritten from the shell, like everything in a clone: this layer raises the
@@ -84,6 +99,9 @@ Nothing new in the working tree. Standard library only.
 `tests/test_guard.py::test_a_commit_that_skipped_the_hook_is_judged_after_the_command`,
 `::test_stop_verifies_code_committed_since_the_last_green_head`,
 `::test_protected_files_hidden_from_git_status_are_found`,
-`::test_local_settings_changed_during_a_command_are_reported`.
+`::test_a_hidden_file_that_was_there_before_is_never_reported`,
+`::test_local_settings_changed_during_a_command_are_reported`,
+`::test_a_state_that_cannot_be_read_is_unknown_not_empty`,
+`::test_a_repository_with_no_commit_has_nothing_to_protect_yet`.
 
 ## Reversibility: high

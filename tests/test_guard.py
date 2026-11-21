@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -824,7 +825,7 @@ def test_pyproject_may_change_only_in_its_dependency_tables(
             assert guard.pyproject_change(repo, staged=False) == [path]
             reason = guard.check_post_bash(repo) or ""
             assert f"outside its dependency tables: {path}. " in reason, path
-            assert "protected" in reason and "Restore" in reason and "ask the human" in reason
+            assert "protected" in reason and "restore" in reason and "ask the human" in reason
             assert "project.dependencies" in reason and "tool.uv" in reason  # what may change
     assert guard.changed_protected_files(repo) == ["pyproject.toml"]
     # Stop refuses for the same reason before running the check.
@@ -1478,39 +1479,45 @@ def test_an_orphan_branch_is_not_a_root_commit(repo: Path, monkeypatch: pytest.M
 
 # Covers F-0001.R4 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
 def test_protected_files_hidden_from_git_status_are_found(repo: Path) -> None:
-    """G10: index flags and ignore rules make `git status` blind; the guard looks itself."""
+    """G10: index flags and ignore rules make `git status` blind; the guard looks itself, and
+    reports what appears or changes while a shell command runs (G-3: never what was there)."""
     _commit_documents(repo)
     pyproject = _commit_pyproject(repo)
     _git(repo, "update-index", "--skip-worktree", "pyproject.toml", "specs/0001-query.md")
     _git(repo, "update-index", "--assume-unchanged", "Makefile")
-    assert guard.check_post_bash(repo) is None  # the flags alone change nothing
+    guard.record_pre_shell(repo)
+    assert guard.check_post_shell(repo) is None  # the flags alone change nothing
+    guard.record_pre_shell(repo)
     pyproject.write_text(PYPROJECT_HEAD.replace("line-length = 100", "line-length = 320"), "utf-8")
     (repo / "Makefile").write_text("check: ; true\n", encoding="utf-8")
     (repo / "specs" / "0001-query.md").write_text("# rewritten\n", encoding="utf-8")
     assert _clean(repo)
-    reason = guard.check_post_bash(repo) or ""
+    reason = guard.check_post_shell(repo) or ""
     assert "Makefile (hidden from git status)" in reason
     assert "outside its dependency tables: tool.ruff" in reason
     assert "specs/0001-query.md" in reason and "signed" in reason
-    assert guard.check_stop({}, repo)[0] == guard.BLOCK
+    # Reported once, like the local settings; Stop does not judge what git status cannot see.
+    assert guard.check_post_shell(repo) is None
     # The dependency tables stay free, hidden or not.
+    guard.record_pre_shell(repo)
     pyproject.write_text(UV_ADD, encoding="utf-8")
     _git(repo, "update-index", "--no-assume-unchanged", "Makefile")
     _git(repo, "update-index", "--no-skip-worktree", "specs/0001-query.md")
     _git(repo, "checkout", "--", "Makefile", "specs/0001-query.md")
-    assert guard.check_post_bash(repo) is None
+    assert guard.check_post_shell(repo) is None
     # A new file that an ignore rule hides: what verifies locally is flagged, local files are not.
     (repo / ".git" / "info" / "exclude").write_text(
         "ruff.toml\nGNUmakefile\n.env\n.claude/\nscratch/\n", encoding="utf-8"
     )
+    guard.record_pre_shell(repo)
     for rel in ("ruff.toml", "docs/ruff.toml", "GNUmakefile", ".env", "scratch/ruff.toml"):
         (repo / rel).parent.mkdir(exist_ok=True)
         (repo / rel).write_text("x\n", encoding="utf-8")
     (repo / ".claude").mkdir()
     (repo / ".claude" / "settings.local.json").write_text("{}\n", encoding="utf-8")
     assert _clean(repo)
-    reason = guard.check_post_bash(repo) or ""
-    listed = reason.split("since the last commit: ", 1)[1].split(". Revert", 1)[0]
+    reason = guard.check_post_shell(repo) or ""
+    listed = reason.split("since the last commit: ", 1)[1].split(". If you", 1)[0]
     assert listed == ", ".join(
         f"{rel} (hidden from git status)" for rel in ("GNUmakefile", "docs/ruff.toml", "ruff.toml")
     )
@@ -1796,3 +1803,420 @@ def test_a_command_too_long_to_judge_is_refused_not_timed_out(
     # Past the time budget the answer is a refusal, never silence.
     monkeypatch.setattr(guard, "RULES_BUDGET", -1.0)
     assert "could not be judged" in (guard.check_bash("ls") or "")
+
+
+# ------------------------------------------- the audit of the rewrite (G-1..G-5, F-1)
+NL = "\n"
+HEREDOC_COMMIT = (
+    "git commit -m \"$(cat <<'EOF'"
+    + NL
+    + "feat: thing"
+    + NL
+    + NL
+    + "Body line."
+    + NL
+    + "EOF"
+    + NL
+    + ')"'
+)
+# (the command, whether origin/main's guard blocked it). Measured against origin/main at f6bf966;
+# every form it blocked is blocked, and the two it let through are blocked now as well.
+MULTI_LINE_FORMS: list[tuple[str, bool]] = [
+    (HEREDOC_COMMIT + " --no-verify", True),
+    (HEREDOC_COMMIT + " -n", True),
+    (HEREDOC_COMMIT.replace("commit -m", "commit --no-verify -m"), True),
+    ('git commit -m "feat: thing' + NL + NL + 'Body line." --no-verify', True),
+    ('git commit -m "feat: thing' + NL + NL + 'Body line." -n', True),
+    ("git commit -m x \\" + NL + "  --no-verify", True),
+    ("git commit -m x \\" + NL + "  -n", True),
+    ("git push \\" + NL + "  --force-with-lease \\" + NL + "  origin feature", True),
+    ("git push origin feature \\" + NL + "    -f", True),
+    ("git config \\" + NL + "  core.hooksPath /dev/null", True),
+    ("git \\" + NL + "  -c core.hooksPath=/dev/null \\" + NL + "  commit -m x", True),
+    ("git reset \\" + NL + "  --hard HEAD~1", False),
+    ("SKIP=rumbo-guard \\" + NL + "  git commit -m x", True),
+    ("echo x | tee \\" + NL + "  Makefile", True),
+    ("sed -i 's/a/b/' \\" + NL + "  pyproject.toml", True),
+    ("echo x > \\" + NL + "  Makefile", False),
+    ("git commit -m x `" + NL + "  --no-verify", True),
+    ("git push `" + NL + "  --force origin main", True),
+    ("git commit -m x \\\r\n  --no-verify", True),
+    ("git push origin feature \\\r\n  --force", True),
+    ('git commit -m "subject\r\n\r\nbody" --no-verify', True),
+]
+
+
+# Covers F-0001.R3 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+@pytest.mark.parametrize(("command", "blocked_on_main"), MULTI_LINE_FORMS)
+def test_a_forbidden_flag_on_another_line_is_still_blocked(
+    command: str, blocked_on_main: bool
+) -> None:
+    """G-1: the rules read one simple command at a time, and a simple command does not end at a
+    line break inside quotes, inside `$(...)` or after a continuation. The rewrite stopped at
+    every line break and let all of these through; origin/main blocked the ones marked True."""
+    assert blocked_on_main in (True, False)
+    assert guard.check_bash(command), command
+
+
+# Covers F-0001.R3 and F-0001.R10 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_the_shell_view_joins_what_the_shell_joins_and_nothing_else() -> None:
+    """G-1: separators inside quotes do not end the command either (a `;` in the message hid
+    the flag after it); separate lines stay separate commands, so a script is not one command."""
+    for command in (
+        'git commit -m "feat: a; b" --no-verify',
+        'git commit -m "a | b && c" -n',
+        "git commit -m 'one" + NL + "two; three' --no-verify",
+        'git commit -m "$(printf a; printf b)" --no-verify',
+        'git commit -m "it\'s fine" \\' + NL + " --no-verify",
+        "# it's a comment" + NL + "git commit -m x \\" + NL + " --no-verify",
+        "cat > notes.txt <<'EOF'" + NL + "it's text" + NL + "EOF" + NL + "git push \\" + NL + " -f",
+        'git commit -m "unterminated' + NL + "--no-verify",
+    ):
+        assert guard.check_bash(command), command
+    for command in (
+        "git commit -m x" + NL + "grep -n TODO src/app.py",
+        "git status" + NL + "rm -rf build" + NL + "git log -n 5",
+        "git push origin feature" + NL + "ls -f",
+        "python - <<'EOF'" + NL + "print('git commit')" + NL + "EOF" + NL + "ls -n",
+        "cat > notes.txt <<'EOF'" + NL + "it's text" + NL + "EOF" + NL + "git log -n 3",
+        HEREDOC_COMMIT,
+        HEREDOC_COMMIT + NL + "git push origin feature",
+        "gh pr create --title x --body \"$(cat <<'EOF'"
+        + NL
+        + "## Summary"
+        + NL
+        + "EOF"
+        + NL
+        + ')"',
+    ):
+        assert guard.check_bash(command) is None, command
+
+
+# Covers F-0001.R10 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+@pytest.mark.parametrize(
+    "command",
+    [
+        'git commit -m "chore: rm unused target from Makefile"',
+        "grep -n 'rm -rf' Makefile",
+        "grep -rn 'Remove-Item' .github/",
+        "grep -c 'rm' Makefile",
+        "git log --grep 'mv hooks' -- .git/hooks",
+        'git commit -m "docs: rm -r of old dirs" .',
+    ],
+)
+def test_a_writer_word_inside_an_argument_is_not_a_command(command: str) -> None:
+    """A commit message or a grep pattern that names `rm` and a protected file on one line."""
+    assert guard.check_bash(command) is None
+
+
+# Covers F-0001.R3 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm Makefile",
+        "cd src && rm -f .pre-commit-config.yaml",
+        "sudo rm pyproject.toml",
+        "FORCE=1 rm ruff.toml",
+        "bash -c 'rm Makefile'",
+        "(rm -f .claude/settings.json)",
+        "true; Remove-Item .github\\workflows\\ci.yml",
+        "find . -name x -exec rm Makefile ';'",
+        "echo x | xargs rm -f Makefile",
+        "ls && mv .git/hooks/pre-commit /tmp/x",
+        "foo rm .git/hooks/pre-commit",
+        "echo rm -rf /",
+    ],
+)
+def test_a_writer_at_the_start_of_a_command_is_blocked(command: str) -> None:
+    assert guard.check_bash(command)
+
+
+# Covers F-0001.R4 and F-0001.R5 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_a_state_that_cannot_be_read_is_unknown_not_empty(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-2: parallel hooks collide on the state file on Windows. A failed read used to count as
+    an empty state, which was saved back without the green HEAD: Stop then skipped the check."""
+    monkeypatch.delenv("RUMBO_GUARD_SKIP_CHECK", raising=False)
+    monkeypatch.setattr(guard, "_RETRY_PAUSES", (0.0, 0.0, 0.0))
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "rumbo_check.py").write_text(FAKE_RUNNER, encoding="utf-8")
+    (repo / ".gitignore").write_text("ran.txt\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "chore: the human adds the runner")
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "0")
+    assert guard.check_stop({}, repo) == (0, "")
+    state = repo / _git(repo, "rev-parse", "--git-path", "rumbo-guard-head").strip()
+    green = json.loads(state.read_text(encoding="utf-8"))["green"]
+    ran = repo / "ran.txt"
+    read_bytes = Path.read_bytes
+    failures = {"left": 0}
+
+    def locked(self: Path) -> bytes:
+        if self.name == state.name and failures["left"] > 0:
+            failures["left"] -= 1
+            raise PermissionError(13, "sharing violation")
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", locked)
+    # A read that fails once is retried: nothing is lost.
+    failures["left"] = 1
+    guard.record_pre_shell(repo)
+    assert json.loads(read_bytes(state))["green"] == green
+    # A read that keeps failing: the hooks neither report nor save over what they could not read.
+    failures["left"] = 10**6
+    guard.record_pre_shell(repo)
+    assert guard.check_post_shell(repo) is None
+    assert json.loads(read_bytes(state))["green"] == green
+    # Stop with an unreadable state verifies (nothing changed, and the runner still runs).
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "1")
+    code, message = guard.check_stop({}, repo)
+    assert code == guard.BLOCK and "rumbo check is red" in message and ran.exists()
+    failures["left"] = 0
+    # A replace that fails (the other hook holds the file) is retried, and no temp file stays.
+    replace = os.replace
+    refusals = {"left": 2}
+
+    def busy(source: object, target: object) -> None:
+        if refusals["left"] > 0:
+            refusals["left"] -= 1
+            raise PermissionError(13, "access denied")
+        replace(source, target)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(guard.os, "replace", busy)
+    state.write_text(json.dumps({"green": green}), encoding="utf-8")
+    guard.record_pre_shell(repo)
+    after = json.loads(read_bytes(state))
+    assert after["green"] == green and after["head"] == green
+    refusals["left"] = 10**6
+    guard.record_pre_shell(repo)
+    assert guard.check_post_shell(repo) is None
+    assert json.loads(read_bytes(state))["green"] == green
+    assert [p.name for p in state.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+# Covers F-0001.R5 and F-0001.R11 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+@pytest.mark.parametrize(
+    "content",
+    [b"\xff\xfe\x00garbage", b"", b"[]", b"[" * 100_000, b'{"green": 5, "head": {}}', b'"text"'],
+)
+def test_a_hostile_state_file_blocks_nothing_and_makes_stop_verify(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], content: bytes
+) -> None:
+    """G-2: a state that cannot be decoded (deeply nested JSON raised RecursionError and every
+    shell call was refused) is unknown: no report, no refusal, and Stop runs the check."""
+    monkeypatch.delenv("RUMBO_GUARD_SKIP_CHECK", raising=False)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "rumbo_check.py").write_text(FAKE_RUNNER, encoding="utf-8")
+    (repo / ".gitignore").write_text("ran.txt\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "chore: the human adds the runner")
+    state = repo / _git(repo, "rev-parse", "--git-path", "rumbo-guard-head").strip()
+    shell = {"tool_name": "Bash", "tool_input": {"command": "git status"}}
+    for event in ("pre-tool", "post-tool"):
+        state.write_bytes(content)
+        assert _hook(monkeypatch, event, shell) == 0, event
+    assert capsys.readouterr() == ("", "")
+    state.write_bytes(content)
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "1")
+    assert guard.check_stop({}, repo)[0] == guard.BLOCK and (repo / "ran.txt").exists()
+    # Green heals it: the state is valid again and the next Stop has nothing to verify.
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "0")
+    assert guard.check_stop({}, repo) == (0, "")
+    (repo / "ran.txt").unlink()
+    assert guard.check_stop({}, repo) == (0, "") and not (repo / "ran.txt").exists()
+    assert (
+        json.loads(state.read_text(encoding="utf-8"))["green"]
+        == _git(repo, "rev-parse", "HEAD").strip()
+    )
+
+
+# Covers F-0001.R4 and F-0001.R5 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_parallel_shell_hooks_keep_the_green_head(repo: Path) -> None:
+    """G-2: three hooks at once, as when the agent sends three shell calls in one message."""
+    import threading
+
+    state = repo / _git(repo, "rev-parse", "--git-path", "rumbo-guard-head").strip()
+    green = _git(repo, "rev-parse", "HEAD").strip()
+    state.write_text(json.dumps({"green": green}), encoding="utf-8")
+    errors: list[Exception] = []
+
+    def hooks() -> None:
+        try:
+            for _ in range(8):
+                guard.record_pre_shell(repo)
+                assert guard.check_post_shell(repo) is None
+        except Exception as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=hooks) for _ in range(3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert json.loads(state.read_text(encoding="utf-8"))["green"] == green
+    assert [p.name for p in state.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+# Covers F-0001.R4 and F-0001.R5 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_a_hidden_file_that_was_there_before_is_never_reported(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-3: the human's own ignored pyrightconfig.json was reported after every command and at
+    every Stop, which returned before the runner; and the agent may not remove the file."""
+    monkeypatch.delenv("RUMBO_GUARD_SKIP_CHECK", raising=False)
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "rumbo_check.py").write_text(FAKE_RUNNER, encoding="utf-8")
+    (repo / ".gitignore").write_text("ran.txt\npyrightconfig.json\nuv.toml\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "chore: the editor configuration stays local")
+    (repo / "pyrightconfig.json").write_text("{}\n", encoding="utf-8")
+    (repo / "uv.toml").write_text("offline = true\n", encoding="utf-8")
+    assert _clean(repo)
+    # The first call ever has no baseline: it records what is there and stays silent.
+    assert guard.check_post_shell(repo) is None
+    for _ in range(2):
+        guard.record_pre_shell(repo)
+        assert guard.check_post_shell(repo) is None
+    assert guard.check_post_bash(repo) is None
+    # Stop goes on to the runner: red code is refused for being red, not for that file.
+    (repo / "app.py").write_text("x = 'red'\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_CHECK_EXIT", "1")
+    code, message = guard.check_stop({}, repo)
+    assert code == guard.BLOCK and "rumbo check is red" in message and (repo / "ran.txt").exists()
+    assert "pyrightconfig.json" not in message
+    # What changes or appears while a command runs is the command's, and is reported once.
+    guard.record_pre_shell(repo)
+    (repo / "pyrightconfig.json").write_text('{"typeCheckingMode": "off"}\n', encoding="utf-8")
+    reason = guard.check_post_shell(repo) or ""
+    assert "pyrightconfig.json (hidden from git status)" in reason and "uv.toml" not in reason
+    assert guard.check_post_shell(repo) is None
+    # A change between two commands is not a command's: the human edited their own file.
+    (repo / "uv.toml").write_text("offline = false\n", encoding="utf-8")
+    guard.record_pre_shell(repo)
+    assert guard.check_post_shell(repo) is None
+
+
+# Covers F-0001.R4 and F-0001.R10 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_a_repository_with_no_commit_has_nothing_to_protect_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-4: after `git init` and `rumbo init`, every post-tool and Stop told the agent to revert
+    or delete the harness. The first commit is exempt in the git hook; so is the tree before it."""
+    _quiet_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("RUMBO_GUARD_SKIP_CHECK", "1")
+    root = tmp_path / "fresh"
+    (root / ".claude").mkdir(parents=True)
+    (root / "specs").mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    for rel in ("Makefile", "pyproject.toml", ".claude/settings.json", "specs/0001-x.md"):
+        (root / rel).write_text("x = 1\n", encoding="utf-8")
+    assert guard.check_post_bash(root) is None
+    guard.record_pre_shell(root)
+    assert guard.check_post_shell(root) is None
+    assert guard.check_stop({}, root) == (0, "")
+    _git(root, "add", "-A")
+    assert guard.check_post_bash(root) is None and guard.check_stop({}, root) == (0, "")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "t")
+    _git(root, "commit", "-qm", "chore: initial RUMBO harness")
+    # From the first commit on the tree is guarded, on an orphan branch too.
+    (root / "Makefile").write_text("x = 2\n", encoding="utf-8")
+    assert "Makefile" in (guard.check_post_bash(root) or "")
+    assert guard.check_stop({}, root)[0] == guard.BLOCK
+    _git(root, "checkout", "-q", "--orphan", "other")
+    assert "Makefile" in (guard.check_post_bash(root) or "")
+
+
+# Covers F-0001.R7 and F-0001.R14 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_an_agent_concludes_a_merge_that_brings_the_humans_protected_changes(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G-5: `git merge main` with a conflict in the code, where main changed the Makefile and
+    signed a document. What is staged as it is in MERGE_HEAD comes from the merged branch."""
+    _commit_documents(repo)
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "app.py").write_text("x = 'feature'\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "feat: the agent's work")
+    _git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("x = 'main'\n", encoding="utf-8")
+    (repo / "Makefile").write_text("check: ; echo release\n", encoding="utf-8")
+    (repo / "specs" / "0001-query.md").write_text("# F-0001, amended\n", encoding="utf-8")
+    (repo / "docs" / "brief.md").write_text("# Brief, signed\n", encoding="utf-8")
+    (repo / "docs" / "adr" / "0007-new.md").write_text("# ADR-0007, signed\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "chore: the human's release")
+    _git(repo, "checkout", "-q", "feature")
+    merge = subprocess.run(["git", "merge", "main"], cwd=repo, capture_output=True, check=False)
+    assert merge.returncode != 0 and (repo / ".git" / "MERGE_HEAD").is_file()
+    (repo / "app.py").write_text("x = 'merged'\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert guard.check_pre_commit(repo) is None
+    # Content that is in neither parent is the agent's, during a merge like at any other time.
+    (repo / "Makefile").write_text("check: ; true\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    assert "protected file(s) staged: Makefile. " in (guard.check_pre_commit(repo) or "")
+    _git(repo, "checkout", "MERGE_HEAD", "--", "Makefile")
+    (repo / "specs" / "0001-query.md").write_text("# F-0001, the agent's\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    reason = guard.check_pre_commit(repo) or ""
+    assert "specs/0001-query.md" in reason and "signed" in reason and "Makefile" not in reason
+    _git(repo, "checkout", "MERGE_HEAD", "--", "specs/0001-query.md")
+    assert guard.check_pre_commit(repo) is None
+    # Without a merge in progress the same staged content is refused.
+    _git(repo, "merge", "--abort")
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    (repo / "Makefile").write_text("check: ; echo release\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    assert "Makefile" in (guard.check_pre_commit(repo) or "")
+
+
+# Covers F-0001.R4, F-0001.R13 and F-0001.R14.
+def test_the_agent_is_never_told_to_undo_what_may_be_the_humans_work(repo: Path) -> None:
+    """F-1: after the human runs `rumbo update`, the refreshed files differ from HEAD until he
+    commits. The agent's next command was told to revert them; every reason now offers both
+    routes, and names the human's first-hand."""
+    _commit_documents(repo)
+    pyproject = _commit_pyproject(repo)
+    assert guard.check_post_bash(repo) is None
+    (repo / "Makefile").write_text("check: ; echo updated\n", encoding="utf-8")
+    protected = guard.check_post_bash(repo) or ""
+    pyproject.write_text(PYPROJECT_HEAD.replace("line-length = 100", "line-length = 88"), "utf-8")
+    (repo / "docs" / "brief.md").write_text("# Brief, signed\n", encoding="utf-8")
+    (repo / "specs" / "0001-query.md").write_text("# F-0001, amended\n", encoding="utf-8")
+    everything = guard.check_post_bash(repo) or ""
+    assert "Revert them" not in everything
+    assert "If you made this change, revert it" in protected
+    assert "if the human made it (for example `rumbo update`)" in protected
+    assert "ask them to commit it and do not revert it" in protected
+    subjects = ("protected file(s) changed", "outside its dependency tables")
+    subjects += ("template mark was removed", "signed by the human")
+    assert all(subject in everything for subject in subjects)
+    assert everything.count("do not revert it") == 4
+
+
+# Covers F-0001.R1 and F-0001.R14 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_a_signed_document_is_signed_whatever_the_case_of_its_path(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a case-insensitive file system `SPECS/0001-x.md` opens the signed spec. Windows
+    resolves the path to its real case; macOS keeps the typed one, so the rule compares without
+    case and looks the committed name up by what the directory lists."""
+    _commit_documents(repo)
+    assert guard.SIGNED_DOC.match("SPECS/0001-Query.MD") and guard.SIGNED_DOC.match(
+        "Docs/ADR/0001-x.md"
+    )
+    assert not guard.SIGNED_DOC.match("specs/0000-template.md")
+    if not (repo / "SPECS").exists():
+        pytest.skip("a case-sensitive file system: SPECS/ is another directory")
+    # What POSIX `resolve()` returns on macOS: the path as typed.
+    monkeypatch.setattr(guard, "_candidates", lambda file_path, root: ([root / file_path], True))
+    for typed in ("SPECS/0001-query.md", "specs/0001-QUERY.md", "Docs/Adr/0001-Storage.MD"):
+        reason = guard.check_edit("Edit", _edit(typed, "# ", "## "), repo) or ""
+        assert "signed by the human" in reason, typed
+    assert guard.check_edit("Edit", _edit("SPECS/0002-draft.md", "# ", "## "), repo) is None
+    new = {"file_path": "SPECS/0009-new.md", "content": "# F-0009\n"}
+    assert "ADR-0025" in (guard.check_edit("Write", new, repo) or "")
