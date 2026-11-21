@@ -278,25 +278,17 @@ _DEFINITION = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _FUNCTION = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
-def _attr_chain(node: ast.AST) -> str:
+def _attr_chain(node: ast.AST, whole: bool = False) -> str:
+    """``a.b.c`` for a name or an attribute of a name. For an attribute of anything else, its
+    attributes (``f().b.c`` gives ``b.c``), or ``""`` with ``whole``."""
     parts: list[str] = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
     if isinstance(node, ast.Name):
         parts.append(node.id)
-    return ".".join(reversed(parts))
-
-
-def _full_chain(node: ast.AST) -> str:
-    """``a.b.c`` for a name or an attribute of a name; ``""`` for anything else."""
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if not isinstance(node, ast.Name):
+    elif whole:
         return ""
-    parts.append(node.id)
     return ".".join(reversed(parts))
 
 
@@ -426,7 +418,7 @@ def _assigned_value(stmt: ast.stmt, name: str) -> ast.expr | None:
 
 def _bound_names(stmt: ast.stmt) -> list[str]:
     """The names a statement binds in its scope (definitions, imports and assignments)."""
-    if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+    if isinstance(stmt, _DEFINITION):
         return [stmt.name]
     if isinstance(stmt, ast.Import | ast.ImportFrom):
         return [alias.asname or alias.name.split(".", 1)[0] for alias in stmt.names]
@@ -631,12 +623,12 @@ class _Definition:
 def _index_module(path: str, tree: ast.Module) -> _Module:
     module = _Module(path, tree)
     for stmt in tree.body:
-        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+        if isinstance(stmt, _FUNCTION):
             module.functions[stmt.name] = stmt
         elif isinstance(stmt, ast.ClassDef):
             module.classes[stmt.name] = stmt
     for stmt in _statements(tree.body):
-        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        if isinstance(stmt, _DEFINITION):
             module.defined[stmt.name] = stmt
         for name in _assigned_names(stmt):
             value = _assigned_value(stmt, name)
@@ -653,7 +645,7 @@ def _index_module(path: str, tree: ast.Module) -> _Module:
                     module.imports[alias.asname or alias.name] = _Import(
                         node.module or "", alias.name, node.level
                     )
-        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        elif isinstance(node, _FUNCTION):
             if node.decorator_list and _is_autouse(node):
                 module.autouse.append(node)
         elif isinstance(node, ast.Assign | ast.AnnAssign):
@@ -685,9 +677,9 @@ def _skip_call(module: _Module, node: ast.AST) -> int:
                 return 0
         elif not (isinstance(func, ast.Name) and func.id in module.imports):
             return 0  # a plain name skips only when it was imported as one that does
-        return int(_canonical(module, _full_chain(func)) in SKIP_CALLS)
+        return int(_canonical(module, _attr_chain(func, whole=True)) in SKIP_CALLS)
     if isinstance(node, ast.Raise) and node.exc is not None:
-        name = _canonical(module, _full_chain(_callee(node.exc)))
+        name = _canonical(module, _attr_chain(_callee(node.exc), whole=True))
         return int(_last(name) == "SkipTest" or name.startswith(("pytest.skip.", "pytest.xfail.")))
     return 0
 
@@ -697,7 +689,7 @@ def _skip_form(module: _Module, node: ast.AST) -> int:
     if isinstance(node, ast.Attribute):
         if node.attr not in MARK_ENDS:
             return 0
-        return int(_canonical(module, _full_chain(node)) in SKIP_MARKS)
+        return int(_canonical(module, _attr_chain(node, whole=True)) in SKIP_MARKS)
     if isinstance(node, ast.Name):
         if node.id not in module.imports:
             return 0
@@ -878,11 +870,7 @@ class _Resolver:
         The helper keeps ``owner``: its ``self`` is still an instance of it.
         """
         for current in self._lineage(owner):
-            methods = {
-                stmt.name: stmt
-                for stmt in current.node.body
-                if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef)
-            }
+            methods = {stmt.name: stmt for stmt in current.node.body if isinstance(stmt, _FUNCTION)}
             if name in methods:
                 return _Helper(current.module, methods[name], owner)
         return None
@@ -912,7 +900,7 @@ class _Resolver:
         for current in self._lineage(owner):
             local: dict[str, tuple[_Module, FunctionNode] | None] = {}
             for stmt in current.node.body:
-                if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+                if isinstance(stmt, _FUNCTION):
                     if stmt.name.startswith(TEST_PREFIX):
                         local[stmt.name] = (current.module, stmt)
                     continue
@@ -939,7 +927,8 @@ class _Resolver:
             called = _callee(value)
             if isinstance(called, ast.Lambda):
                 return module, called
-            return self._origin(module, _full_chain(called), depth + 1) or (module, value)
+            name = _attr_chain(called, whole=True)
+            return self._origin(module, name, depth + 1) or (module, value)
         imported = module.imports.get(head)
         if imported is None:
             return None
@@ -959,7 +948,7 @@ class _Resolver:
     def _alias(self, module: _Module, deco: ast.expr) -> tuple[_Module, ast.expr]:
         """The decorator, or the expression a name of the tests stands for
         (``slow = pytest.mark.slow``), with the module whose imports it is read with."""
-        origin = self._origin(module, _full_chain(_callee(deco)))
+        origin = self._origin(module, _attr_chain(_callee(deco), whole=True))
         if origin is None:
             return module, deco
         home, meant = origin
@@ -974,7 +963,7 @@ class _Resolver:
         names: list[str] = []
         for deco in node.decorator_list:
             called = _callee(deco)
-            chain = _full_chain(called)
+            chain = _attr_chain(called, whole=True)
             origin = self._origin(module, chain)
             if isinstance(called, ast.Lambda):
                 names.append("<lambda>" + LOCAL_DECORATOR)
@@ -1021,7 +1010,7 @@ class _Resolver:
             if conftest is not None and conftest is not module:
                 places.append((conftest, conftest.defined.get(name)))
         for home, node in places:
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and _is_fixture(node):
+            if isinstance(node, _FUNCTION) and _is_fixture(node):
                 return _Helper(home, node)
         return None
 
@@ -1118,7 +1107,7 @@ def _find(module: _Module, resolver: _Resolver) -> _Found:
     while stack:
         body, prefix, owner, conditional, collected = stack.pop()
         for stmt in body:
-            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+            if isinstance(stmt, _FUNCTION):
                 name = f"{prefix}{stmt.name}"
                 if stmt.name.startswith(TEST_PREFIX):
                     found.tests.append(
@@ -1220,7 +1209,7 @@ def _outside_skips(module: _Module) -> int:
     for, a helper or a marker kept in a name do not count: a test has to change to meet them."""
     total = 0
     for stmt in _statements(module.tree.body):
-        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+        if isinstance(stmt, _FUNCTION):
             if stmt.name in SETUP_FUNCTIONS:
                 total += _skips_in(module, stmt.body)
         elif not isinstance(stmt, ast.ClassDef):
@@ -1246,14 +1235,14 @@ def _scope_flags(
         bound.update(name for name in _bound_names(stmt) if name in names)
         if isinstance(stmt, ast.Delete):
             for target in stmt.targets:
-                chain = _full_chain(target)
+                chain = _attr_chain(target, whole=True)
                 if chain in names:
                     flags["del", names[chain]] += 1
                 elif "." in chain and _last(chain).startswith(TEST_PREFIX):
                     flags["del", chain] += 1
         elif isinstance(stmt, ast.Assign):
             for target in stmt.targets:
-                owner, _, name = _full_chain(target).rpartition(".")
+                owner, _, name = _attr_chain(target, whole=True).rpartition(".")
                 if owner in classes and name.startswith(TEST_PREFIX):
                     flags["bound", f"{owner}.{name}"] += 1
     for name, times in bound.items():
@@ -1288,8 +1277,7 @@ def _review_flags(module: _Module, found: _Found) -> Counter[tuple[str, str]]:
     names = {
         stmt.name: stmt.name
         for stmt in module.tree.body
-        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef)
-        and stmt.name.startswith(TEST_PREFIX)
+        if isinstance(stmt, _FUNCTION) and stmt.name.startswith(TEST_PREFIX)
     }
     top = {qualname for qualname, _ in collected if "." not in qualname}
     flags.update(_scope_flags(module.tree.body, {**names, **{c: c for c in top}}, top))
@@ -1297,8 +1285,7 @@ def _review_flags(module: _Module, found: _Found) -> Counter[tuple[str, str]]:
         own = {
             stmt.name: f"{qualname}.{stmt.name}"
             for stmt in owner.node.body
-            if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef)
-            and stmt.name.startswith(TEST_PREFIX)
+            if isinstance(stmt, _FUNCTION) and stmt.name.startswith(TEST_PREFIX)
         }
         flags.update(_scope_flags(owner.node.body, own, set()))
     # `__test__ = False`: in the module, in a class, or on a class from anywhere
@@ -1310,13 +1297,13 @@ def _review_flags(module: _Module, found: _Found) -> Counter[tuple[str, str]]:
                 isinstance(target, ast.Name) for target in _falsy_dunder_test(stmt)
             )
     for target in module.untested:
-        flags["untested", _full_chain(target.value)] += 1
+        flags["untested", _attr_chain(target.value, whole=True)] += 1
     # hooks: the functions of any module (one that `pytest_plugins` names is a plugin), and
     # the `collect_ignore` lists that only a conftest.py has
     in_conftest = posixpath.basename(module.path) == CONFTEST
     for stmt in _statements(module.tree.body):
         hooks = _assigned_names(stmt) if in_conftest else []
-        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+        if isinstance(stmt, _FUNCTION):
             hooks = [stmt.name]
         for hook in hooks:
             flags["hook", hook] += hook in REVIEW_HOOKS
@@ -1369,7 +1356,8 @@ def _setting(pyproject: str | None, key: str) -> object:
     if pyproject is None:
         return None
     try:
-        data = tomllib.loads(pyproject)
+        # a byte order mark (PowerShell 5) is refused by tomllib and accepted by the runner
+        data = tomllib.loads(pyproject.removeprefix("\ufeff"))
     except ValueError:  # not TOML
         return None
     tool = data.get("tool")

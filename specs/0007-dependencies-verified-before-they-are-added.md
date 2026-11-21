@@ -29,30 +29,12 @@ is on 2026-11-21, and the last section lists what that code does not handle.
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
      by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
-In `tests/test_cli.py` (marked *cli*; the tests that came with the code) and
-`tests/test_verify_dep.py` (the rest; written with this spec and with ADR-0028). Each test carries
-its requirement id in a comment; the table names the most direct ones, not every one.
-No test leaves this machine: the *cli* tests replace `pypi_info` and `osv_vulnerabilities` and
-serve an index on `127.0.0.1`; the others replace `cli._open` with a fake that answers by URL
-(and `urlopen` with a function that fails the test), or, with the `serve` fixture, go through the
-real `urllib` to servers on `127.0.0.1` with PyPI and OSV stubbed.
-
-| Requirement | Tests |
-|---|---|
-| R1 | `test_verify_dep_handles_bad_json_and_typos` (*cli*), `test_a_name_pypi_answers_404_for_does_not_exist` |
-| R2 | `test_first_release_is_the_earliest_upload_and_under_90_days_it_warns`, `test_package_facts_are_printed_and_no_repository_or_another_canonical_name_warns`, `test_text_from_the_network_is_printed_without_control_characters_and_bounded` |
-| R3 | `test_verify_dep_handles_bad_json_and_typos` (*cli*), `test_look_alikes_are_popular_names_within_two_edits_of_the_normalised_name`, `test_a_look_alike_unknown_to_pypi_still_warns_when_an_index_is_used` |
-| R4 | `test_vulnerabilities_known_to_osv_are_counted_as_a_warning`, `test_osv_out_of_reach_is_said_and_does_not_change_the_exit_code`, `test_an_osv_answer_of_an_unexpected_shape_counts_as_not_reachable`, `test_the_cap_applies_to_pypi_and_to_osv` |
-| R5 | `test_index_resolution_order` (*cli*), `test_verify_dep_resolves_the_index_from_the_environment_and_the_flag_wins` (*cli*) |
-| R6 | `test_verify_dep_reads_a_pep691_index` (*cli*), `test_verify_dep_reads_a_pep503_html_index` (*cli*), `test_verify_dep_reports_a_404_as_absent_from_the_index` (*cli*), `test_simple_api_helpers` (*cli*), `test_with_an_index_the_normalised_name_goes_there_first_and_pypi_lines_are_labelled`, `test_a_look_alike_unknown_to_pypi_still_warns_when_an_index_is_used`, `test_a_200_answer_that_is_not_a_package_page_does_not_confirm_the_name`, `test_a_package_page_without_files_exists_and_is_flagged_for_review`, `test_latest_follows_the_order_of_pep_440` |
-| R7 | `test_verify_dep_never_prints_the_index_credentials` (*cli*), `test_simple_api_helpers` (*cli*), `test_an_index_that_times_out_is_reported_without_its_credentials`, `test_index_credentials_are_never_sent_over_plain_http`, `test_a_redirect_to_another_port_never_receives_the_credentials`, `test_a_loopback_index_is_never_reached_through_the_proxy_of_the_environment` |
-| R8 | `test_verify_dep_network_error` (*cli*), `test_verify_dep_handles_bad_json_and_typos` (*cli*), `test_verify_dep_never_prints_the_index_credentials` (*cli*), `test_pypi_that_cannot_be_read_is_exit_2_with_a_message_not_a_traceback`, `test_a_pypi_document_with_missing_fields_is_shown_as_unknown`, `test_an_index_that_times_out_is_reported_without_its_credentials`, `test_an_index_url_that_is_not_http_is_refused_without_a_request`, `test_only_the_package_name_travels_to_pypi_and_osv_over_https`, `test_a_server_that_never_finishes_is_cut_by_the_deadline`, `test_a_body_larger_than_the_cap_is_refused_and_one_cut_short_is_not_a_page`, `test_no_shape_of_an_index_value_prints_its_password` |
-| R9 | `test_only_the_package_name_travels_to_pypi_and_osv_over_https`, `test_a_name_is_quoted_into_one_path_segment_and_plain_http_is_refused`, `test_with_an_index_the_normalised_name_goes_there_first_and_pypi_lines_are_labelled`, `test_an_index_url_that_is_not_http_is_refused_without_a_request`, `test_urlopen_is_called_only_by_the_two_verify_dep_lookups`, `test_an_argument_that_is_not_a_package_name_is_refused_and_the_others_go_on`, `test_extras_and_a_version_specifier_are_split_off_and_the_bare_name_is_verified`, `test_a_redirect_away_from_the_index_drops_the_credentials_for_good` |
-| R10 | `test_exit_code_is_the_worst_verdict_and_the_reminder_closes_every_run`, `test_an_argument_that_is_not_a_package_name_is_refused_and_the_others_go_on` |
-
-`test_verify_dep_network_error` passes `my package`, which R9 now refuses before `pypi_info` is
-called: it still ends in exit 2, but no longer through R8. No end-to-end run: `scripts/e2e.sh`
-does not call `verify-dep`, and no test queries the real PyPI, OSV or a real private index.
+In `tests/test_verify_dep.py` and `tests/test_cli.py`; each test carries its requirement id in a
+comment. `uv run rumbo trace` prints which tests cover each requirement.
+No test leaves this machine: the tests replace `pypi_info` and `osv_vulnerabilities`, replace
+`cli._open` with a fake that answers by URL, or go through the real `urllib` to servers on
+`127.0.0.1` with PyPI and OSV stubbed. No end-to-end run: `scripts/e2e.sh` does not call
+`verify-dep`, and no test queries the real PyPI, OSV or a real private index.
 
 ## Data contracts and ownership
 <!-- What two sessions (or two agents) must agree on BEFORE writing code. Omitting explicit data

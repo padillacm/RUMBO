@@ -99,7 +99,7 @@ and not run, `--full`. `tests/test_cli.py`: `rumbo init --adopt --yes` on a tmp 
 package, a `test/` directory and an existing workflow; `rumbo check --full` passes through.
 The e2e script adopts a small pre-existing project and requires the runner, `rumbo doctor` and
 `rumbo gate G4 --no-run` to pass. The repository's own `pyproject.toml` carries `[tool.rumbo]`
-with `kind = "cli"`, `layout = "flat"`, and `tests/test_fitness.py` asserts `rumbo doctor` passes
+with `kind = "cli"`, `layout = "flat"`, and `tests/test_self_adoption.py::test_rumbo_doctor_passes_on_the_repository_itself` asserts `rumbo doctor` passes
 on the repository itself.
 
 ## Reversibility: high

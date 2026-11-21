@@ -28,21 +28,8 @@ of its own; the design rationale is `docs/method.md`, section 3.
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
      by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
-In `tests/test_tour.py`, except the ones marked `cli`, which are in `tests/test_cli.py`; each test
-carries its requirement id in a comment, except `test_eval_add_and_tour_write_lf` (F-0004.R7).
-
-| Requirement | Tests |
-|---|---|
-| R1 | `test_commits_are_listed_oldest_first_and_head_limits_the_range`, `test_a_message_with_a_separator_character_does_not_hide_its_commit`, `test_tour` (cli), `test_tour_falls_back_to_a_known_base` (cli) |
-| R2 | `test_errors_exit_2_with_a_message_and_write_nothing`, `test_tour` (cli), `test_tour_falls_back_to_a_known_base` (cli) |
-| R3 | `test_guide_opens_with_a_header_orders_each_section_and_closes_with_the_checklist`, `test_budget_excludes_lockfiles_and_flags_a_commit_over_300_lines`, `test_paths_and_refs_are_quoted_in_the_commands_the_reviewer_will_paste` |
-| R4 | `test_kind_comes_from_the_prefix_and_otherwise_from_the_files`, `test_tour` (cli) |
-| R5 | `test_risk_hotspots_follow_the_path_rules`, `test_risk_hotspots_name_deleted_tests_removed_asserts_and_new_skips`, `test_removed_asserts_are_found_whatever_the_file_the_commit_or_the_git_configuration`, `test_asserts_of_a_deleted_test_file_are_not_blamed_on_the_file_before_it`, `test_what_a_test_file_is_follows_the_project_and_pytest`, `test_tour` (cli) |
-| R6 | `test_reading_order_is_tests_then_named_by_the_subject_then_largest`, `test_budget_excludes_lockfiles_and_flags_a_commit_over_300_lines`, `test_what_a_test_file_is_follows_the_project_and_pytest`, `test_tour` (cli) |
-| R7 | `test_verification_commands_use_the_runner_never_make`, `test_paths_and_refs_are_quoted_in_the_commands_the_reviewer_will_paste`, `test_a_merge_commit_is_reverted_against_its_first_parent` |
-| R8 | `test_three_questions_with_folded_hints_and_a_structural_variant`, `test_tour` (cli) |
-| R9 | `test_out_writes_the_file_or_names_it_in_a_directory`, `test_tour` (cli), `test_eval_add_and_tour_write_lf` (cli) |
-| R10 | `test_the_tour_runs_only_read_only_git_commands_and_opens_no_socket`, `test_tour_imports_the_standard_library_only_and_no_network_module`, `test_removed_asserts_are_found_whatever_the_file_the_commit_or_the_git_configuration` |
+In `tests/test_tour.py` and `tests/test_cli.py`; each test carries its requirement id in a
+comment. `uv run rumbo trace` prints which tests cover each requirement.
 
 No end-to-end step: `scripts/e2e.sh` does not run `rumbo tour`.
 

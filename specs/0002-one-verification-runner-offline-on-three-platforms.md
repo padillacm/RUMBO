@@ -32,24 +32,7 @@ This spec is retroactive: it describes what the code does on 2026-11-21, not a p
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
      by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
-All in `tests/test_check.py`; each test carries its requirement id in a comment.
-
-| Requirement | Tests |
-|---|---|
-| R1 | `test_runs_every_step_in_table_order`, `test_step_output_streams_to_the_terminal`, `test_named_steps_run_a_subset_in_table_order`, `test_the_lines_of_the_runner_are_ascii_whatever_a_step_is_called`, `test_a_pyproject_saved_with_a_byte_order_mark_is_read` |
-| R2 | `test_runs_every_step_in_table_order` (working directory), `test_quoted_operators_are_plain_arguments`, `test_arguments_reach_the_program_without_shell_expansion`, `test_a_backslash_in_a_step_is_taken_literally`, `test_quotes_group_words_and_a_path_with_spaces`, `test_a_step_with_native_paths_and_spaces_runs` |
-| R3 | `test_shell_operators_are_configuration_errors`, `test_changed_must_be_an_argument_of_its_own`, `test_a_step_with_native_paths_and_spaces_runs` (a quote left open), `test_a_batch_program_refuses_what_cmd_would_interpret`, `test_a_batch_program_in_a_directory_cmd_would_interpret_is_refused` |
-| R4 | `test_missing_or_malformed_table_is_an_environment_problem`, `test_no_pyproject_is_an_environment_problem`, `test_unknown_step_is_an_environment_problem`, `test_usage_errors_never_exit_2`, `test_a_table_of_the_wrong_type_is_a_configuration_error`, `test_a_log_that_cannot_be_written_is_an_environment_problem`, `test_an_unexpected_exception_exits_3_and_never_1` |
-| R5 | `test_base_placeholder_takes_the_flag`, `test_base_placeholder_is_replaced_inside_tokens`, `test_base_defaults_to_origin_main_when_it_exists`, `test_base_tries_the_same_candidates_as_the_sensor`, `test_changed_on_a_master_repository_is_the_changed_files` |
-| R6 | `test_changed_expands_to_the_changed_python_files_sorted`, `test_changed_includes_files_that_are_staged_but_not_committed`, `test_changed_is_relative_to_the_given_base`, `test_changed_paths_are_relative_to_a_subdirectory_root`, `test_changed_with_nothing_changed_skips_the_step`, `test_only_spikes_changed_means_no_changed_files`, `test_changed_note_reaches_the_brief_log`, `test_changed_is_resolved_once_and_only_when_used`, `test_changed_on_a_master_repository_is_the_changed_files`, `test_a_changed_file_whose_name_starts_with_a_dash_is_not_an_option` |
-| R7 | `test_changed_never_includes_spikes`, `test_only_spikes_changed_means_no_changed_files` |
-| R8 | `test_full_replaces_changed_with_the_whole_tree`, `test_full_runs_even_when_nothing_changed`, `test_full_does_nothing_for_tables_without_changed` |
-| R9 | `test_changed_without_commits_falls_back_to_the_whole_tree`, `test_changed_with_an_unknown_base_falls_back_to_the_whole_tree`, `test_changed_fallback_keeps_the_failure_exit_codes`, `test_without_git_the_base_is_main_and_changed_is_the_whole_tree`, `test_outside_a_repository_the_base_is_main_and_changed_is_the_whole_tree`, `test_the_whole_tree_note_is_shown_on_red_and_environment_lines_too` |
-| R10 | `test_stops_at_the_first_failure`, `test_keep_going_runs_everything_and_environment_wins`, `test_keep_going_reports_every_failing_step` |
-| R11 | `test_stops_at_the_first_failure`, `test_missing_executable_is_an_environment_problem`, `test_a_command_line_the_system_refuses_is_not_reported_as_not_found`, `test_a_missing_project_script_is_env_before_anything_runs`, `test_a_step_killed_by_a_signal_is_env_and_is_not_probed`, `test_a_crash_code_is_env_whatever_the_probe_would_say` |
-| R12 | `test_a_tool_that_ran_and_exited_2_is_red`, `test_an_environment_that_cannot_launch_the_tool_is_env`, `test_exit_code_other_than_0_or_1_is_an_environment_problem`, `test_the_probe_stops_at_the_interpreter_for_a_script`, `test_a_probe_that_does_not_answer_in_60_seconds_is_env`, `test_the_probe_is_silent_in_the_brief_log_too`, `test_tool_name_skips_launchers`, `test_tool_name_skips_launcher_options_and_launchers_given_by_path`, `test_exit_1_from_an_environment_that_cannot_start_the_tool_is_env`, `test_exit_1_from_a_tool_that_starts_is_red`, `test_the_question_on_exit_1_is_about_the_launcher` |
-| R13 | `test_brief_success_prints_one_line_and_logs_the_rest`, `test_brief_failure_prints_the_last_40_log_lines_then_the_verdict`, `test_brief_captures_stderr_and_keeps_the_terminal_ascii`, `test_changed_note_reaches_the_brief_log`, `test_a_log_that_cannot_be_written_is_an_environment_problem` |
-| R14 | `test_the_runner_imports_only_the_standard_library_and_no_network_module`, `test_the_runner_runs_as_a_single_file_with_no_package_installed`, `test_rumbo_check_passes_its_arguments_to_the_runner_and_returns_its_exit_code` |
+In `tests/test_check.py`; each test carries its requirement id in a comment. `uv run rumbo trace` prints which tests cover each requirement.
 
 End to end: `scripts/e2e.sh` runs `uv run python scripts/rumbo_check.py`, `make check` and
 `rumbo check --dir .` in a generated project, requires exit 3 for an unknown step, and runs the

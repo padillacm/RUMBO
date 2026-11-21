@@ -33,25 +33,7 @@ Written after the code: it describes the sensor as it is on 2026-11-21, not a pl
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
      by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
-All in `tests/test_sensor.py`; each test carries its requirement id in a comment. The most direct
-tests are named, not every one.
-
-| Requirement | Tests |
-|---|---|
-| R1 | `test_an_uncommitted_weakening_is_reported_and_the_exit_code_tells`, `test_tests_directory_defaults_then_pyproject_then_flag`, `test_configured_tests_directory_is_honoured_end_to_end`, `test_the_tests_directory_is_the_one_the_base_configured`, `test_a_project_in_a_subdirectory_of_the_repository_is_compared` |
-| R2 | `test_the_base_is_the_merge_base_with_the_first_candidate_that_resolves`, `test_an_unreachable_rumbo_base_ref_is_reported_like_an_unreachable_base`, `test_the_upstream_of_the_branch_is_not_a_base` |
-| R3 | `test_without_a_base_the_sensor_warns_and_only_strict_fails`, `test_strict_refuses_a_default_base_that_is_head_itself`, `test_a_run_nobody_pushed_for_has_nothing_to_compare_and_passes`, `test_a_new_ref_with_no_base_at_all_passes_with_a_warning` |
-| R4 | `test_a_deleted_file_and_a_deleted_or_renamed_test_are_reported`, `test_a_test_file_that_no_longer_parses_is_reported`, `test_a_test_moved_where_pytest_does_not_collect_it_is_reported_as_deleted`, `test_unbinding_a_test_after_its_definition_is_reported`, `test_a_decorator_added_to_an_existing_test_is_reported_for_review` |
-| R5 | `test_each_counted_form_is_seen_when_removed`, `test_deleting_a_pytest_raises_block_is_reported`, `test_unreached_helpers_and_module_level_asserts_still_count_in_the_total`, `test_a_drop_in_the_total_alone_is_reported`, `test_an_assert_that_cannot_fail_counts_zero` |
-| R6 | `test_constant_asserts_are_still_flagged`, `test_truthy_constants_and_tuples_are_always_true_asserts` |
-| R7 | `test_a_skip_or_xfail_marker_on_a_test_is_reported`, `test_a_skip_or_xfail_call_in_a_test_is_reported`, `test_skip_inside_a_resolved_helper_counts_as_a_skip`, `test_every_way_of_skipping_from_inside_a_test_is_counted`, `test_a_fixture_that_skips_is_counted_for_the_tests_that_use_it`, `test_a_hook_added_to_a_conftest_is_reported_for_review` |
-| R8 | `test_a_shorter_parametrize_list_is_reported`, `test_a_parametrize_list_of_empty_starred_literals_has_no_case`, `test_a_mark_kept_in_a_name_of_the_tests_counts_as_the_mark_it_stands_for` |
-| R9 | `test_each_counted_form_is_seen_when_removed`, `test_self_assert_methods_and_fail_are_counted`, `test_pytest_contexts_count_only_with_the_pytest_prefix`, `test_a_self_assert_method_still_counts_one_and_is_not_resolved`, `test_unresolvable_calls_count_zero`, `test_an_assert_that_cannot_fail_counts_zero`, `test_asserts_in_a_nested_function_count_only_when_the_test_calls_it` |
-| R10 | `test_extracting_asserts_into_a_helper_is_accepted`, `test_hollowing_a_helper_is_reported_for_its_callers`, `test_helper_with_pytest_raises_counts_under_the_same_rules`, `test_helper_cycle_terminates_and_counts_zero`, `test_resolution_depth_is_bounded_at_three`, `test_unresolvable_calls_count_zero`, `test_helper_methods_are_resolved_on_self_cls_and_the_class_name`, `test_a_self_call_resolves_only_inside_a_class_and_only_to_its_methods`, `test_helper_methods_keep_the_cycle_guard_and_the_depth_limit`, `test_inherited_helper_methods_follow_the_bases_inside_the_tests_directory`, `test_moving_asserts_between_a_test_method_and_its_helper_method_is_accepted`, `test_a_helper_whose_body_never_runs_counts_zero`, `test_a_helper_that_is_awaited_or_entered_keeps_counting` |
-| R11 | `test_an_uncommitted_weakening_is_reported_and_the_exit_code_tells`, `test_without_a_base_the_sensor_warns_and_only_strict_fails`, `test_the_mark_approves_in_a_commit_of_the_human_and_not_in_one_an_agent_co_authored`, `test_a_base_that_cannot_be_read_stops_the_run_instead_of_passing` |
-| R12 | `test_the_mark_approves_in_a_commit_of_the_human_and_not_in_one_an_agent_co_authored`, `test_the_mark_counts_only_in_a_commit_between_the_base_and_head`, `test_the_pull_request_label_approves_the_change`, `test_the_label_counts_only_in_a_pull_request_run_of_github_actions`, `test_a_commit_message_cannot_forge_the_commit_of_a_human` |
-| R13 | `test_the_mark_approves_in_a_commit_of_the_human_and_not_in_one_an_agent_co_authored`, `test_an_approval_an_agent_took_part_in_is_ignored`, `test_the_project_adds_agent_identities_in_pyproject`, `test_an_agent_identity_of_the_base_cannot_be_dropped_by_the_change` |
-| R14 | `test_the_sensor_imports_only_the_standard_library`, `test_the_generated_project_gets_the_sensor_verbatim`, `test_rumbo_check_tests_passes_its_arguments_to_the_sensor`, `test_sensor_tests_pass_in_generated_project` |
+In `tests/test_sensor.py`; each test carries its requirement id in a comment. `uv run rumbo trace` prints which tests cover each requirement.
 
 The sensor also ships its own tests into every project
 (`tests/unit/test_check_tests_not_weakened.py`, the copy of

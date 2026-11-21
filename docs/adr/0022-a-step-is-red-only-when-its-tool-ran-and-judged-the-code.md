@@ -23,14 +23,9 @@ In every row the `Stop` hook tells the agent to repair something that no change 
 repairs, the loop ADR-0006 removed. "The tool starts" is necessary for a red step; it is not
 sufficient.
 
-A first draft of this ADR went too far in two places, and an audit of that draft measured it.
-It asked the *tool* for `--version` on exit `1`: a failing `python -m unittest`, a failing
-`python -m compileall` and `uv run --group dev pytest` (the option and its value unglued, as
-uv's documentation writes them) became "environment", because the tool, or the word taken
-for it, does not answer `--version`. And it took pytest's exit `3` ("internal error") for the
-environment: code under test that exits at import (an unguarded `sys.exit(main())`) makes
-pytest print "mainloop: caught unexpected SystemExit!" and exit `3`, so the agent was told
-not to fix its own bug. This text is the corrected decision.
+A first draft asked the tool itself for `--version` on exit `1` and took pytest's exit `3` for
+the environment; an audit showed both made the agent stop fixing its own bugs (a failing
+`python -m unittest`, code that exits at import). This text is the corrected decision.
 
 ## Drivers (non-functional requirements)
 The agent is never excused from a failure of its own; when in doubt a step is red, because

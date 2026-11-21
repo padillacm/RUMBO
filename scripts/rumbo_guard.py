@@ -163,6 +163,9 @@ _ENV_FILE = re.compile(r"\.env(?:\.[^/]*)?")
 _FILES = frozenset(name.casefold() for name in PROTECTED_FILES)
 _SHADOWS = frozenset(name.casefold() for name in SHADOW_CONFIGS)
 _BASENAMES = frozenset(name.rsplit("/", 1)[-1] for name in _FILES) | _SHADOWS
+# What the runner (scripts/rumbo_check.py) names LOG_NAME and TAIL_LINES.
+CHECK_LOG = ".rumbo-check.log"
+CHECK_TAIL_LINES = 40
 # Ignored and legitimately local; judged by what changes in it while a command runs.
 LOCAL_SETTINGS = ".claude/settings.local.json"
 # ADR-0019: what `uv add`, `uv remove` and `uv lock` write. uv.lock is not protected at all;
@@ -520,11 +523,6 @@ def _inside(paths: list[Path], root: Path) -> str | None:
     return None
 
 
-def _relative(file_path: str, root: Path) -> str | None:
-    """Path relative to the project root (normalised), or None when it is outside the project."""
-    return _inside(_candidates(file_path, root)[0], root)
-
-
 def _git_dirs(root: Path) -> list[Path]:
     """The git directory of the project, found without a subprocess: `.git` in the root or in a
     parent (a project in a sub-directory of its repository), plus the directories a worktree's
@@ -582,12 +580,25 @@ def _listed_name(root: Path, rel: str) -> str:
     return "/".join(parts)
 
 
+_PROTECTED_RULE = (
+    "protected by AGENTS.md (hard rules): the agent does not edit the Makefile, pyproject.toml "
+    "or the tool configuration that shadows it, CI, infra/, hooks, the git directory, the "
+    "sensors or .env files"
+)
+
+
 def _protected_reason(rel: str) -> str:
     return (
-        f"{rel} is protected by AGENTS.md (hard rules): the agent does not edit the "
-        "Makefile, pyproject.toml or the tool configuration that shadows it, CI, infra/, hooks, "
-        "the git directory, the sensors or .env files. Explain the change you need and ask the "
-        "human to make it (why: README.md, section 'Working with the agent')."
+        f"{rel} is {_PROTECTED_RULE}. Explain the change you need and ask the human to make it "
+        "(why: README.md, section 'Working with the agent')."
+    )
+
+
+def _mark_reason(files: str, what: str) -> str:
+    """The template mark leaves a document only by the human's hand (ADR-0017)."""
+    return (
+        f"{files}: the template mark {what}. Only the human removes it (the first line, "
+        f"'{TEMPLATE_MARK} ...'), when the document is complete."
     )
 
 
@@ -660,10 +671,7 @@ def check_edit(tool_name: str, tool_input: dict[str, Any], root: Path) -> str | 
     if is_signed(root, rel):
         return _signed_reason(rel)
     if _removes_mark(tool_name, tool_input, root / rel):
-        return (
-            f"{rel}: the '{TEMPLATE_MARK} ...' mark is removed only by the human, when the "
-            "document is complete. Leave the first line as it is."
-        )
+        return _mark_reason(rel, "would be removed") + " Leave the first line as it is."
     if (
         tool_name == "Write"
         and SIGNED_DOC.match(rel)
@@ -1002,11 +1010,17 @@ def _toml_differences(head: dict[str, Any], current: dict[str, Any]) -> list[str
     return paths
 
 
+def _toml(text: str) -> dict[str, Any]:
+    # Windows editors and PowerShell 5 write a byte order mark; tomllib refuses it, the runner
+    # (check.py, utf-8-sig) accepts it.
+    return tomllib.loads(text.removeprefix("\ufeff"))
+
+
 def _pyproject_tables(before: str, after: str | None) -> list[str]:
     if after is None:
         return [PYPROJECT_DELETED]
     try:
-        return _toml_differences(tomllib.loads(before), tomllib.loads(after))
+        return _toml_differences(_toml(before), _toml(after))
     except (tomllib.TOMLDecodeError, RecursionError):
         return [PYPROJECT_UNPARSEABLE]
 
@@ -1059,11 +1073,7 @@ def _pyproject_reason(
         "and uv lock write)."
     )
     if may_be_the_humans:  # the working tree: the human may have edited it, or run `rumbo update`
-        return reason + (
-            f" If you made this change, restore everything else ({undo}) and ask the human to "
-            "make it; if the human made it (for example `rumbo update`), ask them to commit it "
-            "and do not revert it."
-        )
+        return reason + _whose(undo, "restore everything else")
     return reason + f" Restore everything else ({undo}) and ask the human to make that change."
 
 
@@ -1190,11 +1200,11 @@ def changed_documents(root: Path, changed: list[str]) -> tuple[list[str], list[s
     return unmarked, signed
 
 
-def _whose(undo: str) -> str:
+def _whose(undo: str, revert: str = "revert it") -> str:
     """Both routes, always: the change may be the human's (he ran `rumbo update`, or edited the
     file, and has not committed yet), and the agent must never be told to undo that."""
     return (
-        f" If you made this change, revert it ({undo}) and ask the human to make it; if the "
+        f" If you made this change, {revert} ({undo}) and ask the human to make it; if the "
         "human made it (for example `rumbo update`), ask them to commit it and do not revert it."
     )
 
@@ -1231,11 +1241,8 @@ def check_post_bash(root: Path, hidden: tuple[str, ...] = ()) -> str | None:
         )
     if unmarked:
         reasons.append(
-            "the template mark was removed since the last commit from: "
-            + ", ".join(unmarked)
-            + ". Only the human removes it. If you removed it, restore the first line (git "
-            "checkout -- <file>); if the human did, ask them to commit the signature and do not "
-            "revert it."
+            _mark_reason(", ".join(unmarked), "was removed since the last commit")
+            + _whose("git checkout -- <file>")
         )
     if signed:
         reasons.append(_signed_reason(", ".join(signed)) + _whose("git checkout -- <file>"))
@@ -1415,11 +1422,7 @@ def check_commits(root: Path, old: str, new: str) -> str | None:
     if signed:
         parts.append(_signed_reason(", ".join(signed)))
     if unmarked:
-        parts.append(
-            "the template mark was removed from: "
-            + ", ".join(unmarked)
-            + ". Only the human removes it."
-        )
+        parts.append(_mark_reason(", ".join(unmarked), "was removed"))
     if created:
         parts.append(_created_reason(", ".join(created)))
     if not parts:
@@ -1471,13 +1474,13 @@ def check_post_shell(root: Path) -> str | None:
 
 
 def _tail(proc: subprocess.CompletedProcess[str]) -> str:
-    return "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-40:])
+    return "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-CHECK_TAIL_LINES:])
 
 
 def _red(runner: str, changed: int, tail: str) -> tuple[int, str]:
     return BLOCK, (
         f"{runner} is red after changing {changed} file(s). Fix it before declaring the "
-        f"task done (full log in .rumbo-check.log):\n{tail}"
+        f"task done (full log in {CHECK_LOG}):\n{tail}"
     )
 
 
@@ -1518,7 +1521,7 @@ def run_verification(root: Path, changed: int) -> tuple[int, str]:
             f"rumbo check could not verify the project (exit {proc.returncode}): the "
             "verification environment is broken.",
             f"rumbo check: the verification environment is broken (exit {proc.returncode}); "
-            "the agent was told to report it and stop. Details in .rumbo-check.log.",
+            f"the agent was told to report it and stop. Details in {CHECK_LOG}.",
             _tail(proc),
         )
     try:
@@ -1596,7 +1599,7 @@ def agent_env_names(root: Path) -> tuple[str, ...]:
         except (OSError, UnicodeDecodeError):
             return DEFAULT_AGENT_ENV
     try:
-        data: Any = tomllib.loads(text)
+        data: Any = _toml(text)
     except (tomllib.TOMLDecodeError, RecursionError):
         return DEFAULT_AGENT_ENV
     for key in ("tool", "rumbo", "agent_env"):
@@ -1654,11 +1657,8 @@ def _judge_staged(root: Path, staged: list[tuple[str, str]]) -> str | None:
     refusals: list[str] = []
     if protected:
         refusals.append(
-            "protected file(s) staged: "
-            + ", ".join(protected)
-            + ". They are protected by AGENTS.md (hard rules): the agent does not edit the "
-            "Makefile, pyproject.toml, CI, infra/, hooks, the sensors or .env files. Unstage them "
-            "(git restore --staged <file>) and ask the human to make that change."
+            f"protected file(s) staged: {', '.join(protected)}. They are {_PROTECTED_RULE}. "
+            "Unstage them (git restore --staged <file>) and ask the human to make that change."
         )
     if tables:
         refusals.append(
@@ -1672,9 +1672,8 @@ def _judge_staged(root: Path, staged: list[tuple[str, str]]) -> str | None:
             reason = _signed_reason(", ".join(signed))
         elif unmarked:
             reason = (
-                ", ".join(unmarked)
-                + f": the '{TEMPLATE_MARK} ...' mark is removed only by the human, when the "
-                "document is complete. Restore the first line before committing."
+                _mark_reason(", ".join(unmarked), "was removed")
+                + " Restore the first line before committing."
             )
         elif created:
             reason = _created_reason(", ".join(created))

@@ -29,27 +29,7 @@ Decisions: ADR-0005, ADR-0006 and ADR-0018 (consumers), ADR-0008, ADR-0017, ADR-
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
      by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
-All in `tests/test_guard.py`; each test carries its requirement ids in a comment, except
-`test_stop_hook_active_and_skip_env_short_circuit_the_runner`. A test that covers several
-requirements is listed under the ones it chiefly verifies.
-
-| Requirement | Tests |
-|---|---|
-| R1 | `test_protected_files_are_blocked`, `test_relative_paths_are_normalised`, `test_files_that_shadow_pyproject_are_protected`, `test_the_git_directory_is_protected_and_its_neighbours_are_not`, `test_only_real_env_files_are_protected` |
-| R2 | `test_template_mark_cannot_be_removed_by_edit_or_write`, `test_an_edit_is_simulated_to_see_whether_the_mark_survives` |
-| R3 | `test_dangerous_commands_are_blocked`, `test_every_shell_tool_is_judged_like_bash`, `test_bypass_spellings_are_blocked`, `test_a_writer_at_the_start_of_a_command_is_blocked` |
-| R4 | `test_post_bash_detects_protected_files_changed_since_head`, `test_pyproject_may_change_only_in_its_dependency_tables`, `test_an_unparseable_or_new_pyproject_is_a_protected_change`, `test_a_new_shadow_file_is_caught_after_the_command_and_at_commit`, `test_a_commit_that_skipped_the_hook_is_judged_after_the_command`, `test_protected_files_hidden_from_git_status_are_found` |
-| R5 | `test_stop_blocks_with_the_tail_when_the_runner_is_red`, `test_stop_passes_when_the_runner_is_green`, `test_stop_runs_make_check_only_when_code_changed`, `test_stop_verifies_code_committed_since_the_last_green_head`, `test_a_state_that_cannot_be_read_is_unknown_not_empty`, `test_parallel_shell_hooks_keep_the_green_head` |
-| R6 | `test_stop_reports_a_broken_environment_to_the_human`, `test_stop_without_runner_or_make_asks_for_rumbo_update` |
-| R7 | `test_pre_commit_refuses_a_staged_protected_file_from_an_agent`, `test_pre_commit_refuses_removing_the_template_mark`, `test_pre_commit_exempts_the_root_commit_and_guards_from_the_second`, `test_pre_commit_allows_uv_writes_and_lists_every_other_protected_file`, `test_pre_commit_refuses_pyproject_changes_outside_the_dependency_tables`, `test_an_agent_cannot_create_a_numbered_document_without_the_mark`, `test_an_orphan_branch_is_not_a_root_commit`, `test_a_staged_type_change_counts` |
-| R8 | `test_commit_msg_refuses_the_approval_mark_from_an_agent` |
-| R9 | `test_actor_is_an_agent_when_a_marker_is_set`, `test_actor_is_the_human_who_declared_rumbo_human`, `test_agent_markers_come_from_pyproject_when_declared`, `test_default_agent_markers_have_a_source`, `test_agent_env_is_read_from_head_not_from_the_working_tree` |
-| R10 | `test_ordinary_files_and_files_outside_the_project_are_allowed`, `test_ordinary_commands_are_allowed`, `test_pre_commit_passes_silently_with_nothing_staged`, `test_commands_that_only_look_dangerous_are_allowed`, `test_a_writer_word_inside_an_argument_is_not_a_command`, `test_a_repository_with_no_commit_has_nothing_to_protect_yet` |
-| R11 | `test_git_missing_never_crashes`, `test_git_hooks_without_git_never_crash`, `test_a_payload_of_another_shape_never_crashes`, `test_an_internal_error_never_reads_as_allow`, `test_a_hostile_state_file_blocks_nothing_and_makes_stop_verify` |
-| R12 | `test_pre_tool_decides_within_the_latency_budget`, `test_a_command_too_long_to_judge_is_refused_not_timed_out` |
-| R13 | `test_post_bash_reports_a_removed_mark_and_a_changed_signed_document`, `test_changed_documents_are_read_in_one_git_call` |
-| R14 | `test_editing_a_signed_spec_or_adr_is_blocked_and_drafting_is_not`, `test_post_bash_reports_a_removed_mark_and_a_changed_signed_document`, `test_pre_commit_refuses_a_staged_change_to_a_signed_document`, `test_a_signed_document_is_signed_whatever_the_case_of_its_path` |
-| R15 | `test_editing_a_signed_spec_or_adr_is_blocked_and_drafting_is_not`, `test_an_agent_cannot_create_a_numbered_document_without_the_mark` |
+In `tests/test_guard.py`; each test carries its requirement ids in a comment. `uv run rumbo trace` prints which tests cover each requirement.
 
 End to end: `scripts/e2e.sh` exercises the three Claude Code hook paths and the two git hooks in
 a generated project (`CLAUDECODE=1 git commit` of a protected file refused, the human's passes).

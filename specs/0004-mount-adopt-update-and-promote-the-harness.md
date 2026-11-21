@@ -35,41 +35,14 @@ ADR-0021, ADR-0029.
 ## Acceptance criteria
 <!-- pytest tests / Hypothesis properties that verify them (path::test). A test covers a requirement
      by mentioning its full id, e.g. `F-000N.R1`, in its docstring; `rumbo trace` builds the table. -->
-In `tests/test_scaffold.py` unless a file is named (`render`: `tests/test_render.py`; `cli`:
-`tests/test_cli.py`); each test carries its requirement id in a comment.
-
-| Requirement | Tests |
-|---|---|
-| R1 | `test_invalid_names`, `test_invalid_packages`, `test_to_package`, `test_name_is_escaped_in_toml_and_python`, `test_llm_needs_valid_provider`, `test_other_provider_sdk_names_are_validated`, `test_reserved_names_are_only_the_ones_that_collide`; cli: `test_init_rejects_bad_package`, `test_init_yes_requires_a0_answers`, `test_init_llm_without_provider_fails`, `test_init_non_interactive`, `test_init_asks_the_console_not_isatty` |
-| R2 | `test_the_scaffolder_imports_only_the_standard_library`, `test_every_combination_renders`, `test_target_path`; render: `test_variables`, `test_sections_and_inverted_sections`, `test_standalone_tags_leave_no_blank_lines`, `test_nested_sections_with_different_keys`, `test_github_actions_expressions_are_untouched`, `test_prefix_variable_names_do_not_collide`, `test_substituted_values_are_not_expanded_again`, `test_dropped_sections_are_not_validated`, `test_bad_templates_raise` |
-| R3 | `test_each_kind_generates_exactly_its_column`, `test_data_gets_evals_without_a_model_and_the_judge_only_with_one`, `test_service_keeps_http_without_llm_and_logs_json_only_with_it`, `test_service_dependencies_do_not_depend_on_llm` |
-| R4 | `test_each_layout_has_its_contracts_or_none`, `test_layout_defaults_follow_the_kind_and_llm_forces_hexagonal`, `test_axes_validation`, `test_service_dependencies_do_not_depend_on_llm` |
-| R5 | `test_llm_only_files`, `test_claude_code_provider_has_no_sdk_and_an_adapter`, `test_provider_sdk_is_forbidden_in_domain`, `test_other_provider_accepts_extras_and_dotted_modules`, `test_ci_never_holds_the_model_credential`, `test_data_gets_evals_without_a_model_and_the_judge_only_with_one`, `test_service_dependencies_do_not_depend_on_llm`; cli: `test_init_non_interactive` |
-| R6 | `test_dev_dependencies_scale_with_rigor_kind_and_layout`, `test_check_steps_per_rigor`, `test_checks_table_lists_the_steps_in_order`, `test_rigor_controls_nightly_dependabot_and_check` |
-| R7 | `test_every_file_is_written_with_lf_line_endings`, `test_runner_is_copied_byte_identical_and_protected`; cli: `test_eval_add_and_tour_write_lf`, `test_new_and_decision_write_lf_and_validate_what_they_are_given` |
-| R8 | `test_scaffold_skips_existing_and_reports`, `test_force_overwrites_but_merges_pyproject_and_gitignore`, `test_merge_pyproject_keeps_existing_sections`, `test_merge_lines_without_duplicates`, `test_an_existing_python_version_file_is_kept`, `test_force_never_overwrites_a_backup_and_skips_identical_files`, `test_init_reads_everything_before_it_writes_anything`, `test_init_merges_a_pyproject_with_a_byte_order_mark_and_refuses_a_file_as_target` |
-| R9 | `test_detect_package_from_the_project_name`, `test_detect_package_from_the_single_directory`, `test_detect_package_ambiguity_asks_for_the_flag`, `test_detect_kind`, `test_detect_layout`, `test_detect_tests_dir`, `test_detect_project_puts_it_together`, `test_adopting_a_root_package_points_every_tool_at_it`; cli: `test_init_adopt_detects_the_project_and_writes_only_the_harness`, `test_init_adopt_flags_win_over_detection`, `test_init_adopt_ambiguous_package_asks_for_the_flag`, `test_init_adopt_interactive_defaults_are_the_detected_values`, `test_init_adopt_needs_an_existing_directory`, `test_init_summary_prints_each_setting_once`, `test_init_adopt_refuses_what_is_not_on_disk`, `test_init_asks_the_console_not_isatty` |
-| R10 | `test_adoption_plan_writes_the_harness_and_no_skeleton`, `test_adoption_with_the_default_tests_dir_writes_no_tests_key`, `test_adoption_keeps_the_purity_rules_when_the_layout_has_layers`, `test_init_plan_is_unchanged_without_adoption`, `test_adoption_skips_ci_when_a_workflow_exists_and_prints_the_steps`, `test_adoption_skips_infra_when_the_directory_exists`, `test_adopted_project_round_trips_and_updates_without_a_skeleton`, `test_adopting_a_root_package_points_every_tool_at_it`, `test_a_src_project_renders_as_before`, `test_target_path_follows_the_tests_dir`, `test_adoption_points_pytest_at_the_tests_it_finds`, `test_adoption_configures_only_what_is_on_disk`, `test_what_the_project_already_had_is_decided_once_at_adoption`; cli: `test_init_adopt_detects_the_project_and_writes_only_the_harness` |
-| R11 | `test_update_refreshes_owned_files_only`, `test_update_refreshes_the_runner`, `test_update_adds_the_checks_table_to_an_older_project`, `test_update_appends_the_steps_of_a_raised_rigor_once`, `test_missing_dev_dependencies_reads_both_groups_and_ignores_versions`, `test_project_load_infers_service_hexagonal_and_update_writes_the_keys`, `test_update_writes_layers_for_a_layered_project`, `test_project_load_defaults_python_and_update_writes_the_key_once`, `test_project_load_defaults_to_pyright_and_update_writes_the_key_once`, `test_a_src_project_renders_as_before`, `test_adopting_a_root_package_points_every_tool_at_it`, `test_adopted_project_round_trips_and_updates_without_a_skeleton`, `test_pre_commit_rev_bumps_are_not_drift`, `test_update_refuses_a_harness_newer_than_the_cli`, `test_update_follows_the_tests_directory_and_finds_the_version_key`, `test_the_guard_wiring_is_checked_and_the_snippets_are_printed` |
-| R12 | cli: `test_update_diff_shows_harness_drift_only`; `test_pre_commit_rev_bumps_are_not_drift` |
-| R13 | `test_set_rigor_rewrites_only_the_key`, `test_update_reports_steps_and_aliases_that_differ_from_the_template`; cli: `test_promote_refuses_equal_and_lower_rigor`, `test_promote_prototype_to_mvp_then_production`, `test_promote_runs_uv_add_unless_no_install`, `test_promote_is_atomic_and_a_bad_table_is_one_line`, `test_promote_says_what_differs_from_a_fresh_project_of_the_level` |
-| R14 | `test_python_setting_renders_every_place_that_names_a_version`, `test_python_default_is_unchanged`, `test_unsupported_python_is_refused`, `test_project_load_reads_the_python_key_and_validates_it`, `test_project_load_defaults_python_and_update_writes_the_key_once`, `test_an_existing_python_version_file_is_kept`, `test_types_mypy_renders_the_mypy_configuration`, `test_types_mypy_adopted_checks_the_changed_files_in_the_tests_dir`, `test_every_combination_renders_with_mypy`, `test_default_type_checker_is_pyright_and_agents_md_does_not_change`, `test_unknown_type_checker_is_refused`, `test_project_load_defaults_to_pyright_and_update_writes_the_key_once`, `test_types_round_trips_through_project`, `test_the_python_version_is_detected`, `test_a_python_that_contradicts_the_project_is_refused_or_reported`; cli: `test_init_python_flag_feeds_every_place`, `test_init_refuses_an_unsupported_python`, `test_init_types_mypy_and_refuses_an_unknown_checker`, `test_init_summary_prints_each_setting_once`, `test_init_adopt_takes_the_python_version_from_the_project` |
-| R15 | `test_init_declares_rumbo_human_only_for_an_interactive_human`, `test_init_declares_the_human_in_the_clone`, `test_the_null_device_is_not_a_terminal`, `test_install_updates_only_its_own_hook_configuration_and_knows_a_sub_directory` |
-
-The table names the most direct tests; `rumbo trace` lists every test that carries an id. Two
-are named under an id their comment does not carry: `test_init_asks_the_console_not_isatty`
-under R1 (it carries R9) and `test_new_and_decision_write_lf_and_validate_what_they_are_given`
-under R7 (it carries F-0005.R3).
-Verified by reading the code only, with no assertion of their own: the `[update replaces]` and
-`[missing; copy by hand if wanted]` headings of R12 (`update_diff`), the symbolic link of R8
-(`_plan_writes`, `_backup`), and "standard input and output" in R15 (`at_a_terminal`; the tests
-replace that function).
+In `tests/test_scaffold.py`, `tests/test_cli.py` and `tests/test_render.py`; each test carries
+its requirement id in a comment. `uv run rumbo trace` prints which tests cover each requirement.
+`tests/test_fitness.py::test_cli_has_no_runtime_dependencies` holds R2 for the whole package.
 
 End to end: `scripts/e2e.sh` mounts a project per flag set of the CI matrix (kinds, layouts,
 rigor, `--python 3.12`, `--types mypy`) and runs `rumbo update` on it; on the prototype flag set
 it runs `rumbo promote mvp` (and expects exit code 1 from a second one); on `--no-llm --rigor
 mvp` it adopts a small pre-existing project.
-`tests/test_fitness.py::test_cli_has_no_runtime_dependencies` holds R2 for the whole package.
 
 ## Data contracts and ownership
 <!-- What two sessions (or two agents) must agree on BEFORE writing code. Omitting explicit data

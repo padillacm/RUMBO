@@ -25,15 +25,9 @@ with a green sensor and a green pytest on broken code:
 - **S8** tests inherited from a base class: deleting `class TestCalc(Contract)` lost its tests
   unnoticed.
 
-A first version of this decision modelled pytest's collection strictly (a test is a direct child
-of a module or of a `Test*`/`*TestCase` class) and counted 0 whatever the test did not call by
-name. A second audit (2026-11-21) measured what that cost. Tests that pytest runs dropped out of
-the inventory: a class whose base lives in the package under test (`class LoginTests(BaseTest)`),
-and every test under `if sys.platform...` or in the `else` of a `try`; replacing their asserts
-with `assert True` passed. Asserts in a callback, a thread target, a `side_effect` or a retry loop
-counted 0, so emptying them passed. And 38 of 157 honest changes were reported by the new rules
-alone, among them one of this repository's own commits. A sensor that reports honest work is
-approved without being read.
+A first version modelled pytest's collection strictly and counted 0 whatever a test did not
+call by name. A second audit (2026-11-21) showed it missed weakenings v0.4.0 caught and reported
+38 of 157 honest changes; a sensor that reports honest work is approved without being read.
 
 ## Drivers (non-functional requirements)
 The sensor runs on every pull request of every project. Two failures cost the same: a weakening
