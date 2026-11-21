@@ -263,9 +263,9 @@ ordinary character, so a Windows path is written as it is.
 Exit codes: `0` green; `1` a verification failed; `3` the environment is broken (a tool missing
 or crashing, a malformed table). A step is red only when its tool ran and judged the code
 (ADR-0018, ADR-0022): a crash, a project script that is missing and the exit codes a tool
-documents as "I could not do my job" are the environment, and any other failure, exit `1`
-included, is red only if the tool answers `--version` (`uv run` exits `1` when it cannot build
-the environment). The `Stop` hook blocks the agent on `1`; on `3` it tells the agent to report
+was measured to keep for "I could not do my job" are the environment; exit `1` is red unless
+the launcher cannot start its interpreter (`uv run` exits `1` when it cannot build the
+environment), and any other code is red only if the tool answers `--version`. The `Stop` hook blocks the agent on `1`; on `3` it tells the agent to report
 to the human and not to repair the environment. With the CLI installed, `rumbo check` is the
 same command.
 
@@ -322,8 +322,9 @@ Comparing against the base (the PR base commit, else the first that exists of `o
   cannot fail count zero: under a swallowed `AssertionError`, in a helper turned into a
   generator, in a nested function the test never calls;
 - a test gains always-true asserts (`assert True`), `skip`/`xfail` markers, or a shorter
-  `parametrize` list, or a file gains a skip outside its tests (a fixture, the module level,
-  `skipTest`); a hook added to a `conftest.py` is reported for review.
+  `parametrize` list, or a skip reaches it from outside (the module or class level, an
+  autouse fixture, a fixture it uses); a conftest hook that changes which tests run or how
+  they end is reported for review.
 
 The tests directory and `agent_authors` are read from the base, so the change under test
 cannot narrow them (ADR-0026). With `--strict` the script exits `2` when there is no base, when

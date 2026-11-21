@@ -63,34 +63,48 @@ in `docs/audits/2026-11-16-pre-0.4.1.md` and answered in ADR-0022 to ADR-0032.
     cannot be read exits `2`.
   - `[tool.rumbo].tests` and `agent_authors` are read from the base: the change under test
     could narrow the first or empty the second.
-  - A test that stays in the file but pytest never runs is reported: under a condition,
-    deleted with `del`, `__test__ = False`, replaced by a decorator. Tests are functions whose
-    name starts with `test` (pytest's prefix), inherited ones included.
-  - Skips are counted wherever they are (fixtures, module level, `skipTest`, `SkipTest`,
-    `pytest.param(marks=...)`), and a hook added to a `conftest.py` is reported for review.
-  - Asserts that cannot run or cannot fail count zero: a helper turned into a generator, a
-    swallowed `AssertionError`, a nested function that is never called.
-  - `--strict` exits `2` when the base found by default is `HEAD` itself, and the pull request
-    label counts only in a pull request run of GitHub Actions.
+  - A test that stays in the file but pytest no longer runs is reported: moved under a
+    condition, deleted with `del`, `__test__ = False`, replaced by a decorator defined in
+    the tests. Tests are functions whose name starts with `test` (pytest's prefix),
+    inherited ones included.
+  - Skips are counted where they reach an existing test: in the test, in a fixture it uses,
+    in an autouse fixture, at module or class level (`skipTest`, `SkipTest`,
+    `pytest.param(marks=...)` too). A conftest hook that changes which tests run or how they
+    end is reported for review.
+  - Each test has two counts, the asserts written and the asserts able to fail, and a drop
+    in either is reported: a swallowed `AssertionError`, a nested function that nothing
+    uses and a helper whose body never runs count zero in the second.
+  - `--strict` exits `2` when the base found by default is `HEAD` itself (a manual or
+    scheduled run, and the first push of a ref, have nothing to compare and pass), and the
+    pull request label counts only in a pull request run of GitHub Actions.
+  - The rules were measured on 157 honest test changes and 80 weakenings: every weakening
+    the v0.4.0 sensor reported is still reported, and three honest changes are newly sent
+    to review (a decorator defined in the tests, a module-level `importorskip` added to an
+    existing file, an existing test moved under a condition).
 - `rumbo verify-dep` (ADR-0028):
   - An index that answered `200` with a page that is not a package page (a login page) made
     a hallucinated name pass with exit `0`. It is now "could not confirm", verdict `2`.
-  - urllib copied the `Authorization` header to wherever a redirect pointed. With credentials
-    a redirect is followed only inside the same scheme, host and port; `https` is never left
-    for plain `http`. A loopback index is reached without the proxies of the environment.
+  - urllib copied the `Authorization` header to wherever a redirect pointed. A redirect to
+    another scheme, host or port is now followed without the credentials (a GitLab registry
+    forwards to pypi.org the packages it does not hold), and the output says which host
+    answered; `https` is never left for plain `http`. A loopback index is reached without
+    the proxies of the environment. An index value that is not a valid URL is never echoed.
   - The argument must be a package name and is quoted into the URL; one request has a total
     deadline (60 s) and a body cap (32 MB); text from the network is printed without control
     characters.
 - `rumbo tour` quotes every file name and ref it puts in a command of the guide.
 - The generated Claude Code adapter sends the prompt on standard input. On Windows the CLI is
   a batch shim, and `cmd.exe` parsed a prompt passed as an argument: it could run commands.
+  At the time limit it ends the whole process tree, not only the shim.
+- On Windows the runner never takes a program from the project directory: a `uv.cmd`
+  planted there was run in place of `uv` and could turn a failing step green.
 
 ### Changed
 - ADR-0022 refines ADR-0018: a step is red only when its tool ran and judged the code. Exit
-  `1` is probed like any other failure (`uv run` exits `1` when it cannot build the
-  environment); crash codes, a missing project script and the codes a tool documents as "I
-  could not do my job" (pytest `3`, `ruff check` `2`, pyright `2`, `3`, `4`) are environment.
-  Exit `3` is therefore more frequent where `1` used to be.
+  `1` is red unless the launcher cannot start its interpreter (`uv run` exits `1` when it
+  cannot build the environment); crash codes, a missing project script and the two codes a
+  tool was measured to keep for "I could not do my job" (`ruff check` `2`, pyright `3`) are
+  environment. A project program run by its path is never run again to be asked.
 - `{base}` and the sensor try `origin/main`, `origin/master`, `origin/HEAD`, `main` and
   `master`. The upstream of the branch is no longer a base.
 - ADR-0032: G3 and G5 read every workflow under `.github/workflows/`, not only `ci.yml`, and

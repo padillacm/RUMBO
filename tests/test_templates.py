@@ -165,6 +165,10 @@ def test_ci_reruns_when_the_approval_label_changes(name: str) -> None:
         f"          RUMBO_BASE_REF: {BASE_REF}\n"
         "        run: uv run python scripts/check_tests_not_weakened.py --strict\n"
     ) in check
+    # A repository whose default branch is neither main nor master: the sensor is told its name.
+    default_branch = "RUMBO_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}\n"
+    assert default_branch in check
+    assert "RUMBO_DEFAULT_BRANCH" in _plan(name)["scripts/check_tests_not_weakened.py"]
 
 
 @every_config
