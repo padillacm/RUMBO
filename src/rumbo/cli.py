@@ -22,6 +22,7 @@ import argparse
 import ast
 import base64
 import contextlib
+import dataclasses
 import datetime as dt
 import http.client
 import ipaddress
@@ -32,7 +33,6 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,7 +43,7 @@ from typing import IO, Any, NamedTuple
 
 from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
-from rumbo.metrics import collect
+from rumbo.metrics import MAX_DAYS, collect
 from rumbo.metrics import render as render_metrics
 from rumbo.project import (
     DEFAULT_PYTHON,
@@ -55,6 +55,7 @@ from rumbo.project import (
     SUPPORTED_PYTHONS,
     TYPE_CHECKERS,
     Project,
+    read_utf8,
     rigor_rank,
     slug,
 )
@@ -65,11 +66,19 @@ from rumbo.scaffold import (
     Config,
     Detected,
     add_dev_dependencies,
+    config_for,
+    detect_layout,
     detect_project,
-    detect_src,
     dev_dependencies,
+    find_package,
+    git_prefix,
+    guard_wiring,
     install,
+    is_console,
+    no_package_message,
     plan_files,
+    release_key,
+    resolve_python,
     runtime_dependencies,
     scaffold,
     set_rigor,
@@ -80,6 +89,7 @@ from rumbo.scaffold import (
     valid_package,
     valid_sdk_module,
     valid_sdk_package,
+    write_text,
 )
 from rumbo.sensors import check, check_tests_not_weakened
 from rumbo.tour import load_commits, render_markdown, resolve_base
@@ -124,18 +134,27 @@ def _detect(args: argparse.Namespace) -> Detected | None:
     root = Path(args.dir).resolve()
     if not root.is_dir():
         raise ValueError(f"--adopt needs an existing project directory; {root} does not exist")
-    try:
-        detected = detect_project(root, args.package)
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"could not parse pyproject.toml: {exc}") from exc
+    detected = detect_project(root, args.package)
     print(f"Detected in {root} (--adopt): {detected.summary()}")
     return detected
 
 
-def _config_from_args(args: argparse.Namespace) -> Config:
-    interactive = sys.stdin.isatty() and not args.yes
+def _interactive(args: argparse.Namespace) -> bool:
+    """The A0 questions are asked: no `--yes`, and standard input is a real console.
+
+    `is_console`, not `isatty()`: on Windows that is also true for the NUL device.
+    """
+    return not args.yes and is_console(sys.stdin)
+
+
+def _config_from_args(args: argparse.Namespace) -> tuple[Config, list[str]]:
+    """The configuration of `rumbo init`, and what the detection has to tell the human."""
+    interactive = _interactive(args)
     if not interactive and not args.yes:
         raise ValueError("stdin is not a terminal: pass --yes with explicit flags (see --help)")
+    root = Path(args.dir).resolve()
+    if root.exists() and not root.is_dir():
+        raise ValueError(f"{root} is not a directory")
 
     name, package, llm = args.name, args.package, args.llm
     provider, rigor, case = args.provider, args.rigor, args.case
@@ -150,7 +169,11 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         print("A0 · RUMBO initial questions (Enter accepts the value in brackets)\n")
         name = name or _ask("1. Project name", default_name, valid_name)
         default_package = (detected.package if detected else None) or to_package(name)
-        package = package or _ask("   Python package (snake_case)", default_package, valid_package)
+        package = package or _ask(
+            "   Python package (snake_case)",
+            default_package,
+            (lambda answer: valid_package(answer, adopted=True)) if detected else valid_package,
+        )
         # ADR-0010: the kind is the question; the LLM capability is its sub-question.
         kind = kind or _ask("2. What are you building?", default_kind, choices=list(KINDS))
         if llm is None:
@@ -173,11 +196,21 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         name = name or default_name
         package = package or (detected.package if detected else None) or to_package(name)
     kind = kind or default_kind  # ADR-0010 default; --layout and --layers are never asked
-    if detected and not layout and not layers:
-        layout = detected.layout
+    src = DEFAULT_SRC
+    if detected:
+        # ADR-0029: the package that was finally chosen is a directory on disk, and keeps the
+        # name it has there; ADR-0020: where it lives is never asked and has no flag.
+        found = find_package(root, package)
+        if found is None:
+            raise ValueError(no_package_message(root, args.package or None))
+        src, package = found
+        if not layout and not layers:
+            layout = detect_layout(root, package)
     if llm and layout and layout != "hexagonal":
         print(f"note: an LLM product is hexagonal (ADR-0010); --layout {layout} is ignored")
-    return Config(
+    # ADR-0029: the Python the project already promises; `--python` wins when it allows it.
+    python, notes = resolve_python(root, args.python)
+    cfg = Config(
         name=name,
         package=package,
         llm=bool(llm),
@@ -192,12 +225,12 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         layers=layers,
         adopted=detected is not None,
         tests_dir=detected.tests_dir if detected else "tests",
-        # ADR-0020: where the package that was finally chosen lives (never asked, no flag).
-        src=detect_src(Path(args.dir).resolve(), package) if detected else DEFAULT_SRC,
-        python=args.python or DEFAULT_PYTHON,
+        src=src,
+        python=python,
         # ADR-0015: the type checker is a flag, never an A0 question.
         types=getattr(args, "types", None) or DEFAULT_TYPE_CHECKER,
     )
+    return cfg, notes
 
 
 def _init_summary(cfg: Config) -> str:
@@ -222,7 +255,7 @@ def _next_steps(steps: list[str]) -> str:
 
 def cmd_init(args: argparse.Namespace) -> int:
     try:
-        cfg = _config_from_args(args)
+        cfg, notes = _config_from_args(args)
     except ValueError as exc:
         return _err(str(exc))
     dest = Path(args.dir).resolve()
@@ -230,10 +263,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"  {_init_summary(cfg)}\n")
     if args.force:
         print(
-            "--force: existing files are overwritten (a .bak copy is kept); "
+            "--force: existing files that differ from the template are overwritten after a "
+            "backup copy (.bak, then .bak.1, ...: a backup is never overwritten); "
             "pyproject.toml and .gitignore are merged, never replaced.\n"
         )
-    interactive = sys.stdin.isatty() and not args.yes
+    interactive = _interactive(args)
     existing = [p.name for p in dest.iterdir() if p.name != ".git"] if dest.is_dir() else []
     if interactive and existing and not args.force and not cfg.adopted:
         shown = ", ".join(sorted(existing)[:6]) + (", ..." if len(existing) > 6 else "")
@@ -246,7 +280,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         if answer != "yes":
             print("Nothing written.")
             return USAGE_ERROR
-    rep = scaffold(cfg, dest, force=args.force)
+    try:
+        # ADR-0029: everything is read and validated before the first file is written.
+        rep = scaffold(cfg, dest, force=args.force)
+    except ValueError as exc:
+        return _err(f"{exc} (nothing was written)")
+    rep.warnings[:0] = notes
     if not args.no_install:
         install(cfg, dest, rep)
     print("\n" + rep.summary())
@@ -254,7 +293,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # in every other case the command is the human's first step in this clone.
     declare = (
         [f"{' '.join(HUMAN_COMMAND)}    # you, the human, once per clone (never the agent)"]
-        if (dest / ".git").exists() and not _declared_human(dest)
+        if git_prefix(dest) is not None and not _declared_human(dest)
         else []
     )
     if args.no_install:
@@ -286,10 +325,13 @@ def cmd_update(args: argparse.Namespace) -> int:
         project = Project.load(root)
     except (FileNotFoundError, ValueError) as exc:
         return _err(str(exc))
-    if args.diff:
-        print(update_diff(project, root))
-        return 0
-    rep = update(project, root)
+    try:
+        if args.diff:
+            print(update_diff(project, root))
+            return 0
+        rep = update(project, root, allow_downgrade=args.allow_downgrade)
+    except ValueError as exc:  # a hand-edited [tool.rumbo], or a harness newer than this CLI
+        return _err(str(exc))
     print(rep.summary())
     print(f"\nHarness version is now {__version__}. Review the diff with: git diff")
     return 0
@@ -316,14 +358,24 @@ def cmd_promote(args: argparse.Namespace) -> int:
         print(f"Error: {message}", file=sys.stderr)
         return 1
     pyproject = root / "pyproject.toml"
+    original = pyproject.read_bytes()
     try:
-        text = set_rigor(pyproject.read_text(encoding="utf-8"), target)
+        # ADR-0029: the configuration of the new level is built before anything is written.
+        config_for(dataclasses.replace(project, rigor=target), root)
+        text = set_rigor(read_utf8(pyproject, "pyproject.toml"), target)
     except ValueError as exc:
         return _err(str(exc))
-    with pyproject.open("w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    write_text(pyproject, text)
     print(f"Promoting {project.name or project.package} from {project.rigor} to {target}")
-    rep = update(Project.load(root), root)
+    try:
+        rep = update(Project.load(root), root)
+    except BaseException as exc:
+        # Atomic: a failure leaves the rigor (and the table) as they were, so the same
+        # command can be run again once its cause is fixed.
+        pyproject.write_bytes(original)
+        if isinstance(exc, ValueError):
+            return _err(f"{exc} (the rigor is still {project.rigor})")
+        raise
     if not args.no_install:
         for cmd in list(rep.suggested):
             if (
@@ -347,8 +399,14 @@ NEW_KINDS = {
 }
 
 
+LAST_NUMBER = 9999  # documents are NNNN-title.md (`numbered_documents` reads four digits)
+
+
 def _next_number(folder: Path) -> int:
-    numbers = [int(m.group(1)) for p in folder.glob("*.md") if (m := re.match(r"^(\d+)-", p.name))]
+    """One more than the highest four-digit prefix: `20261116-notes.md` is not a number."""
+    numbers = [
+        int(m.group(1)) for p in folder.glob("*.md") if (m := re.match(r"^(\d{4})-", p.name))
+    ]
     return max(numbers, default=0) + 1
 
 
@@ -369,6 +427,8 @@ def cmd_new(args: argparse.Namespace) -> int:
         heading = f"# Postmortem: {title} ({today})"
     else:
         n = _next_number(folder)
+        if n > LAST_NUMBER:
+            return _err(f"{folder_rel} already holds number {LAST_NUMBER}: the numbering is full")
         target = folder / f"{n:04d}-{slug(title)}.md"
         heading = f"# {prefix}-{n:04d}: {title}"
         text = text.replace("Date: YYYY-MM-DD", f"Date: {today}")
@@ -376,7 +436,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     if target.exists():
         return _err(f"{target.relative_to(root)} already exists")
     twins = [p.name for p in folder.glob(f"*-{slug(title)}.md")]
-    target.write_text(text, encoding="utf-8")
+    write_text(target, text)
     print(f"Created {target.relative_to(root).as_posix()}")
     if twins:
         print(f"WARNING: a document with the same title already exists: {', '.join(twins)}")
@@ -384,16 +444,30 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------- decision
+# What `str.splitlines` breaks a line at.
+LINE_BREAKS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
 def cmd_decision(args: argparse.Namespace) -> int:
     path = Path(args.dir).resolve() / "docs" / "decisions.md"
     if not path.exists():
         return _err("missing docs/decisions.md; did you run 'rumbo init'?")
+    title = args.title.strip()
+    if not title:
+        return _err("the title cannot be empty")
+    # One entry is one heading and three lines: a line break inside a field would let a
+    # title carry a heading of its own (another decision, a gate signature).
+    for field, value in (("the title", args.title), ("--why", args.why), ("--who", args.who)):
+        if any(ch in value for ch in LINE_BREAKS):
+            return _err(f"{field} cannot contain a line break: a decision is one line")
     today = dt.date.today().isoformat()
-    entry = f"\n## {today} — {args.title}\n- Decision: {args.title}\n"
+    entry = f"\n## {today} — {title}\n- Decision: {title}\n"
     if args.why:
         entry += f"- Why: {args.why}\n"
     entry += f"- Decided by: {args.who}\n"
-    with path.open("a", encoding="utf-8") as f:
+    if path.read_bytes()[-1:] not in (b"", b"\n"):
+        entry = "\n" + entry  # the heading starts on a line of its own
+    with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(entry)
     print(f"Logged in docs/decisions.md ({today}).")
     return 0
@@ -436,7 +510,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     try:
         project = Project.load(root)
-        cfg = Config.from_project(project)
+        cfg = config_for(project, root)  # ADR-0029: what the project had, as it was recorded
     except (FileNotFoundError, ValueError) as exc:
         return _err(str(exc))
     problems: list[str] = []
@@ -450,23 +524,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not (root / "uv.lock").exists():
         problems.append(
             "missing uv.lock (CI runs 'uv sync --locked'): run the 'uv add' lines rumbo init "
-            "printed (or 'rumbo init --force' without --no-install), then 'uv lock'"
+            "printed, or 'uv lock'"
         )
-    warnings: list[str] = []
+    # ADR-0029: the guard is wired where it has to run, and matches every tool it judges.
+    unwired, mismatched = guard_wiring(root)
+    problems += unwired
+    warnings: list[str] = list(mismatched)
     codeowners = project.read(".github/CODEOWNERS") or ""
     if "@your-handle" in codeowners:
         warnings.append(".github/CODEOWNERS still has the @your-handle placeholder")
     security = project.read("SECURITY.md") or ""
     if "<security contact" in security:
         warnings.append("SECURITY.md still has the <security contact> placeholder")
-    if (root / ".git").exists() and not _declared_human(root):
+    if git_prefix(root) is not None and not _declared_human(root):
         warnings.append(
             "rumbo.human is not set in this clone: the git hooks treat your commits as an "
             "agent's (ADR-0008); run 'git config rumbo.human true'"
         )
     for warning in warnings:
         print(f"⚠️  {warning}")
-    if project.harness_version and project.harness_version != __version__:
+    if release_key(project.harness_version) > release_key(__version__):
+        print(
+            f"⚠️  harness version {project.harness_version} is newer than the CLI "
+            f"({__version__}): upgrade rumbo ('rumbo update' would downgrade the harness)"
+        )
+    elif project.harness_version and project.harness_version != __version__:
         print(
             f"⚠️  harness version {project.harness_version} differs from the CLI ({__version__}): "
             "run 'rumbo update'"
@@ -1225,7 +1307,7 @@ def cmd_tour(args: argparse.Namespace) -> int:
             # A directory: name the file like the Makefile's `review` target did.
             out = out / f"{dt.date.today().isoformat()}-{commits[-1].short}.md"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        write_text(out, text)
         print(f"Wrote {out}")
     else:
         print(text)
@@ -1318,18 +1400,18 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
     if args.source:
         case["source"] = args.source
     datasets.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
+    with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(case, ensure_ascii=False) + "\n")
     log = root / "evals" / "error_analysis" / "log.md"
     log.parent.mkdir(parents=True, exist_ok=True)
     if not log.exists():
-        log.write_text(
+        write_text(
+            log,
             "# Error analysis log\n\nOne line per production failure turned into an eval case "
             "(`rumbo eval add`). Review it in the weekly trace ritual.\n\n"
             "| Date | Case | Suite | Source | Note |\n|---|---|---|---|---|\n",
-            encoding="utf-8",
         )
-    with log.open("a", encoding="utf-8") as f:
+    with log.open("a", encoding="utf-8", newline="\n") as f:
         f.write(
             f"| {dt.date.today().isoformat()} | {_cell(case_id)} | {args.suite} | "
             f"{_cell(args.source)} | {_cell(args.note)} |\n"
@@ -1340,6 +1422,17 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------- metrics
+def _days(value: str) -> int:
+    """The `--days` window as the parser reads it: a whole number the calendar holds."""
+    try:
+        days = int(value)
+    except ValueError:
+        days = -1
+    if not 0 <= days <= MAX_DAYS:
+        raise argparse.ArgumentTypeError(f"--days must be between 0 and {MAX_DAYS}, got {value!r}")
+    return days
+
+
 def cmd_metrics(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     if not (root / "pyproject.toml").exists():
@@ -1406,19 +1499,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--python",
         metavar="X.Y",
-        help="minimum Python the project promises (ADR-0014; default {DEFAULT_PYTHON}; one of "
-        f"{', '.join(SUPPORTED_PYTHONS)})",
+        help="minimum Python the project promises (ADR-0014), one of "
+        f"{', '.join(SUPPORTED_PYTHONS)}; default: the lowest one the project's requires-python "
+        f"allows, else the one .python-version pins, else {DEFAULT_PYTHON} (ADR-0029)",
     )
     p.add_argument("--yes", "-y", action="store_true", help="do not ask; use flags only")
     p.add_argument(
         "--adopt",
         action="store_true",
-        help="existing project (ADR-0013): detect package, kind, layout and tests directory, "
-        "write the harness without the src/ and tests skeleton, check only changed files",
+        help="existing project (ADR-0013): detect package, kind, layout, tests directory and "
+        "Python version, write the harness without the src/ and tests skeleton, keep the "
+        "project's own pytest, CI and agent configuration, check only changed files",
     )
     p.add_argument("--no-install", action="store_true", help="write files only; skip uv/pre-commit")
     p.add_argument(
-        "--force", action="store_true", help="overwrite existing files (keeps .bak copies)"
+        "--force",
+        action="store_true",
+        help="overwrite existing files that differ from the template (a backup copy is kept "
+        "as .bak, .bak.1, ...; a backup is never overwritten)",
     )
     p.set_defaults(func=cmd_init)
 
@@ -1431,6 +1529,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_dir(p)
     p.add_argument(
         "--diff", action="store_true", help="show what would change (nothing is written)"
+    )
+    p.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="update even when the project's harness is newer than this rumbo (ADR-0029)",
     )
     p.set_defaults(func=cmd_update)
 
@@ -1591,7 +1694,12 @@ def build_parser() -> argparse.ArgumentParser:
         "'deploy ...', 'incident ...'.",
     )
     add_dir(p)
-    p.add_argument("--days", type=int, default=30, help="window for commits and deploys")
+    p.add_argument(
+        "--days",
+        type=_days,
+        default=30,
+        help=f"window for commits and deploys, 0 to {MAX_DAYS} (default 30)",
+    )
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_metrics)
     return parser
@@ -1620,8 +1728,15 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNew project? Start with: rumbo init    Existing one? Check it with: rumbo doctor")
         return USAGE_ERROR
     args = parser.parse_args(argv)
-    if args.command == "init" and args.package and not valid_package(args.package):
-        return _err(f"invalid package name {args.package!r}; use snake_case")
+    # ADR-0029: an adopted project keeps the name of its package; a new one is snake_case
+    # (whether it collides with a generated module depends on the layout: Config decides).
+    if (
+        args.command == "init"
+        and args.package
+        and not valid_package(args.package, adopted=args.adopt, generated=())
+    ):
+        expected = "a Python identifier" if args.adopt else "use snake_case"
+        return _err(f"invalid package name {args.package!r}; {expected}")
     return args.func(args)
 
 

@@ -60,6 +60,10 @@ adopted = true
 {{#custom_tests_dir}}
 tests = "{{tests_dir}}"
 {{/custom_tests_dir}}
+# ADR-0029: what the project already had when it was adopted, decided once: its own CI
+# workflows (RUMBO wrote no ci.yml) and its own infra/ (RUMBO wrote nothing there).
+own_ci = {{own_ci_toml}}
+own_infra = {{own_infra_toml}}
 {{/adopted}}
 
 [tool.rumbo.checks]
@@ -172,10 +176,18 @@ extra_checks = true
 {{/arch}}
 {{/mypy}}
 
+{{#pytest_table}}
 [tool.pytest.ini_options]
-testpaths = ["{{tests_dir}}"]
+{{#adopted}}
+# ADR-0029: the directories where adoption found tests, and none of RUMBO's own options (a
+# project that already configured pytest gets no table at all).
+{{/adopted}}
+testpaths = [{{testpaths_toml}}]
+{{^adopted}}
 addopts = "-q --strict-markers"
+{{/adopted}}
 
+{{/pytest_table}}
 [tool.coverage.run]
 source = ["{{package_path}}"]
 branch = true

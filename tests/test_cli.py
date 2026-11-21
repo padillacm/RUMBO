@@ -1547,6 +1547,8 @@ def test_init_adopt_interactive_defaults_are_the_detected_values(
         return ""
 
     monkeypatch.setattr(sys, "stdin", Tty())
+    # ADR-0029: the CLI asks `is_console`, which on Windows also asks the console API.
+    monkeypatch.setattr(cli, "is_console", lambda stream: stream.isatty())
     monkeypatch.setattr("builtins.input", accept_default)
     assert main(["init", "--adopt", "--no-install", "--dir", str(root)]) == 0
     assert any("[legacy-app]" in p for p in prompts)
@@ -1875,3 +1877,406 @@ def test_init_types_mypy_and_refuses_an_unknown_checker(
     assert main(["init", "--dir", str(tmp_path / "default"), *flags]) == 0
     assert "types=pyright" in capsys.readouterr().out
     assert Project.load(tmp_path / "default").types == "pyright"
+
+
+# ----------------- ADR-0029: adoption respects what the project has, and destroys nothing
+def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, str, str]:
+    code = main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def _package_at_root(root: Path, pyproject: str, package: str = "legacy_app") -> Path:
+    """A project that existed before RUMBO, with its package at the root and tests in tests/."""
+    (root / package).mkdir(parents=True)
+    (root / package / "__init__.py").write_text("", encoding="utf-8")
+    (root / "tests").mkdir()
+    (root / "tests" / "test_legacy.py").write_text(
+        "def test_ok() -> None:\n    assert 1\n", encoding="utf-8"
+    )
+    (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    return root
+
+
+BUILT = '\n[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n'
+
+
+# Covers F-0005.R14 (specs/0005-gates-and-traceability.md).
+def test_doctor_does_not_send_anyone_to_init_force(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 (C1): `--force` rewrites the human's documents; a lock file needs `uv lock`."""
+    code, out, _ = _run(["doctor", "--dir", str(simple_project)], capsys)
+    assert code == 1 and "missing uv.lock" in out
+    assert "uv lock" in out and "--force" not in out
+
+
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_refuses_before_writing_and_force_says_what_it_does(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    init = ["init", "--yes", "--no-install", "--no-llm", "--rigor", "mvp"]
+    notes = tmp_path / "notes.txt"
+    notes.write_text("x", encoding="utf-8")
+    code, _, err = _run([*init, "--dir", str(notes)], capsys)
+    assert code == 2 and "not a directory" in err
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / ".gitignore").write_bytes(".venv\n".encode("utf-16"))
+    code, _, err = _run([*init, "--dir", str(broken)], capsys)
+    assert code == 2 and ".gitignore" in err and "UTF-8" in err
+    assert sorted(_tree(broken)) == [".gitignore"]
+    assert main([*init, "--dir", str(tmp_path / "ok")]) == 0
+    capsys.readouterr()
+    code, out, _ = _run([*init, "--force", "--dir", str(tmp_path / "ok")], capsys)
+    assert code == 0 and "never overwritten" in out and "Unchanged" in out
+    assert not [rel for rel in _tree(tmp_path / "ok") if ".bak" in rel]
+
+
+# Covers F-0004.R9, F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_adopt_takes_the_python_version_from_the_project(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 fitness (C3): `requires-python = ">=3.13"` and a harness on 3.11."""
+    requires = '[project]\nname = "legacy-app"\nversion = "1.0"\nrequires-python = "{}"\n' + BUILT
+    root = _package_at_root(tmp_path / "new", requires.format(">=3.13"))
+    code, out, _ = _run([*ADOPT, "--kind", "library", "--dir", str(root)], capsys)
+    assert code == 0 and "python=3.13" in out
+    tool = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+    assert tool["rumbo"]["python"] == "3.13" and tool["ruff"]["target-version"] == "py313"
+    assert (root / ".python-version").read_text(encoding="utf-8") == "3.13\n"
+    ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert 'python: ["3.13"]' in ci
+
+    # `--python` wins, but not below what the project requires; nothing is written then.
+    low = _package_at_root(tmp_path / "low", requires.format(">=3.13"))
+    before = _tree(low)
+    code, _, err = _run([*ADOPT, "--python", "3.11", "--dir", str(low)], capsys)
+    assert code == 2 and "--python 3.11" in err and ">=3.13" in err
+    assert _tree(low) == before
+    code, _, err = _run([*ADOPT, "--python", "3.13", "--dir", str(low)], capsys)
+    assert code == 0 and Project.load(low).python == "3.13"
+
+    # Outside what this rumbo supports: the nearest one when it satisfies, else a refusal.
+    old = _package_at_root(tmp_path / "old", requires.format(">=3.9"))
+    (old / ".python-version").write_text("3.9\n", encoding="utf-8")
+    code, out, _ = _run([*ADOPT, "--dir", str(old)], capsys)
+    assert code == 0 and Project.load(old).python == "3.11"
+    assert ">=3.9" in out and ".python-version" in out  # both are said in the report
+    assert (old / ".python-version").read_text(encoding="utf-8") == "3.9\n"
+    future = _package_at_root(tmp_path / "future", requires.format(">=3.99"))
+    code, _, err = _run([*ADOPT, "--dir", str(future)], capsys)
+    assert code == 2 and ">=3.99" in err and not (future / "AGENTS.md").exists()
+
+    # `uv init`, then `rumbo init` without --adopt: the same detection.
+    uv = tmp_path / "uv"
+    uv.mkdir()
+    (uv / "pyproject.toml").write_text(requires.format(">=3.12"), encoding="utf-8")
+    (uv / ".python-version").write_text("3.12\n", encoding="utf-8")
+    init = ["init", "--yes", "--no-install", "--no-llm", "--rigor", "mvp"]
+    code, out, _ = _run([*init, "--dir", str(uv)], capsys)
+    assert code == 0 and Project.load(uv).python == "3.12"
+
+
+# Covers F-0004.R11, F-0004.R13 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_promote_is_atomic_and_a_bad_table_is_one_line(
+    simple_project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0029 fitness (C4): a failure left the project promoted, and the retry refused."""
+    pyproject = simple_project / "pyproject.toml"
+    original = pyproject.read_bytes()
+    edited = original.replace(b'rigor = "prototype"', b'rigor = "prototype"\ntests = "tests/unit"')
+    assert edited != original
+    try:
+        pyproject.write_bytes(edited)
+        for command in (["update"], ["update", "--diff"], ["promote", "mvp", "--no-install"]):
+            code, _, err = _run([*command, "--dir", str(simple_project)], capsys)
+            assert code == 2 and "Traceback" not in err
+            assert err.startswith("Error: ") and len(err.splitlines()) == 1
+            assert "tests directory" in err and "[tool.rumbo]" in err
+            assert pyproject.read_bytes() == edited
+        # A failure after the rigor was written puts the old value back.
+        pyproject.write_bytes(original)
+
+        def broken(*_args: object, **_kwargs: object) -> None:
+            raise ValueError("the update failed half-way")
+
+        monkeypatch.setattr(cli, "update", broken)
+        code, _, err = _run(
+            ["promote", "mvp", "--no-install", "--dir", str(simple_project)], capsys
+        )
+        assert code == 2 and "the update failed half-way" in err
+        assert pyproject.read_bytes() == original
+        monkeypatch.undo()
+        assert main(["promote", "mvp", "--no-install", "--dir", str(simple_project)]) == 0
+        assert Project.load(simple_project).rigor == "mvp"
+    finally:
+        pyproject.write_bytes(original)
+
+
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_update_refuses_a_newer_harness_unless_told(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 fitness (C5)."""
+    pyproject = simple_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    current = f'version = "{cli.__version__}"'
+    try:
+        pyproject.write_text(original.replace(current, 'version = "99.0.0"', 1), encoding="utf-8")
+        code, out, err = _run(["update", "--dir", str(simple_project)], capsys)
+        assert code == 2 and "99.0.0" in err and cli.__version__ in err
+        assert "--allow-downgrade" in err and "Harness version is now" not in out
+        assert Project.load(simple_project).harness_version == "99.0.0"
+        code, out, _ = _run(["doctor", "--dir", str(simple_project)], capsys)
+        assert "99.0.0 is newer than the CLI" in out and "run 'rumbo update'" not in out
+        code, _, err = _run(
+            ["promote", "mvp", "--no-install", "--dir", str(simple_project)], capsys
+        )
+        assert code == 2 and "99.0.0" in err and Project.load(simple_project).rigor == "prototype"
+        assert main(["update", "--allow-downgrade", "--dir", str(simple_project)]) == 0
+        assert Project.load(simple_project).harness_version == cli.__version__
+    finally:
+        pyproject.write_text(original, encoding="utf-8")
+
+
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md) and F-0005.R14.
+def test_adopting_over_agent_and_hook_files_prints_the_snippets_and_doctor_sees_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 fitness (C6): the guard was left unwired while `doctor` said complete."""
+    root = _legacy_project(tmp_path)
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"permissions": {"allow": []}}\n', encoding="utf-8")
+    hooks = root / ".pre-commit-config.yaml"
+    hooks.write_text("repos: []\n", encoding="utf-8")
+    code, out, _ = _run([*ADOPT, "--dir", str(root)], capsys)
+    assert code == 0 and '"PreToolUse"' in out and "- id: rumbo-guard-commit-msg" in out
+    assert settings.read_text(encoding="utf-8") == '{"permissions": {"allow": []}}\n'
+    (root / "uv.lock").write_text("", encoding="utf-8")
+    code, out, _ = _run(["doctor", "--dir", str(root)], capsys)
+    assert code == 1 and "Harness complete" not in out
+    assert out.count("❌ .claude/settings.json: no ") == 3
+    assert out.count("❌ .pre-commit-config.yaml: no hook runs scripts/rumbo_guard.py") == 2
+    # Wired as the snippets say, with the matchers of a project created before PowerShell.
+    fresh = tmp_path / "fresh"
+    assert (
+        main(["init", "--yes", "--no-install", "--no-llm", "--rigor", "mvp", "--dir", str(fresh)])
+        == 0
+    )
+    hooks.write_bytes((fresh / ".pre-commit-config.yaml").read_bytes())
+    wired = (fresh / ".claude" / "settings.json").read_text(encoding="utf-8")
+    settings.write_text(wired.replace("|PowerShell", ""), encoding="utf-8")
+    capsys.readouterr()
+    code, out, _ = _run(["doctor", "--dir", str(root)], capsys)
+    assert code == 0 and "Harness complete" in out
+    assert out.count("⚠️  .claude/settings.json:") == 2 and "PowerShell" in out
+    settings.write_text(wired, encoding="utf-8")
+    code, out, _ = _run(["doctor", "--dir", str(root)], capsys)
+    assert code == 0 and "settings.json" not in out
+
+
+# Covers F-0004.R9, F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_adopt_refuses_what_is_not_on_disk(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 fitness (C7, C8): a package, layers or an evals entry that do not exist."""
+    plain = '[project]\nname = "{}"\nversion = "1.0"\n' + BUILT
+    single = tmp_path / "single"
+    single.mkdir()
+    (single / "pyproject.toml").write_text(plain.format("tool-x"), encoding="utf-8")
+    (single / "tool_x.py").write_text("x = 1\n", encoding="utf-8")
+    before = _tree(single)
+    code, _, err = _run([*ADOPT, "--dir", str(single)], capsys)
+    assert code == 2 and "single-module" in err and "tool_x.py" in err
+    assert "__init__.py" in err and _tree(single) == before
+    code, _, err = _run([*ADOPT, "--package", "nowhere", "--dir", str(single)], capsys)
+    assert code == 2 and "nowhere" in err and _tree(single) == before
+
+    # The package keeps the spelling it has on disk, whatever `[project].name` says.
+    camel = _package_at_root(tmp_path / "camel", plain.format("mypkg"), package="MyPkg")
+    code, out, _ = _run([*ADOPT, "--dir", str(camel)], capsys)
+    assert code == 0 and "package=MyPkg " in out
+    tool = tomllib.loads((camel / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+    assert tool["rumbo"]["package"] == "MyPkg" and tool["coverage"]["run"]["source"] == ["MyPkg"]
+    # A package named like a layer is the project's own name: adopted as it is.
+    app = _package_at_root(tmp_path / "app", plain.format("app"), package="app")
+    assert main([*ADOPT, "--dir", str(app)]) == 0
+    assert Project.load(app).package == "app"
+    capsys.readouterr()
+
+    # Layers and an evals entry that were never written are not configured.
+    legacy = _package_at_root(tmp_path / "legacy", plain.format("legacy-app"))
+    before = _tree(legacy)
+    adopt = [arg for arg in ADOPT if arg != "--no-llm"]
+    code, _, err = _run([*adopt, "--llm", "--provider", "anthropic", "--dir", str(legacy)], capsys)
+    assert code == 2 and "legacy_app/domain/" in err and "legacy_app/app/entrypoint.py" in err
+    code, _, err = _run([*ADOPT, "--kind", "data", "--dir", str(legacy)], capsys)
+    assert code == 2 and "legacy_app/pipeline.py" in err
+    code, _, err = _run([*ADOPT, "--layout", "hexagonal", "--dir", str(legacy)], capsys)
+    assert code == 2 and "legacy_app/adapters/" in err and "--layout flat" in err
+    assert _tree(legacy) == before
+    code, out, _ = _run([*ADOPT, "--dir", str(legacy)], capsys)
+    assert code == 0 and "[build-system]" not in out  # it has one: nothing to warn about
+    checks = tomllib.loads((legacy / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+    assert "importlinter" not in checks and "arch" not in checks["rumbo"]["checks"]
+
+    # No build backend: the package is not installed, and the report says how to fix it.
+    bare = _package_at_root(tmp_path / "bare", '[project]\nname = "legacy-app"\nversion = "1"\n')
+    code, out, _ = _run([*ADOPT, "--dir", str(bare)], capsys)
+    assert code == 0 and "has no [build-system]" in out and "not installed" in out
+    assert "build-system" not in tomllib.loads((bare / "pyproject.toml").read_text("utf-8"))
+
+
+# Covers F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_asks_the_console_not_isatty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 (C10): on Windows `isatty()` is true for the NUL device; `is_console` is the
+    one question both places ask."""
+
+    class Nul:
+        def isatty(self) -> bool:
+            return True
+
+    asked: list[object] = []
+    console = False
+
+    def is_console(stream: object) -> bool:
+        asked.append(stream)
+        return console
+
+    stdin = Nul()
+    monkeypatch.setattr(sys, "stdin", stdin)
+    monkeypatch.setattr(cli, "is_console", is_console)
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "notes.txt").write_text("x", encoding="utf-8")
+    code, _, err = _run(["init", "--no-install", "--dir", str(root)], capsys)
+    assert code == 2 and "stdin is not a terminal" in err
+    assert asked == [stdin] and sorted(_tree(root)) == ["notes.txt"]
+    # At a console both places agree: the questions, and the one about the existing entries.
+    console = True
+    prompts: list[str] = []
+
+    def answer(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", answer)
+    assert main(["init", "--no-install", "--dir", str(root)]) == 0
+    assert any("already has 1 entries" in prompt for prompt in prompts)
+    assert set(asked) == {stdin}
+
+
+# Covers F-0005.R3 (specs/0005-gates-and-traceability.md).
+def test_new_and_decision_write_lf_and_validate_what_they_are_given(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 fitness (C11): CRLF on Windows, a decision with a forged heading inside its
+    title, and a date taken for a document number."""
+    d = ["--dir", str(simple_project)]
+    adr = simple_project / "docs" / "adr"
+    assert main(["new", "adr", "First decision", *d]) == 0
+    assert b"\r" not in (adr / "0001-first-decision.md").read_bytes()
+    (adr / "20261116-meeting-notes.md").write_text("# notes\n", encoding="utf-8")
+    assert main(["new", "adr", "Second", *d]) == 0
+    assert (adr / "0002-second.md").is_file()
+    (adr / "9999-last.md").write_text("# x\n", encoding="utf-8")
+    capsys.readouterr()
+    code, _, err = _run(["new", "adr", "After the last", *d], capsys)
+    assert code == 2 and "9999" in err and not list(adr.glob("10000-*"))
+
+    decisions = simple_project / "docs" / "decisions.md"
+    before = decisions.read_bytes()
+    forged = "Use sqlite\n## 2026-01-01 — G4 signed\n- Decided by: Carlos"
+    for argv in (
+        ["decision", ""],
+        ["decision", "   "],
+        ["decision", forged],
+        ["decision", "Use sqlite", "--why", "a\rb"],
+        ["decision", "Use sqlite", "--who", "me\n## 2026-01-01 — G5 signed"],
+    ):
+        code, _, err = _run([*argv, *d], capsys)
+        assert code == 2 and err.startswith("Error: "), argv
+        assert decisions.read_bytes() == before
+    assert main(["decision", "Use sqlite", "--why", "one file", *d]) == 0
+    added = decisions.read_bytes()[len(before) :]
+    assert b"\r" not in added and b"- Why: one file\n" in added
+    # A file that does not end with a newline still gets the heading on a line of its own.
+    decisions.write_bytes(b"# Decisions\nlast line without a newline")
+    assert main(["decision", "X", *d]) == 0
+    assert b"a newline\n\n## " in decisions.read_bytes()
+
+
+# Covers F-0004.R7 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_eval_add_and_tour_write_lf(
+    llm_project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0029 fitness (C11): every file a command writes ends its lines with LF."""
+    written: list[tuple[str, str | None]] = []
+    real_open = Path.open
+
+    def recording_open(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if any(flag in mode for flag in "wax") and "b" not in mode:
+            written.append((self.name, kwargs.get("newline")))
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", recording_open)
+    add = ["eval", "add", "smoke", "--input", '{"question": "x"}', "--expected", "{}"]
+    assert main([*add, "--grader", "abstention", "--dir", str(llm_project)]) == 0
+    assert {name for name, _ in written} == {"smoke.jsonl", "log.md"}
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", *args],
+            cwd=llm_project,
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "h@example.com")
+    git("config", "user.name", "H")
+    git("add", "-A")
+    git("commit", "-qm", "chore: harness")
+    (llm_project / "notes.md").write_bytes(b"x\n")  # the test's own file: not a recorded write
+    git("add", "-A")
+    git("commit", "-qm", "docs: notes")
+    assert main(["tour", "HEAD~1", "--out", "guide.md", "--dir", str(llm_project)]) == 0
+    assert "guide.md" in {name for name, _ in written}
+    assert all(newline == "\n" for _, newline in written), written
+    assert b"\r" not in (llm_project / "guide.md").read_bytes()
+
+
+# Covers F-0005.R15 (specs/0005-gates-and-traceability.md).
+def test_metrics_days_is_a_usage_error_of_the_parser(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for days in ("36501", "-1", "soon"):
+        with pytest.raises(SystemExit) as usage:
+            main(["metrics", "--dir", str(simple_project), "--days", days])
+        captured = capsys.readouterr()
+        assert usage.value.code == 2 and captured.out == ""
+        assert "usage: rumbo metrics" in captured.err
+        assert "--days must be between 0 and 36500" in captured.err
+    assert main(["metrics", "--dir", str(simple_project), "--days", "36500"]) == 0
+
+
+# Covers F-0004.R13 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_promote_says_what_differs_from_a_fresh_project_of_the_level(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """After `promote mvp` the Makefile has no `security:` alias and the `test` step has no
+    coverage: said, and neither is rewritten."""
+    makefile = (simple_project / "Makefile").read_bytes()
+    code, out, _ = _run(["promote", "mvp", "--no-install", "--dir", str(simple_project)], capsys)
+    assert code == 0 and "differs from the template: test" in out
+    assert "--cov" in out and "security" in out.split("differs from the template: test")[1]
+    assert _checks(simple_project)["test"] == "uv run pytest"
+    assert (simple_project / "Makefile").read_bytes() == makefile

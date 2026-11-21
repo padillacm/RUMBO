@@ -219,7 +219,9 @@ def test_metrics_days_is_bounded_with_a_message(
     """A window no calendar holds is a usage error (exit 2), not an OverflowError."""
     project(tmp_path)
     for days in ("99999999", "-1"):
-        assert main(["metrics", "--dir", str(tmp_path), "--days", days]) == 2
+        with pytest.raises(SystemExit) as usage:  # refused by the parser, as a usage error
+            main(["metrics", "--dir", str(tmp_path), "--days", days])
+        assert usage.value.code == 2
         captured = capsys.readouterr()
         assert "--days must be between 0 and 36500" in captured.err and captured.out == ""
     with pytest.raises(ValueError, match="--days must be between 0 and 36500, got 36501"):

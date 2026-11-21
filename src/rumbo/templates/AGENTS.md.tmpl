@@ -92,7 +92,7 @@ Most of these are enforced by the guard hook (`scripts/rumbo_guard.py`, wired in
   Parallel agents are read-only: exploration, alternative hypotheses, review against the spec, noisy test runs.
 - Long features: parallel drafts are fine, but ONE integrator with the full spec assembles them; writers never coordinate ad hoc.
 - If you touch an interface another spec depends on, write the new signature in that spec's "Data contracts" section.
-- When a spec closes, log `rumbo decision "F-000N closed" --why "<1 or 2 sessions>"` so the team measures session size.
+- When a spec closes, propose the line the human runs, `rumbo decision "F-000N closed" --why "<1 or 2 sessions>"`, so the team measures session size.
 
 ## Compact instructions
 When compacting, keep: the active spec id and its data contracts, open bugs and failing tests, architecture
@@ -102,4 +102,4 @@ decisions taken in this session, the list of files changed, and the next step. D
 - For design decisions, ask for the human's version first.
 - When the human is learning something new, explain and ask instead of solving everything.
 - Do not propose agents for irreversible decisions or security code without prior tests.
-- Log the decisions the human made, and why, in docs/decisions.md (`rumbo decision`).
+- Propose the text of each decision the human made, and why; the human records it in docs/decisions.md with `rumbo decision` (you never run it: it signs as the human).
