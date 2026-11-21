@@ -18,11 +18,14 @@ from {{package}}.app.ports import Completion, require_live
 def default_completion() -> Completion:
     """Wire the {{provider}} SDK here (the SDK is forbidden inside domain/).
 
-    Use the SDK's async client and `await` its call; pass `meter.remaining_seconds` as the
-    timeout so one call cannot overrun the request's budget (see app/budget.py).
+    Use the SDK's async client and `await` its call; hand it `timeout_s` as the request timeout
+    (the use case passes `meter.remaining_seconds`, see app/budget.py) so one call cannot
+    overrun the request's budget.
     """
 
-    async def complete(prompt: str, *, max_tokens: int = 1024) -> str:
+    async def complete(
+        prompt: str, *, max_tokens: int = 1024, timeout_s: float | None = None
+    ) -> str:
         require_live("{{provider}}")
         raise NotImplementedError("wire the {{provider}} SDK in adapters/llm.py")
 

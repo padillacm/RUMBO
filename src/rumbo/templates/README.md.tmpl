@@ -15,7 +15,10 @@ uv run python scripts/rumbo_check.py   # the whole harness must be green (offlin
 ```
 {{#llm}}
 
-Model calls happen only in `make evals-live`{{#claude_code}}, through the `claude` CLI with your own login{{/claude_code}}{{^claude_code}}, which needs `{{sdk_env_key}}` (copy `.env.example` to `.env`; use a development key with a spending limit){{/claude_code}}. In CI, only the nightly workflow holds that credential.
+The check never calls the model. On your machine and in CI the model is called only by `make evals-live`{{#claude_code}}, through the `claude` CLI with your own login{{/claude_code}}{{^claude_code}}, which needs `{{sdk_env_key}}`{{/claude_code}}: copy `.env.example` to `.env` ({{^claude_code}}a development key with a spending limit, and {{/claude_code}}the per-request limits) and `make evals-live` loads it. Where `make` is not installed, run
+`uv run --env-file .env python evals/run_evals.py --suite all --live`. In CI, only the nightly workflow holds that credential.
+
+Offline is the default (`app/ports.py`): an adapter reaches the model only with `RUMBO_EVALS_LIVE=1`, which the eval runner sets with `--live`, or with `RUMBO_LIVE=1`, the production switch{{#deployable}} that `infra/Dockerfile` sets in the image{{/deployable}}{{^deployable}} that the application embedding this package sets where it is deployed{{/deployable}}. Never set either in a test or in CI.
 {{/llm}}
 
 ## Working with the agent

@@ -15,6 +15,12 @@ RUN useradd --create-home --uid 10001 app
 WORKDIR /app
 COPY --from=build --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH"
+{{#llm}}
+# The production switch of the offline guard (app/ports.py): without it no adapter may reach
+# the model. The check and the tests never run in this image. Override it with an empty value
+# at deploy time to cut the model off without a new image (every request abstains).
+ENV RUMBO_LIVE=1
+{{/llm}}
 USER app
 {{#service}}
 EXPOSE 8000

@@ -22,6 +22,7 @@ import argparse
 import ast
 import base64
 import contextlib
+import dataclasses
 import datetime as dt
 import http.client
 import ipaddress
@@ -30,18 +31,19 @@ import os
 import re
 import subprocess
 import sys
-import tomllib
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, NamedTuple
 
 from rumbo import __version__
 from rumbo.gates import GATES, evaluate, report
-from rumbo.metrics import collect
+from rumbo.metrics import MAX_DAYS, collect
 from rumbo.metrics import render as render_metrics
 from rumbo.project import (
     DEFAULT_PYTHON,
@@ -53,6 +55,7 @@ from rumbo.project import (
     SUPPORTED_PYTHONS,
     TYPE_CHECKERS,
     Project,
+    read_utf8,
     rigor_rank,
     slug,
 )
@@ -63,11 +66,19 @@ from rumbo.scaffold import (
     Config,
     Detected,
     add_dev_dependencies,
+    config_for,
+    detect_layout,
     detect_project,
-    detect_src,
     dev_dependencies,
+    find_package,
+    git_prefix,
+    guard_wiring,
     install,
+    is_console,
+    no_package_message,
     plan_files,
+    release_key,
+    resolve_python,
     runtime_dependencies,
     scaffold,
     set_rigor,
@@ -78,6 +89,7 @@ from rumbo.scaffold import (
     valid_package,
     valid_sdk_module,
     valid_sdk_package,
+    write_text,
 )
 from rumbo.sensors import check, check_tests_not_weakened
 from rumbo.tour import load_commits, render_markdown, resolve_base
@@ -122,18 +134,27 @@ def _detect(args: argparse.Namespace) -> Detected | None:
     root = Path(args.dir).resolve()
     if not root.is_dir():
         raise ValueError(f"--adopt needs an existing project directory; {root} does not exist")
-    try:
-        detected = detect_project(root, args.package)
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"could not parse pyproject.toml: {exc}") from exc
+    detected = detect_project(root, args.package)
     print(f"Detected in {root} (--adopt): {detected.summary()}")
     return detected
 
 
-def _config_from_args(args: argparse.Namespace) -> Config:
-    interactive = sys.stdin.isatty() and not args.yes
+def _interactive(args: argparse.Namespace) -> bool:
+    """The A0 questions are asked: no `--yes`, and standard input is a real console.
+
+    `is_console`, not `isatty()`: on Windows that is also true for the NUL device.
+    """
+    return not args.yes and is_console(sys.stdin)
+
+
+def _config_from_args(args: argparse.Namespace) -> tuple[Config, list[str]]:
+    """The configuration of `rumbo init`, and what the detection has to tell the human."""
+    interactive = _interactive(args)
     if not interactive and not args.yes:
         raise ValueError("stdin is not a terminal: pass --yes with explicit flags (see --help)")
+    root = Path(args.dir).resolve()
+    if root.exists() and not root.is_dir():
+        raise ValueError(f"{root} is not a directory")
 
     name, package, llm = args.name, args.package, args.llm
     provider, rigor, case = args.provider, args.rigor, args.case
@@ -148,7 +169,11 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         print("A0 · RUMBO initial questions (Enter accepts the value in brackets)\n")
         name = name or _ask("1. Project name", default_name, valid_name)
         default_package = (detected.package if detected else None) or to_package(name)
-        package = package or _ask("   Python package (snake_case)", default_package, valid_package)
+        package = package or _ask(
+            "   Python package (snake_case)",
+            default_package,
+            (lambda answer: valid_package(answer, adopted=True)) if detected else valid_package,
+        )
         # ADR-0010: the kind is the question; the LLM capability is its sub-question.
         kind = kind or _ask("2. What are you building?", default_kind, choices=list(KINDS))
         if llm is None:
@@ -171,11 +196,21 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         name = name or default_name
         package = package or (detected.package if detected else None) or to_package(name)
     kind = kind or default_kind  # ADR-0010 default; --layout and --layers are never asked
-    if detected and not layout and not layers:
-        layout = detected.layout
+    src = DEFAULT_SRC
+    if detected:
+        # ADR-0029: the package that was finally chosen is a directory on disk, and keeps the
+        # name it has there; ADR-0020: where it lives is never asked and has no flag.
+        found = find_package(root, package)
+        if found is None:
+            raise ValueError(no_package_message(root, args.package or None))
+        src, package = found
+        if not layout and not layers:
+            layout = detect_layout(root, package)
     if llm and layout and layout != "hexagonal":
         print(f"note: an LLM product is hexagonal (ADR-0010); --layout {layout} is ignored")
-    return Config(
+    # ADR-0029: the Python the project already promises; `--python` wins when it allows it.
+    python, notes = resolve_python(root, args.python)
+    cfg = Config(
         name=name,
         package=package,
         llm=bool(llm),
@@ -190,12 +225,12 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         layers=layers,
         adopted=detected is not None,
         tests_dir=detected.tests_dir if detected else "tests",
-        # ADR-0020: where the package that was finally chosen lives (never asked, no flag).
-        src=detect_src(Path(args.dir).resolve(), package) if detected else DEFAULT_SRC,
-        python=args.python or DEFAULT_PYTHON,
+        src=src,
+        python=python,
         # ADR-0015: the type checker is a flag, never an A0 question.
         types=getattr(args, "types", None) or DEFAULT_TYPE_CHECKER,
     )
+    return cfg, notes
 
 
 def _init_summary(cfg: Config) -> str:
@@ -220,7 +255,7 @@ def _next_steps(steps: list[str]) -> str:
 
 def cmd_init(args: argparse.Namespace) -> int:
     try:
-        cfg = _config_from_args(args)
+        cfg, notes = _config_from_args(args)
     except ValueError as exc:
         return _err(str(exc))
     dest = Path(args.dir).resolve()
@@ -228,10 +263,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"  {_init_summary(cfg)}\n")
     if args.force:
         print(
-            "--force: existing files are overwritten (a .bak copy is kept); "
+            "--force: existing files that differ from the template are overwritten after a "
+            "backup copy (.bak, then .bak.1, ...: a backup is never overwritten); "
             "pyproject.toml and .gitignore are merged, never replaced.\n"
         )
-    interactive = sys.stdin.isatty() and not args.yes
+    interactive = _interactive(args)
     existing = [p.name for p in dest.iterdir() if p.name != ".git"] if dest.is_dir() else []
     if interactive and existing and not args.force and not cfg.adopted:
         shown = ", ".join(sorted(existing)[:6]) + (", ..." if len(existing) > 6 else "")
@@ -244,7 +280,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         if answer != "yes":
             print("Nothing written.")
             return USAGE_ERROR
-    rep = scaffold(cfg, dest, force=args.force)
+    try:
+        # ADR-0029: everything is read and validated before the first file is written.
+        rep = scaffold(cfg, dest, force=args.force)
+    except ValueError as exc:
+        return _err(f"{exc} (nothing was written)")
+    rep.warnings[:0] = notes
     if not args.no_install:
         install(cfg, dest, rep)
     print("\n" + rep.summary())
@@ -252,7 +293,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     # in every other case the command is the human's first step in this clone.
     declare = (
         [f"{' '.join(HUMAN_COMMAND)}    # you, the human, once per clone (never the agent)"]
-        if (dest / ".git").exists() and not _declared_human(dest)
+        if git_prefix(dest) is not None and not _declared_human(dest)
         else []
     )
     if args.no_install:
@@ -284,10 +325,13 @@ def cmd_update(args: argparse.Namespace) -> int:
         project = Project.load(root)
     except (FileNotFoundError, ValueError) as exc:
         return _err(str(exc))
-    if args.diff:
-        print(update_diff(project, root))
-        return 0
-    rep = update(project, root)
+    try:
+        if args.diff:
+            print(update_diff(project, root))
+            return 0
+        rep = update(project, root, allow_downgrade=args.allow_downgrade)
+    except ValueError as exc:  # a hand-edited [tool.rumbo], or a harness newer than this CLI
+        return _err(str(exc))
     print(rep.summary())
     print(f"\nHarness version is now {__version__}. Review the diff with: git diff")
     return 0
@@ -314,14 +358,24 @@ def cmd_promote(args: argparse.Namespace) -> int:
         print(f"Error: {message}", file=sys.stderr)
         return 1
     pyproject = root / "pyproject.toml"
+    original = pyproject.read_bytes()
     try:
-        text = set_rigor(pyproject.read_text(encoding="utf-8"), target)
+        # ADR-0029: the configuration of the new level is built before anything is written.
+        config_for(dataclasses.replace(project, rigor=target), root)
+        text = set_rigor(read_utf8(pyproject, "pyproject.toml"), target)
     except ValueError as exc:
         return _err(str(exc))
-    with pyproject.open("w", encoding="utf-8", newline="\n") as f:
-        f.write(text)
+    write_text(pyproject, text)
     print(f"Promoting {project.name or project.package} from {project.rigor} to {target}")
-    rep = update(Project.load(root), root)
+    try:
+        rep = update(Project.load(root), root)
+    except BaseException as exc:
+        # Atomic: a failure leaves the rigor (and the table) as they were, so the same
+        # command can be run again once its cause is fixed.
+        pyproject.write_bytes(original)
+        if isinstance(exc, ValueError):
+            return _err(f"{exc} (the rigor is still {project.rigor})")
+        raise
     if not args.no_install:
         for cmd in list(rep.suggested):
             if (
@@ -345,8 +399,14 @@ NEW_KINDS = {
 }
 
 
+LAST_NUMBER = 9999  # documents are NNNN-title.md (`numbered_documents` reads four digits)
+
+
 def _next_number(folder: Path) -> int:
-    numbers = [int(m.group(1)) for p in folder.glob("*.md") if (m := re.match(r"^(\d+)-", p.name))]
+    """One more than the highest four-digit prefix: `20261116-notes.md` is not a number."""
+    numbers = [
+        int(m.group(1)) for p in folder.glob("*.md") if (m := re.match(r"^(\d{4})-", p.name))
+    ]
     return max(numbers, default=0) + 1
 
 
@@ -367,6 +427,8 @@ def cmd_new(args: argparse.Namespace) -> int:
         heading = f"# Postmortem: {title} ({today})"
     else:
         n = _next_number(folder)
+        if n > LAST_NUMBER:
+            return _err(f"{folder_rel} already holds number {LAST_NUMBER}: the numbering is full")
         target = folder / f"{n:04d}-{slug(title)}.md"
         heading = f"# {prefix}-{n:04d}: {title}"
         text = text.replace("Date: YYYY-MM-DD", f"Date: {today}")
@@ -374,7 +436,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     if target.exists():
         return _err(f"{target.relative_to(root)} already exists")
     twins = [p.name for p in folder.glob(f"*-{slug(title)}.md")]
-    target.write_text(text, encoding="utf-8")
+    write_text(target, text)
     print(f"Created {target.relative_to(root).as_posix()}")
     if twins:
         print(f"WARNING: a document with the same title already exists: {', '.join(twins)}")
@@ -382,16 +444,30 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------- decision
+# What `str.splitlines` breaks a line at.
+LINE_BREAKS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
 def cmd_decision(args: argparse.Namespace) -> int:
     path = Path(args.dir).resolve() / "docs" / "decisions.md"
     if not path.exists():
         return _err("missing docs/decisions.md; did you run 'rumbo init'?")
+    title = args.title.strip()
+    if not title:
+        return _err("the title cannot be empty")
+    # One entry is one heading and three lines: a line break inside a field would let a
+    # title carry a heading of its own (another decision, a gate signature).
+    for field, value in (("the title", args.title), ("--why", args.why), ("--who", args.who)):
+        if any(ch in value for ch in LINE_BREAKS):
+            return _err(f"{field} cannot contain a line break: a decision is one line")
     today = dt.date.today().isoformat()
-    entry = f"\n## {today} — {args.title}\n- Decision: {args.title}\n"
+    entry = f"\n## {today} — {title}\n- Decision: {title}\n"
     if args.why:
         entry += f"- Why: {args.why}\n"
     entry += f"- Decided by: {args.who}\n"
-    with path.open("a", encoding="utf-8") as f:
+    if path.read_bytes()[-1:] not in (b"", b"\n"):
+        entry = "\n" + entry  # the heading starts on a line of its own
+    with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(entry)
     print(f"Logged in docs/decisions.md ({today}).")
     return 0
@@ -434,7 +510,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     try:
         project = Project.load(root)
-        cfg = Config.from_project(project)
+        cfg = config_for(project, root)  # ADR-0029: what the project had, as it was recorded
     except (FileNotFoundError, ValueError) as exc:
         return _err(str(exc))
     problems: list[str] = []
@@ -448,23 +524,31 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not (root / "uv.lock").exists():
         problems.append(
             "missing uv.lock (CI runs 'uv sync --locked'): run the 'uv add' lines rumbo init "
-            "printed (or 'rumbo init --force' without --no-install), then 'uv lock'"
+            "printed, or 'uv lock'"
         )
-    warnings: list[str] = []
+    # ADR-0029: the guard is wired where it has to run, and matches every tool it judges.
+    unwired, mismatched = guard_wiring(root)
+    problems += unwired
+    warnings: list[str] = list(mismatched)
     codeowners = project.read(".github/CODEOWNERS") or ""
     if "@your-handle" in codeowners:
         warnings.append(".github/CODEOWNERS still has the @your-handle placeholder")
     security = project.read("SECURITY.md") or ""
     if "<security contact" in security:
         warnings.append("SECURITY.md still has the <security contact> placeholder")
-    if (root / ".git").exists() and not _declared_human(root):
+    if git_prefix(root) is not None and not _declared_human(root):
         warnings.append(
             "rumbo.human is not set in this clone: the git hooks treat your commits as an "
             "agent's (ADR-0008); run 'git config rumbo.human true'"
         )
     for warning in warnings:
         print(f"⚠️  {warning}")
-    if project.harness_version and project.harness_version != __version__:
+    if release_key(project.harness_version) > release_key(__version__):
+        print(
+            f"⚠️  harness version {project.harness_version} is newer than the CLI "
+            f"({__version__}): upgrade rumbo ('rumbo update' would downgrade the harness)"
+        )
+    elif project.harness_version and project.harness_version != __version__:
         print(
             f"⚠️  harness version {project.harness_version} differs from the CLI ({__version__}): "
             "run 'rumbo update'"
@@ -559,6 +643,189 @@ def _normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+# ADR-0028: every answer is untrusted, and credentials go only to the index they were given for.
+HTTP_TIMEOUT = 15  # seconds one socket operation may take (F-0007.R8)
+HTTP_DEADLINE = 60.0  # seconds one whole request may take: connection, redirects, headers, body
+MAX_BODY = 32 * 1024 * 1024  # bytes of one answer; the largest PyPI documents are a few MB
+SHOWN_MAX = 200  # characters of one piece of network text in a printed line
+_CHUNK = 64 * 1024
+# C0, DEL and C1 controls (ESC, CR and LF among them), bidi marks and overrides, line and
+# paragraph separators, the BOM and lone surrogates (which `print` cannot encode).
+_UNPRINTABLE_RE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f"
+    "\N{ARABIC LETTER MARK}\N{LEFT-TO-RIGHT MARK}\N{RIGHT-TO-LEFT MARK}"
+    "\N{LINE SEPARATOR}-\N{RIGHT-TO-LEFT OVERRIDE}"
+    "\N{LEFT-TO-RIGHT ISOLATE}-\N{POP DIRECTIONAL ISOLATE}"
+    "\N{ZERO WIDTH NO-BREAK SPACE}"
+    r"\ud800-\udfff]+"
+)
+# What becomes "could not query <source>": never a traceback (F-0007.R8).
+NETWORK_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    OSError,
+    ValueError,
+    LookupError,
+    json.JSONDecodeError,
+    http.client.HTTPException,
+)
+
+
+def _show(value: object, limit: int = SHOWN_MAX) -> str:
+    """Text that came from the network, made safe to print: no control characters, bounded.
+
+    A package summary, a project URL or the reason phrase of a status line could otherwise move
+    the cursor, erase the warnings above it or add a line that looks like one of ours.
+    """
+    text = _UNPRINTABLE_RE.sub(" ", str(value)[: limit * 8]).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """Scheme, host and port (the default one when none is written) of a URL."""
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    port = parts.port or {"http": 80, "https": 443}.get(scheme)
+    return scheme, (parts.hostname or "").lower(), port
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only where it cannot leak (ADR-0028).
+
+    A request that carries credentials is redirected only inside its own scheme, host and port;
+    https is never left for plain http, credentials or not. urllib's own handler copies every
+    header to wherever the answer points. The messages are fixed text: the target is untrusted.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: http.client.HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        authorization = req.get_header("Authorization")
+        old = _origin(req.full_url)
+        try:
+            new = _origin(newurl)
+        except ValueError:
+            new = ("", "", None)
+        if authorization is not None and new != old:
+            raise ValueError(
+                "the index redirected to another host (or to plain http); credentials not sent"
+            )
+        if new[0] not in ("http", "https") or (old[0] == "https" and new[0] != "https"):
+            raise ValueError("redirected to plain http or to another scheme; not followed")
+        followed = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if followed is not None and authorization is not None:
+            followed.add_unredirected_header("Authorization", authorization)
+        return followed
+
+
+def _opener(direct: bool) -> urllib.request.OpenerDirector:
+    """The opener of every request of the CLI: http and https, redirects through `_Redirects`.
+
+    `direct` leaves out the proxies of the environment (`HTTP_PROXY`...): it is how a loopback
+    index is reached, so that what is sent to this machine does not leave it.
+    """
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.ProxyHandler({} if direct else None),
+        urllib.request.UnknownHandler(),
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        _Redirects(),
+        urllib.request.HTTPErrorProcessor(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
+def _open(request: urllib.request.Request, timeout: float, direct: bool = False) -> Any:
+    """The only place the CLI opens a connection (F-0007.R9)."""
+    return _opener(direct).open(request, timeout=timeout)
+
+
+class _Answer(NamedTuple):
+    """The body of a 200 answer and what its headers say it is."""
+
+    content_type: str
+    charset: str | None
+    body: bytes
+
+    def text(self) -> str:
+        """The body as text; a charset Python does not know, or cannot use, is read as UTF-8."""
+        try:
+            return self.body.decode(self.charset or "utf-8", errors="replace")
+        except (LookupError, ValueError):
+            return self.body.decode("utf-8", errors="replace")
+
+
+def _late(seconds: float) -> TimeoutError:
+    return TimeoutError(f"no complete answer within {seconds:g} s")
+
+
+def _read_body(resp: Any, deadline: float, seconds: float) -> bytes:
+    """The whole body, refused when it is larger than MAX_BODY, late or cut short."""
+    chunks: list[bytes] = []
+    size = 0
+    while chunk := resp.read1(_CHUNK):
+        size += len(chunk)
+        if size > MAX_BODY:
+            raise ValueError(f"answer larger than {MAX_BODY} bytes")
+        if time.monotonic() > deadline:
+            raise _late(seconds)
+        chunks.append(chunk)
+    missing = getattr(resp, "length", None)  # of the Content-Length the server announced
+    if missing:
+        raise http.client.IncompleteRead(b"".join(chunks), missing)
+    return b"".join(chunks)
+
+
+def _fetch(request: urllib.request.Request, direct: bool = False) -> _Answer:
+    """One request, answered whole or not at all: MAX_BODY bytes within HTTP_DEADLINE seconds.
+
+    The body is read in pieces against the deadline. What comes before it (name resolution, the
+    connection, TLS, redirects, the headers) is only bounded per socket operation by urllib, and
+    a server that sends one byte at a time resets that clock: so the request runs in a daemon
+    thread and is abandoned when the deadline passes.
+    """
+    seconds = HTTP_DEADLINE
+    deadline = time.monotonic() + seconds
+    outcome: list[_Answer | BaseException] = []
+
+    def work() -> None:
+        try:
+            with _open(request, HTTP_TIMEOUT, direct) as resp:
+                headers = resp.headers
+                body = _read_body(resp, deadline, seconds)
+                content_type = str(headers.get_content_type())
+                outcome.append(_Answer(content_type, headers.get_content_charset(), body))
+        except BaseException as exc:  # raised again below, in the thread of the caller
+            outcome.append(exc)
+
+    worker = threading.Thread(target=work, name="rumbo-verify-dep", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if not outcome:
+        raise _late(seconds)
+    result = outcome[0]
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _json(body: str | bytes) -> Any:
+    """`json.loads`; nesting too deep to read is reported like any other body that is not JSON."""
+    try:
+        return json.loads(body)
+    except RecursionError:
+        raise ValueError("the answer is JSON nested too deeply to read") from None
+
+
 def _http_json(url: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
     data = json.dumps(payload).encode() if payload is not None else None
     if not url.startswith("https://"):
@@ -567,12 +834,13 @@ def _http_json(url: str, payload: dict[str, Any] | None = None) -> dict[str, Any
         url, data=data, headers={"Content-Type": "application/json"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310 # nosec B310
-            return json.load(resp)
+        answer = _fetch(request)
     except urllib.error.HTTPError as exc:
+        exc.close()
         if exc.code == 404:
             return None
         raise
+    return _json(answer.body)
 
 
 def pypi_info(name: str) -> dict[str, Any] | None:
@@ -584,7 +852,7 @@ def osv_vulnerabilities(name: str) -> int | None:
         data = _http_json(
             "https://api.osv.dev/v1/query", {"package": {"name": name, "ecosystem": "PyPI"}}
         )
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+    except NETWORK_ERRORS:
         return None
     if data is None:
         return 0
@@ -597,8 +865,29 @@ def osv_vulnerabilities(name: str) -> int | None:
 INDEX_ENV_VARS = ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "PIP_INDEX_URL")
 SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 PYPI_LABEL = "(measured against PyPI, not against your index)"
-_RELEASE_RE = re.compile(r"(\d+(?:\.\d+)*)(.*)")
 _SDIST_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".zip")
+# A PEP 440 version, as loosely as the PEP reads one (appendix B): epoch, release, pre, post, dev,
+# local. Anything else ("latest", "banana") is not a version and orders below every one that is.
+_VERSION_RE = re.compile(
+    r"v?(?:(?P<epoch>\d+)!)?(?P<release>\d+(?:\.\d+)*)"
+    r"(?:[-_.]?(?P<pre>alpha|a|beta|b|preview|pre|c|rc)[-_.]?(?P<pre_n>\d+)?)?"
+    r"(?:-(?P<post_n1>\d+)|[-_.]?(?P<post>post|rev|r)[-_.]?(?P<post_n2>\d+)?)?"
+    r"(?:[-_.]?(?P<dev>dev)[-_.]?(?P<dev_n>\d+)?)?"
+    r"(?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?",
+    re.ASCII | re.IGNORECASE,
+)
+_VERSION_MAX = 100  # characters; longer is not a version (and `int` refuses 4300 digits)
+_PRE_RANK = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "c": 2, "rc": 2, "pre": 2, "preview": 2}
+# A PEP 508 name, alone or followed by extras, a version specifier and a marker: what
+# `uv add` takes from an index. A URL, a path or a VCS reference does not match.
+_NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+_REQUIREMENT_RE = re.compile(
+    rf"[ \t]*(?P<name>{_NAME})[ \t]*"
+    rf"(?:\[[ \t]*(?:{_NAME}(?:[ \t]*,[ \t]*{_NAME})*)?[ \t]*\])?[ \t]*"
+    r"(?:\(?[ \t]*(?:===|==|~=|!=|<=|>=|<|>)[A-Za-z0-9.*+!,<>=~ \t-]*\)?)?[ \t]*"
+    r"(?:;[\x20-\x7e]*)?",
+    re.ASCII,
+)
 
 
 def resolve_index(flag: str | None, env: Mapping[str, str]) -> str | None:
@@ -620,7 +909,11 @@ def resolve_index(flag: str | None, env: Mapping[str, str]) -> str | None:
 
 
 def sanitize_index(url: str) -> str:
-    """`scheme://host[:port]/path` without user info: the only form of an index URL ever printed."""
+    """`scheme://host[:port]/path` without user info: the only form of an index URL ever printed.
+
+    The user info is the one part treated as a secret. A token written as a path segment cannot
+    be told from a repository name, so the path is printed as it is (ADR-0028): no guessing.
+    """
     parts = urllib.parse.urlsplit(url)
     host = parts.hostname or ""
     if ":" in host:  # IPv6 literal
@@ -645,20 +938,23 @@ def _redact(text: str, index: str) -> str:
 
 
 class _Anchors(HTMLParser):
-    """Collects the text of every `<a>` of a PEP 503 project page: the file names."""
+    """Collects every `<a>` of a PEP 503 project page: its text, a file name, and whether it
+    carries `data-yanked` (PEP 592)."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.names: list[str] = []
+        self.files: list[tuple[str, bool]] = []
         self._text: str | None = None
+        self._yanked = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "a":
             self._text = ""
+            self._yanked = any(key == "data-yanked" for key, _ in attrs)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "a" and self._text is not None:
-            self.names.append(self._text.strip())
+            self.files.append((self._text.strip(), self._yanked))
             self._text = None
 
     def handle_data(self, data: str) -> None:
@@ -678,45 +974,96 @@ def _version_from_filename(filename: str) -> str | None:
     return None
 
 
-def _versions_from_files(filenames: Iterable[str]) -> list[str]:
-    seen: dict[str, None] = {}
-    for filename in filenames:
-        version = _version_from_filename(filename)
+class SimplePage(NamedTuple):
+    """A simple-API project page: its versions, and those of them whose every file is yanked."""
+
+    versions: list[str]
+    yanked: frozenset[str]
+
+
+def _page_from_files(
+    files: Iterable[tuple[object, object]], listed: Iterable[object] = ()
+) -> SimplePage:
+    """The page that lists `files` as (file name, yanked) and, in PEP 700, `listed` versions."""
+    live: dict[str, bool] = {}  # version -> at least one of its files is not yanked
+    for filename, yanked in files:
+        version = _version_from_filename(filename) if isinstance(filename, str) else None
         if version:
-            seen.setdefault(version, None)
-    return list(seen)
+            live[version] = live.get(version, False) or not yanked
+    versions = list(dict.fromkeys(v for v in listed if isinstance(v, str))) or list(live)
+    return SimplePage(versions, frozenset(v for v in versions if live.get(v) is False))
 
 
-def _version_key(version: str) -> tuple[tuple[int, ...], bool, str]:
-    """Best-effort ordering: release numbers as ints, finals after pre-releases, then text."""
-    match = _RELEASE_RE.match(version)
-    if not match:
-        return ((), False, version)
-    numbers, rest = match.groups()
-    return (tuple(int(x) for x in numbers.split(".")), rest == "", rest)
+def _version_key(version: str) -> tuple[Any, ...]:
+    """The order of PEP 440: epoch, release, then dev < a < b < rc < final < post, then local.
+
+    Written from the PEP (no dependency, ADR-0001), for what an index really lists: epochs,
+    post-releases, dev and pre-releases with numeric counters, local versions.
+    """
+    match = _VERSION_RE.fullmatch(version.strip()) if len(version) <= _VERSION_MAX else None
+    if match is None:
+        return (0, 0, (), (0, 0), 0, (0, 0), (), version)
+    release = [int(number) for number in match["release"].split(".")]
+    while len(release) > 1 and release[-1] == 0:  # 1.0 and 1.0.0 are the same release
+        release.pop()
+    is_post = match["post"] is not None or match["post_n1"] is not None
+    if match["pre"]:
+        pre = (_PRE_RANK[match["pre"].lower()], int(match["pre_n"] or 0))
+    else:  # 1.0.dev1 comes before 1.0a1; a final release after every pre-release
+        pre = (-1, 0) if match["dev"] and not is_post else (3, 0)
+    post = int(match["post_n1"] or match["post_n2"] or 0) if is_post else -1
+    dev = (0, int(match["dev_n"] or 0)) if match["dev"] else (1, 0)
+    local = tuple(
+        (1, int(part), "") if part.isdigit() else (0, 0, part.lower())
+        for part in re.split(r"[-_.]", match["local"] or "")
+        if part
+    )
+    return (1, int(match["epoch"] or 0), tuple(release), pre, post, dev, local, "")
 
 
-def latest_version(versions: list[str]) -> str | None:
-    return max(versions, key=_version_key) if versions else None
+def latest_version(versions: list[str], yanked: Collection[str] = ()) -> str | None:
+    """The highest version in PEP 440 order, among those not yanked when there is one."""
+    candidates = [v for v in versions if v not in yanked] or versions
+    return max(candidates, key=_version_key) if candidates else None
 
 
-def parse_simple(body: str, content_type: str) -> list[str]:
-    """Versions in a simple-API project page: PEP 691 JSON, else the PEP 503 HTML anchors."""
+def simple_page(body: str, content_type: str) -> SimplePage | None:
+    """The project page in a 200 answer of a simple-API index; None when the answer is not one.
+
+    A PEP 691 document is a JSON object with a `files` list (or a `versions` list); a PEP 503
+    page has at least one anchor whose text is a distribution file name with a PEP 440 version.
+    The login page of an index behind SSO and `{"error": ...}` are neither (ADR-0028). A PEP
+    503 page without a single file cannot be told from them, so it is not a page either.
+    """
     data: Any = None
     if content_type != "text/html":
         with contextlib.suppress(ValueError):
-            data = json.loads(body)
+            data = _json(body)
     if isinstance(data, dict):
-        versions = data.get("versions")
-        if isinstance(versions, list) and versions:
-            return [str(v) for v in versions]
-        files = data.get("files") or []
-        return _versions_from_files(
-            str(f.get("filename", "")) for f in files if isinstance(f, dict)
-        )
+        listed, files = data.get("versions"), data.get("files")
+        if not isinstance(listed, list) and not isinstance(files, list):
+            return None
+        entries = [
+            (f.get("filename"), f.get("yanked"))
+            for f in (files if isinstance(files, list) else [])
+            if isinstance(f, dict)
+        ]
+        return _page_from_files(entries, listed if isinstance(listed, list) else ())
     parser = _Anchors()
-    parser.feed(body)
-    return _versions_from_files(parser.names)
+    with contextlib.suppress(AssertionError):  # how html.parser refuses some malformed markup
+        parser.feed(body)
+    page = _page_from_files(parser.files)
+    return page if any(_VERSION_RE.fullmatch(v) for v in page.versions) else None
+
+
+def parse_simple(body: str, content_type: str) -> list[str]:
+    """Versions in a simple-API project page: PEP 691 JSON, else the PEP 503 HTML anchors.
+
+    [] both for a page without versions and for an answer that is not a page: `simple_page`
+    tells them apart, and it is what `verify-dep` uses.
+    """
+    page = simple_page(body, content_type)
+    return page.versions if page else []
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -731,47 +1078,49 @@ def _is_loopback(host: str | None) -> bool:
         return False
 
 
-def index_versions(index: str, name: str) -> list[str] | None:
-    """The versions of `name` on a simple-API index; None when the index answers 404.
+def index_page(index: str, name: str) -> SimplePage | None:
+    """The page of `name` on a simple-API index; None when the index answers 404.
 
     Credentials in the URL travel as a Basic Authorization header, never in the request line,
     and never reach a message: every error is raised with the URL already sanitised. Over plain
     `http` they are not sent at all, unless the index is on this machine (loopback): Basic is
-    not encryption, and the network between here and the index could read them.
+    not encryption, and the network between here and the index could read them. A loopback
+    index is reached without the proxies of the environment, and the header is not copied to a
+    redirect: `_Redirects` puts it back only inside the same scheme, host and port (ADR-0028).
+    A 200 answer that is not a project page raises ValueError: it confirms nothing.
     """
     parts = urllib.parse.urlsplit(index)
     if parts.scheme not in ("http", "https"):
         raise ValueError(f"the index URL must be http(s), got {sanitize_index(index)!r}")
     if parts.username is not None and parts.scheme == "http" and not _is_loopback(parts.hostname):
         raise ValueError("refusing to send the index credentials over plain http; use https")
-    url = sanitize_index(index).rstrip("/") + "/" + _normalize(name) + "/"
-    headers = {"Accept": f"{SIMPLE_JSON}, text/html;q=0.1"}
+    segment = urllib.parse.quote(_normalize(name), safe="")
+    url = sanitize_index(index).rstrip("/") + "/" + segment + "/"
+    request = urllib.request.Request(  # noqa: S310 - http(s), checked above
+        url, headers={"Accept": f"{SIMPLE_JSON}, text/html;q=0.1"}
+    )
     if parts.username is not None:
         user = urllib.parse.unquote(parts.username)
         password = urllib.parse.unquote(parts.password or "")
         token = base64.b64encode(f"{user}:{password}".encode()).decode()
-        headers["Authorization"] = f"Basic {token}"
-    request = urllib.request.Request(url, headers=headers)  # noqa: S310 - http(s), checked above
+        request.add_unredirected_header("Authorization", f"Basic {token}")
     try:
-        with urllib.request.urlopen(request, timeout=15) as resp:  # noqa: S310 # nosec B310
-            content_type = str(resp.headers.get_content_type())
-            charset = resp.headers.get_content_charset() or "utf-8"
-            body = resp.read().decode(charset, errors="replace")
+        answer = _fetch(request, direct=_is_loopback(parts.hostname))
     except urllib.error.HTTPError as exc:
+        exc.close()
         if exc.code == 404:
             return None
         raise
-    return parse_simple(body, content_type)
+    page = simple_page(answer.text(), answer.content_type)
+    if page is None:
+        raise ValueError("the index answered, but not with a package page")
+    return page
 
 
-NETWORK_ERRORS = (
-    urllib.error.URLError,
-    TimeoutError,
-    OSError,
-    ValueError,
-    json.JSONDecodeError,
-    http.client.HTTPException,
-)
+def index_versions(index: str, name: str) -> list[str] | None:
+    """The versions of `name` on a simple-API index; None when the index answers 404."""
+    page = index_page(index, name)
+    return None if page is None else page.versions
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -794,21 +1143,26 @@ def _lookalikes(name: str) -> list[str]:
 
 def _verify_on_index(name: str, index: str) -> int:
     """Existence and versions on the project's own index (ADR-0014); prints only sanitised URLs."""
-    shown = sanitize_index(index)
-    host = urllib.parse.urlsplit(shown).netloc
+    shown = _show(sanitize_index(index))
+    host = _show(urllib.parse.urlsplit(sanitize_index(index)).netloc)
     print(f"📦 {name}")
     print(f"   index: {shown}")
     try:
-        versions = index_versions(index, name)
+        page = index_page(index, name)
     except NETWORK_ERRORS as exc:
-        print(f"   ❓ could not query {host} ({_redact(str(exc), index)}). Verify by hand.")
+        print(f"   ❓ could not query {host} ({_show(_redact(str(exc), index))}). Verify by hand.")
         return 2
-    if versions is None:
+    if page is None:
         print(f"   ❌ exists on {host}: no. Hallucinated name? (slopsquatting)")
         return 1
-    latest = latest_version(versions)
+    if not page.versions:
+        # A real page with nothing to install: not a hallucination, not a clean pass either.
+        print(f"   ⚠️  exists on {host}: yes, no files")
+        return 1
+    latest = _show(latest_version(page.versions, page.yanked), 60)
+    yanked = ", every file yanked" if page.yanked.issuperset(page.versions) else ""
     print(f"   exists on {host}: yes")
-    print(f"   versions on {host}: {len(versions)}" + (f" (latest {latest})" if latest else ""))
+    print(f"   versions on {host}: {len(page.versions)} (latest {latest}{yanked})")
     return 0
 
 
@@ -819,7 +1173,7 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
     try:
         data = pypi_info(name)
     except NETWORK_ERRORS as exc:
-        print(f"{indent}❓ {name}: could not query PyPI ({exc}). Verify by hand.")
+        print(f"{indent}❓ {name}: could not query PyPI ({_show(exc)}). Verify by hand.")
         return 2
     warnings: list[str] = []
     if data is None:
@@ -852,8 +1206,14 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
             (u for k, u in urls.items() if re.search(r"source|repo|code|github|home", k, re.I)),
             info.get("home_page") or "",
         )
-        headline = f"{canonical} {info.get('version', '?')} — {info.get('summary') or ''}"
-    except (AttributeError, TypeError, KeyError, ValueError):
+        # ADR-0028: what PyPI says is printed through `_show`, the canonical name included
+        # (OSV is asked about the name as PyPI gave it).
+        repo = _show(repo) if repo else ""
+        first = _show(first) if first else None
+        shown = _show(canonical)
+        version, summary = _show(info.get("version", "?"), 60), _show(info.get("summary") or "")
+        headline = f"{shown} {version} — {summary}"
+    except (AttributeError, TypeError, KeyError, ValueError, RecursionError):
         # ADR-0014 / threat model, boundary 3: the answer is untrusted data.
         print(f"{indent}❓ {name}: PyPI answered in an unexpected shape. Verify by hand.")
         return 2
@@ -861,7 +1221,7 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
     print(f"   first release: {first or '?'} ({age if age is not None else '?'} days ago){label}")
     print(f"   repository: {repo or '(not declared)'}  ·  releases: {len(releases)}{label}")
     if _normalize(canonical) != _normalize(name):
-        warnings.append(f"the canonical name is {canonical!r}")
+        warnings.append(f"the canonical name is {shown!r}")
     if age is not None and age < 90:
         warnings.append("younger than 90 days: review with care")
     if not repo:
@@ -878,16 +1238,45 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
     return 1 if warnings else 0
 
 
+def _package_name(argument: str) -> str | None:
+    """The PEP 508 name in an argument (`requests`, `requests[socks]>=2`); None for the rest."""
+    match = _REQUIREMENT_RE.fullmatch(argument)
+    return match["name"] if match else None
+
+
 def cmd_verify_dep(args: argparse.Namespace) -> int:
+    index: str | None = None
+    index_error: str | None = None
     try:
         index = resolve_index(args.index, os.environ)
     except ValueError as exc:
-        return _err(str(exc))
+        index_error = str(exc)  # fixed text, never the value: it may carry credentials
+    on_index = index is not None or index_error is not None
     code = 0
-    for name in args.packages:
-        if index is not None:
+    for position, argument in enumerate(args.packages, 1):
+        # ADR-0028: only a package name ever goes into a request. The argument is not echoed:
+        # a URL can carry a token.
+        name = _package_name(argument)
+        if name is None:
+            code = max(
+                code,
+                _err(
+                    f"argument {position} of verify-dep is not a package name (expected a name "
+                    "such as 'requests', with or without extras and a version; a URL, a path or "
+                    "a VCS reference cannot be verified). Nothing was requested for it."
+                ),
+            )
+            continue
+        if name != argument:
+            print(f"note: only the name {name!r} is verified, not its extras, version or marker")
+        if index_error is not None:
+            # The index cannot be asked; PyPI and OSV still can (F-0007.R8).
+            print(f"📦 {name}")
+            print(f"   ❓ could not query the index ({index_error}). Verify by hand.")
+            code = max(code, 2)
+        elif index is not None:
             code = max(code, _verify_on_index(name, index))
-        code = max(code, _verify_on_pypi(name, on_index=index is not None))
+        code = max(code, _verify_on_pypi(name, on_index=on_index))
     print("\nReminder: the human approves every new dependency; justify it in the PR.")
     return code
 
@@ -918,7 +1307,7 @@ def cmd_tour(args: argparse.Namespace) -> int:
             # A directory: name the file like the Makefile's `review` target did.
             out = out / f"{dt.date.today().isoformat()}-{commits[-1].short}.md"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(text, encoding="utf-8")
+        write_text(out, text)
         print(f"Wrote {out}")
     else:
         print(text)
@@ -1011,18 +1400,18 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
     if args.source:
         case["source"] = args.source
     datasets.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
+    with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(case, ensure_ascii=False) + "\n")
     log = root / "evals" / "error_analysis" / "log.md"
     log.parent.mkdir(parents=True, exist_ok=True)
     if not log.exists():
-        log.write_text(
+        write_text(
+            log,
             "# Error analysis log\n\nOne line per production failure turned into an eval case "
             "(`rumbo eval add`). Review it in the weekly trace ritual.\n\n"
             "| Date | Case | Suite | Source | Note |\n|---|---|---|---|---|\n",
-            encoding="utf-8",
         )
-    with log.open("a", encoding="utf-8") as f:
+    with log.open("a", encoding="utf-8", newline="\n") as f:
         f.write(
             f"| {dt.date.today().isoformat()} | {_cell(case_id)} | {args.suite} | "
             f"{_cell(args.source)} | {_cell(args.note)} |\n"
@@ -1033,6 +1422,17 @@ def cmd_eval_add(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------- metrics
+def _days(value: str) -> int:
+    """The `--days` window as the parser reads it: a whole number the calendar holds."""
+    try:
+        days = int(value)
+    except ValueError:
+        days = -1
+    if not 0 <= days <= MAX_DAYS:
+        raise argparse.ArgumentTypeError(f"--days must be between 0 and {MAX_DAYS}, got {value!r}")
+    return days
+
+
 def cmd_metrics(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     if not (root / "pyproject.toml").exists():
@@ -1099,19 +1499,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--python",
         metavar="X.Y",
-        help="minimum Python the project promises (ADR-0014; default {DEFAULT_PYTHON}; one of "
-        f"{', '.join(SUPPORTED_PYTHONS)})",
+        help="minimum Python the project promises (ADR-0014), one of "
+        f"{', '.join(SUPPORTED_PYTHONS)}; default: the lowest one the project's requires-python "
+        f"allows, else the one .python-version pins, else {DEFAULT_PYTHON} (ADR-0029)",
     )
     p.add_argument("--yes", "-y", action="store_true", help="do not ask; use flags only")
     p.add_argument(
         "--adopt",
         action="store_true",
-        help="existing project (ADR-0013): detect package, kind, layout and tests directory, "
-        "write the harness without the src/ and tests skeleton, check only changed files",
+        help="existing project (ADR-0013): detect package, kind, layout, tests directory and "
+        "Python version, write the harness without the src/ and tests skeleton, keep the "
+        "project's own pytest, CI and agent configuration, check only changed files",
     )
     p.add_argument("--no-install", action="store_true", help="write files only; skip uv/pre-commit")
     p.add_argument(
-        "--force", action="store_true", help="overwrite existing files (keeps .bak copies)"
+        "--force",
+        action="store_true",
+        help="overwrite existing files that differ from the template (a backup copy is kept "
+        "as .bak, .bak.1, ...; a backup is never overwritten)",
     )
     p.set_defaults(func=cmd_init)
 
@@ -1124,6 +1529,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_dir(p)
     p.add_argument(
         "--diff", action="store_true", help="show what would change (nothing is written)"
+    )
+    p.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="update even when the project's harness is newer than this rumbo (ADR-0029)",
     )
     p.set_defaults(func=cmd_update)
 
@@ -1202,14 +1612,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="Existence and versions are checked on the index the project installs "
         "from (--index, else UV_INDEX_URL, UV_DEFAULT_INDEX or PIP_INDEX_URL; PyPI when none "
         "is set); age, repository, typosquatting and OSV are always measured against PyPI "
-        "(ADR-0014). Credentials in the URL are never printed.",
+        "(ADR-0014). The user and the password of the index URL are never printed, and are "
+        "sent only to that index (ADR-0028).",
     )
-    p.add_argument("packages", nargs="+", help="package names")
+    p.add_argument(
+        "packages",
+        nargs="+",
+        help="package names; extras and a version (requests[socks]>=2) are set aside, and a "
+        "URL, a path or a VCS reference is refused",
+    )
     p.add_argument(
         "--index",
         metavar="URL",
         help="simple-API index to verify existence and versions against (default: the first "
-        "set of $UV_INDEX_URL, $UV_DEFAULT_INDEX, $PIP_INDEX_URL; PyPI when none is set)",
+        "set of $UV_INDEX_URL, $UV_DEFAULT_INDEX, $PIP_INDEX_URL; PyPI when none is set). "
+        "Credentials go in the user part, https://USER:TOKEN@HOST/simple/: that part is "
+        "never printed, and it is sent only to that host. A token written in the path is "
+        "printed with the path, and a query string is not sent",
     )
     p.set_defaults(func=cmd_verify_dep)
 
@@ -1275,7 +1694,12 @@ def build_parser() -> argparse.ArgumentParser:
         "'deploy ...', 'incident ...'.",
     )
     add_dir(p)
-    p.add_argument("--days", type=int, default=30, help="window for commits and deploys")
+    p.add_argument(
+        "--days",
+        type=_days,
+        default=30,
+        help=f"window for commits and deploys, 0 to {MAX_DAYS} (default 30)",
+    )
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_metrics)
     return parser
@@ -1304,8 +1728,15 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNew project? Start with: rumbo init    Existing one? Check it with: rumbo doctor")
         return USAGE_ERROR
     args = parser.parse_args(argv)
-    if args.command == "init" and args.package and not valid_package(args.package):
-        return _err(f"invalid package name {args.package!r}; use snake_case")
+    # ADR-0029: an adopted project keeps the name of its package; a new one is snake_case
+    # (whether it collides with a generated module depends on the layout: Config decides).
+    if (
+        args.command == "init"
+        and args.package
+        and not valid_package(args.package, adopted=args.adopt, generated=())
+    ):
+        expected = "a Python identifier" if args.adopt else "use snake_case"
+        return _err(f"invalid package name {args.package!r}; {expected}")
     return args.func(args)
 
 

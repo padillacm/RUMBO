@@ -21,6 +21,15 @@
 - **Mitigation:** roll back the image; or raise the budget in the environment only if cost allows.
 - **Escalation:** product owner (cost) · the human who signed the last G4.
 
+## Every request abstains with reason `offline`
+- **Symptom:** `OfflineError` in the logs, or every answer abstains with a reason that starts with `offline`.
+- **Diagnosis:** the offline guard (`app/ports.py`) lets an adapter reach the model only when
+  `RUMBO_LIVE=1` (the production switch, set by `infra/Dockerfile`) or `RUMBO_EVALS_LIVE=1`
+  (set by the eval runner with `--live`); print the environment of the running container.
+- **Mitigation:** deploy with `RUMBO_LIVE=1`. The same variable is the kill switch: an empty
+  value cuts the model off without a new image.
+- **Escalation:**
+
 ## Model provider degraded or unavailable
 - **Symptom:** spans with `status=error`, `error.type` from the SDK, latency p95 above the SLO.
 - **Diagnosis:** provider status page; error rate per model in the spans.

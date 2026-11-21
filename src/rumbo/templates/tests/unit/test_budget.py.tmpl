@@ -70,6 +70,39 @@ def test_negative_budget_is_a_configuration_error() -> None:
         Budget(max_cost_usd=-1)
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "1e400"])
+def test_a_budget_that_is_not_finite_is_a_configuration_error(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    for name in ("INPUT_TOKENS", "OUTPUT_TOKENS", "COST_USD", "SECONDS"):
+        monkeypatch.delenv(f"RUMBO_BUDGET_{name}", raising=False)
+    monkeypatch.setenv("RUMBO_BUDGET_COST_USD", value)  # nan > limit is always False
+    with pytest.raises(ValueError, match="RUMBO_BUDGET_COST_USD"):
+        Budget.from_env()
+    with pytest.raises(ValueError, match="max_seconds"):
+        Budget(max_seconds=float(value))
+
+
+def test_token_budgets_are_whole_numbers(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("INPUT_TOKENS", "OUTPUT_TOKENS", "COST_USD", "SECONDS"):
+        monkeypatch.delenv(f"RUMBO_BUDGET_{name}", raising=False)
+    monkeypatch.setenv("RUMBO_BUDGET_OUTPUT_TOKENS", "2.9")
+    with pytest.raises(ValueError, match="RUMBO_BUDGET_OUTPUT_TOKENS"):
+        Budget.from_env()
+    monkeypatch.setenv("RUMBO_BUDGET_OUTPUT_TOKENS", "2000")
+    assert Budget.from_env().max_output_tokens == 2000
+
+
+@pytest.mark.parametrize("amount", [float("nan"), float("inf"), -0.01])
+def test_a_charge_that_is_negative_or_not_finite_is_refused(amount: float) -> None:
+    meter = Meter()
+    with pytest.raises(ValueError, match="cost_usd"):
+        meter.charge(input_tokens=10, cost_usd=amount)
+    assert (meter.input_tokens, meter.cost_usd) == (0, 0.0)  # nothing was added
+    with pytest.raises(ValueError, match="output_tokens"):
+        meter.charge(output_tokens=-1)
+
+
 def test_remaining_seconds_feeds_the_next_timeout() -> None:
     meter = Meter(Budget(max_seconds=10))
     assert 0 < meter.remaining_seconds <= 10
