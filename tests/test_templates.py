@@ -802,6 +802,13 @@ FAKE_CLI = '''
 import json
 import os
 import sys
+import time
+
+hang = os.environ.get("FAKE_CLAUDE_HANG")
+if hang:  # a CLI that never answers: says who and where it is, then sleeps
+    with open(hang, "w", encoding="utf-8") as record:
+        record.write(f"{os.getpid()}\\n{os.getcwd()}")
+    time.sleep(60)
 
 prompt = sys.stdin.buffer.read().decode("utf-8")
 seen = {"stdin": prompt, "argv": sys.argv[1:], "cwd": os.listdir("."), "where": os.getcwd()}
@@ -831,7 +838,10 @@ def adapter(
     root = project(CLAUDE_CODE)
     module = _module(f"{PACKAGE}.adapters.claude_code")
     shim = _fake_claude(tmp_path / "bin")
-    monkeypatch.setattr(module.shutil, "which", lambda name: str(shim))
+    which = module.shutil.which  # only `claude` is faked: the adapter also looks for `taskkill`
+    monkeypatch.setattr(
+        module.shutil, "which", lambda name: str(shim) if name == "claude" else which(name)
+    )
     monkeypatch.setenv("RUMBO_LIVE", "1")
     monkeypatch.chdir(root)  # the project: CLAUDE.md, .claude/settings.json with its hooks
     return module
@@ -864,6 +874,7 @@ class _Hanging:
 
     def __init__(self) -> None:
         self.returncode: int | None = None
+        self.pid = 0  # not a process: the adapter ends the process tree of a real pid only
         self.events: list[str] = []
 
     async def communicate(self, data: bytes | None = None) -> tuple[bytes, bytes]:
@@ -916,6 +927,31 @@ def test_cli_is_killed_and_reaped_however_the_call_ends(
         with pytest.raises(OSError, match="pipe closed"):
             asyncio.run(adapter.complete("ping"))
     assert process.events == ["started", "killed", "reaped"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="only the Windows shim hides the real process")
+def test_a_cli_behind_the_windows_shim_is_ended_with_its_child(
+    adapter: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Internal audit: the kill reached the `cmd.exe` shim only. The real process went on, the
+    time limit was not kept (the pipe it held blocked the cancelled read) and the temporary
+    directory it stood in was never removed."""
+    record = tmp_path / "child.txt"
+    monkeypatch.setenv("FAKE_CLAUDE_HANG", str(record))
+    loop_started = asyncio.new_event_loop().time
+    started = loop_started()
+    with pytest.raises(TimeoutError, match="no answer within 3 s"):
+        asyncio.run(adapter.complete("ping", timeout_s=3.0))
+    assert loop_started() - started < 3.0 + 2 * adapter.REAP_TIMEOUT_S + 5
+    pid, where = record.read_text(encoding="utf-8").split("\n", 1)
+    listing = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    assert f'"{pid}"' not in listing  # the child behind the shim is gone
+    assert not Path(where).exists()  # and so is the directory it stood in
 
 
 # --- the generated project's own unit tests ---------------------------------------------------

@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from {{package}}.adapters import claude_code
 from {{package}}.adapters.claude_code import ARGS, complete, parse_result
 from {{package}}.app.ports import OfflineError
 
@@ -17,6 +18,7 @@ class FakeProcess:
     def __init__(self, stdout: bytes, returncode: int = 0, hang: bool = False) -> None:
         self.stdout, self.exit_code, self.hang = stdout, returncode, hang
         self.returncode: int | None = None  # None while it runs, as in asyncio
+        self.pid = 0  # not a process: the adapter ends the process tree of a real pid only
         self.stdin: bytes | None = None
         self.killed = self.reaped = False
 
@@ -119,6 +121,37 @@ def test_a_cancelled_call_kills_the_cli(live: None, monkeypatch: pytest.MonkeyPa
 
     asyncio.run(cancel_midway())
     assert process.killed and process.reaped
+
+
+def test_on_windows_the_whole_process_tree_is_ended(
+    live: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The npm shim is a `cmd.exe` that starts node: killing the shim alone leaves node alive."""
+    process = FakeProcess(b"", hang=True)
+    process.pid = 4242
+    commands: list[tuple[str, ...]] = []
+
+    class Killer:
+        async def wait(self) -> int:
+            return 0
+
+    async def spawn(*args: str, **kwargs: Any) -> FakeProcess | Killer:
+        commands.append(args)
+        return process if len(commands) == 1 else Killer()
+
+    monkeypatch.setattr(claude_code.sys, "platform", "win32")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(TimeoutError):
+        asyncio.run(complete("ping", timeout_s=0.01))
+    assert commands[1] == ("/usr/bin/claude", "/T", "/F", "/PID", "4242")  # `which` is faked
+    assert process.killed and process.reaped
+    # Elsewhere the kill reaches the CLI itself: no second command.
+    monkeypatch.setattr(claude_code.sys, "platform", "linux")
+    commands.clear()
+    process.returncode, process.killed = None, False
+    with pytest.raises(TimeoutError):
+        asyncio.run(complete("ping", timeout_s=0.01))
+    assert len(commands) == 1 and process.killed
 
 
 def test_parse_result_is_bounded() -> None:

@@ -62,8 +62,10 @@ def test_claude_code_adapter_is_an_asyncio_subprocess() -> None:
     adapter = _text(plan, "src/y/adapters/claude_code.py")
     assert "async def complete(" in adapter
     assert "await asyncio.create_subprocess_exec(" in adapter
-    # The prompt is written to stdin (never an argument), under the caller's time limit.
-    assert 'asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), limit)' in adapter
+    # The prompt is written to stdin (never an argument), under the caller's time limit:
+    # `asyncio.wait` returns at the limit even when the pipe of a shim's child stays open.
+    assert 'asyncio.ensure_future(proc.communicate(prompt.encode("utf-8")))' in adapter
+    assert "await asyncio.wait({answer}, timeout=limit)" in adapter
     assert "import subprocess" not in adapter  # no blocking call left
     assert adapter.index("require_live(") < adapter.index("shutil.which(")  # offline guard first
     assert "def parse_result(stdout: str, *, max_chars: int) -> str:" in adapter
