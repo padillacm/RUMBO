@@ -73,8 +73,15 @@ part of both inventories: pytest loads them, so a hook there reaches every test.
 + A project that is not at the root of its repository is no longer always green.
 − Moving the tests to another directory needs the approval mark once (every file of the base
   leaves the old directory). That is the intent: it is a change a human should see.
+− Any file counts, also one that is not a test: a project whose tests live in `spec/` and that
+  kept a `tests/README.md` needs the mark when it sets `tests = "spec"` (measured: the second
+  audit's `adoption_tests_spec_but_a_tests_dir_exists`).
+− A value that leaves the repository (`tests = "../elsewhere"`, an absolute path) stops the run
+  with exit code 2 instead of comparing nothing.
 − One more `git show` per run (two when an approval is looked for).
-− Removing an identity from `agent_authors` takes effect only once the removal is in the base.
+− Removing an identity from `agent_authors` takes effect only once the removal is in the base:
+  a human whose own name the base lists as an agent cannot approve the change that removes it
+  (the pull-request label still can).
 − `--tests-dir` remains a way to look elsewhere; the CI workflow and the runner do not pass it,
   and both files are protected (ADR-0019, CODEOWNERS).
 
