@@ -1018,8 +1018,14 @@ def _adoption(cfg: Config, dest: Path, report: Report) -> Config:
     cfg = with_adoption_state(cfg, dest)
     if cfg.own_ci:
         report.notes.append(CI_STEPS_NOTE)
-    if not first or cfg.testpaths is not None:
+    if cfg.testpaths is not None:
         return cfg
+    if not first:
+        # The first adoption decided. A pyproject it left without a pytest table gets none now
+        # either: the project configures pytest somewhere else, or collects from its root.
+        tool = read_pyproject(dest).get("tool")
+        has_table = isinstance(tool, dict) and "pytest" in tool
+        return cfg if has_table else replace(cfg, testpaths=())
     tests = cfg.tests_dir
     where = pytest_configuration(dest)
     strays = stray_tests(dest, tests)

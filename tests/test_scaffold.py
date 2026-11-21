@@ -2205,6 +2205,13 @@ def test_adoption_writes_no_pytest_configuration_over_the_projects_own(
     assert "pytest" not in _tool(root)
     assert any(where in warning and "pytest" in warning for warning in report.warnings)
     assert (root / rel).read_text(encoding="utf-8") == content
+    # Adopting a second time (and updating) keeps the decision of the first: the project had
+    # its own configuration, so no table is added behind it later either.
+    scaffold(_adopted(), root)
+    assert "pytest" not in _tool(root)
+    update(Project.load(root), root)
+    assert "pytest" not in _tool(root)
+    assert (root / rel).read_text(encoding="utf-8") == content
 
 
 # Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).

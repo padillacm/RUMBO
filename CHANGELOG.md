@@ -96,8 +96,10 @@ in `docs/audits/2026-11-16-pre-0.4.1.md` and answered in ADR-0022 to ADR-0032.
 - The generated Claude Code adapter sends the prompt on standard input. On Windows the CLI is
   a batch shim, and `cmd.exe` parsed a prompt passed as an argument: it could run commands.
   At the time limit it ends the whole process tree, not only the shim.
-- On Windows the runner never takes a program from the project directory: a `uv.cmd`
-  planted there was run in place of `uv` and could turn a failing step green.
+- On Windows a `uv.cmd` planted in the project root was run in place of `uv` and could turn a
+  failing step green. The runner no longer resolves a bare program name to a file in the
+  project, and keeps the current directory out of the system's search while a step starts. A
+  `PATH` entry that points inside the project is still searched: that is the system's.
 
 ### Changed
 - ADR-0022 refines ADR-0018: a step is red only when its tool ran and judged the code. Exit
