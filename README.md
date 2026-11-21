@@ -129,7 +129,7 @@ Then replace `@your-handle` in `.github/CODEOWNERS` and the contact in `SECURITY
 `RUMBO.md`, Part A, "A1–A7. Fast path".
 
 Permanent install from PyPI: `uv tool install rumbo` (published by Trusted Publishing from the
-release workflow, no token anywhere). Pin a version: `rumbo==0.4.0`. The unreleased `main`:
+release workflow, no token anywhere). Pin a version: `rumbo==0.5.0`. The unreleased `main`:
 `uv tool install git+https://github.com/padillacm/RUMBO`. Inside a generated project the agent calls it directly
 (`rumbo gate G4`, `rumbo trace`, `rumbo tour origin/main --out docs/reviews/`); nothing needs `make`.
 
