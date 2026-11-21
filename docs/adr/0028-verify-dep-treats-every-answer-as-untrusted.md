@@ -137,7 +137,8 @@ pre-release or a development release is labelled `a pre-release`, because it is 
 version and not the one an installer picks by default. Every string that came from the
 network (summary, version, URLs, canonical name, the host that answered after a redirect,
 the reason of an error) goes through `_show`: control characters (C0, C1, bidi overrides,
-lone surrogates) become a space and the text is cut at 200 characters.
+lone surrogates) become a space and the text is cut: at 200 characters, a version at 60
+and the host that answered after a redirect at 80.
 
 **A limit that stays.** `sanitize_index` removes the user-info part of an index URL. A token
 written as a path segment (`https://host/TOKEN/simple/`) cannot be told from a repository

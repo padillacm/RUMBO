@@ -1,6 +1,11 @@
 # ADR-0014: `verify-dep` honours a private package index, and the minimum Python is a project setting
 Status: accepted    Date: 2026-11-08
 
+Refined by ADR-0028 (how answers are read and where credentials go); the rest
+stands. `www.pypi.org` counts as PyPI like `pypi.org`. A PEP 691 document takes its
+versions from `versions` when that list is not empty, else from the file names; a
+200 answer that is not a package page is "could not confirm" (exit 2), never "yes".
+
 ## Context
 `rumbo verify-dep` asks `pypi.org` whether a package exists, how old it is, how close its name
 is to a popular one, and OSV for known vulnerabilities. Companies route `uv` and `pip` through

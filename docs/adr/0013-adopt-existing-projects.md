@@ -1,6 +1,13 @@
 # ADR-0013: `rumbo init --adopt` mounts the harness on an existing project; strict checks apply to changed files
 Status: accepted    Date: 2026-11-07
 
+Refined by later decisions; the rest stands. `{changed}` also holds the files that
+are staged and not committed (`git diff --name-only --diff-filter=ACMR HEAD`); plain
+`git diff` missed the index. An adopted project's `security` step names `{changed}`
+too, and its `[tool.bandit]` keeps the environment, the tests, `spikes/` and
+`scripts/` out (ADR-0029): the sentence "`security*` [is] unchanged" no longer holds.
+`{changed}` never holds a path under `spikes/` (ADR-0020).
+
 ## Context
 `rumbo init` already respects existing files and merges `pyproject.toml` and `.gitignore`, but
 it still generates the `src/` and `tests/` skeleton a real project does not need, and the

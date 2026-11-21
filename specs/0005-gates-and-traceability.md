@@ -113,10 +113,5 @@ without a project; `test_change_approvals` in the metrics; the `nightly.yml` che
 - A missing sensor script, or a sensor that exits 2 because no base was found for it, fails its
   check with the sensor's own output and without the hand-off to the human that ADR-0018
   describes; only an interpreter that cannot be started gets that text.
-- ADR-0009 reads the lane from `git log` with merges, the regression test from `git diff
-  --numstat` and the dependencies "at HEAD"; the code skips merge commits, adds the untracked
-  files and compares the working tree.
-- The G3 checklist item of the threat model names "OWASP LLM/Agentic" for every project, while
-  the automatic OWASP row exists only for an LLM product (R5, R6).
 - A requirement id inside a fixture string of a test counts as a mention of the real
   requirement; RUMBO's own tests now build such ids at run time.

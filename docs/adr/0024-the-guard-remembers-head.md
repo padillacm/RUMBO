@@ -40,8 +40,9 @@ Nothing new in the working tree. Standard library only.
 - **State.** One small JSON file inside the git directory, at `git rev-parse --git-path
   rumbo-guard-head` (per worktree, never in the working tree, never committed). Keys: `head`
   (HEAD before the last shell command), `green` (the last HEAD a Stop saw green), `local`
-  (a digest of `.claude/settings.local.json`) and `hidden` (the protected files `git status`
-  cannot see, each with a digest).
+  (a digest of `.claude/settings.local.json`), `hidden` (the protected files `git status`
+  cannot see, each with a digest) and `unverified` (set when what was on disk could not
+  be decoded: the next Stop runs the check whatever `green` says).
 - **The file is shared by parallel hooks.** Each hook changes its own keys on a fresh copy; a
   read or a replace that fails is retried. A state that stays unreadable is unknown, not
   empty: nothing is reported from it, nothing is saved over it, and Stop verifies whatever

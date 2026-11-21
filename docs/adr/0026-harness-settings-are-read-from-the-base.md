@@ -53,9 +53,12 @@ line still overrides everything: whoever types the command chooses.
 the list of the base, plus the list of the working tree. An entry can be added by the change and
 counts at once; an entry of the base cannot be removed by the change.
 
-**`[tool.rumbo].agent_env` (guard).** The same rule: the guard reads it from `HEAD`, not from the
-working tree, so an agent cannot unset its own marker by editing the file it is about to be
-judged by. The implementation and its test belong to the change that fixes G7.
+**`[tool.rumbo].agent_env` (guard).** Stricter than the two settings above: the guard reads
+it from `HEAD` only, not from the working tree, so an agent cannot unset its own marker by
+editing the file it is about to be judged by. The committed list replaces the default
+markers, as it always did; the working tree is read only in a repository with no commit on
+any ref, where there is no `HEAD` yet. Tested by
+`tests/test_guard.py::test_agent_env_is_read_from_head_not_from_the_working_tree`.
 
 **Reading the base.** The sensor reads the base with paths relative to the project root
 (`git show <base>:./<path>`, `git ls-tree -z`), so a project in a sub-directory of its repository
