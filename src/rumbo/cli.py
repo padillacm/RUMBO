@@ -319,6 +319,14 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------- update
+# `update` and `promote` rewrite protected files (scripts/, the workflows, pyproject.toml). An
+# agent that finds them changed and uncommitted is stopped by the guard, and must not undo them.
+HUMAN_COMMITS_THE_HARNESS = (
+    "Commit this yourself before an agent goes on in this project: these are protected "
+    "files, and the guard stops an agent that finds them changed and not committed."
+)
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
     try:
@@ -334,6 +342,7 @@ def cmd_update(args: argparse.Namespace) -> int:
         return _err(str(exc))
     print(rep.summary())
     print(f"\nHarness version is now {__version__}. Review the diff with: git diff")
+    print(HUMAN_COMMITS_THE_HARNESS)
     return 0
 
 
@@ -388,6 +397,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
         f"\nRigor is now {target} (harness {__version__}). Review the diff with: git diff\n"
         f"The new level asks more of the gates: see what it requires with: rumbo gate G4"
     )
+    print(HUMAN_COMMITS_THE_HARNESS)
     return 1 if any(rc != 0 for _, rc in rep.commands) else 0
 
 

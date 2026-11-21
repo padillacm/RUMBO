@@ -2346,6 +2346,28 @@ def test_update_refuses_a_harness_newer_than_the_cli(simple_project: Path) -> No
         pyproject.write_text(original, encoding="utf-8")
 
 
+def test_pre_approvals_of_older_harnesses_that_defeat_the_guard_are_named(tmp_path: Path) -> None:
+    """`rumbo update` keeps an existing .claude/settings.json, so a project made before v0.4.1
+    still pre-approves `make rumbo *` and `rumbo decision *`: `doctor` has to say so."""
+    from rumbo.scaffold import guard_wiring
+
+    fresh = tmp_path / "fresh"
+    scaffold(Config(name="Demo", package="demo", llm=False), fresh)
+    settings = fresh / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert guard_wiring(fresh) == ([], [])  # the template of this version pre-approves neither
+    data["permissions"]["allow"] += ["Bash(make rumbo *)", "Bash(rumbo decision *)"]
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    problems, warnings = guard_wiring(fresh)
+    assert problems == [] and len(warnings) == 2
+    assert '"Bash(make rumbo *)"' in warnings[0] and "permissions.allow" in warnings[0]
+    assert '"Bash(rumbo decision *)"' in warnings[1] and "as the human" in warnings[1]
+    # A permissions object of another shape is not judged, and never crashes.
+    data["permissions"] = ["Bash(make rumbo *)"]
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    assert guard_wiring(fresh) == ([], [])
+
+
 # Covers F-0004.R10, F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
 def test_the_guard_wiring_is_checked_and_the_snippets_are_printed(tmp_path: Path) -> None:
     """ADR-0029 fitness (C6): adopting over an existing settings.json or pre-commit
@@ -2540,6 +2562,26 @@ def test_a_pyproject_without_a_build_system_is_said_not_fixed(tmp_path: Path) ->
     built = _legacy(tmp_path / "built", LEGACY_PYPROJECT + backend, "legacy_app/__init__.py")
     report = scaffold(_at_root(_adopted(tests_dir="tests")), built)
     assert not [w for w in report.warnings if "[build-system]" in w]
+
+
+def test_requirements_that_pyproject_does_not_declare_are_said_not_copied(tmp_path: Path) -> None:
+    """A project that keeps its dependencies in requirements.txt was adopted in silence with
+    `dependencies = []`: its tests could not import them on day one."""
+    cfg = _at_root(_adopted(tests_dir="tests"))
+    root = _legacy(tmp_path / "req", LEGACY_PYPROJECT, "legacy_app/__init__.py", "tests/t.py")
+    (root / "requirements.txt").write_text("flask\n", encoding="utf-8")
+    (root / "requirements-dev.txt").write_text("pytest\n", encoding="utf-8")
+    report = scaffold(cfg, root)
+    warning = next(w for w in report.warnings if "requirements" in w)
+    assert "requirements-dev.txt, requirements.txt found" in warning
+    assert "`uv add -r requirements-dev.txt`" in warning
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["dependencies"] == []  # said, not copied
+    # Dependencies that pyproject.toml already declares: nothing to say.
+    declared = LEGACY_PYPROJECT.replace("dependencies = []", 'dependencies = ["flask"]')
+    other = _legacy(tmp_path / "ok", declared, "legacy_app/__init__.py", "tests/t.py")
+    (other / "requirements.txt").write_text("flask\n", encoding="utf-8")
+    assert not [w for w in scaffold(cfg, other).warnings if "requirements" in w]
 
 
 # Covers F-0004.R10, F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).

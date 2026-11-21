@@ -2019,6 +2019,25 @@ def test_promote_is_atomic_and_a_bad_table_is_one_line(
 
 
 # Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_update_and_promote_tell_the_human_to_commit_before_the_agent_goes_on(
+    simple_project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both rewrite protected files: an agent that found them uncommitted was told by the
+    guard to revert them, which undid the human's upgrade."""
+    pyproject = simple_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    try:
+        code, out, _ = _run(["update", "--dir", str(simple_project)], capsys)
+        assert code == 0 and cli.HUMAN_COMMITS_THE_HARNESS in out
+        assert out.rstrip().endswith(cli.HUMAN_COMMITS_THE_HARNESS)
+        _, out, _ = _run(["promote", "mvp", "--no-install", "--dir", str(simple_project)], capsys)
+        assert cli.HUMAN_COMMITS_THE_HARNESS in out
+        _, out, _ = _run(["update", "--diff", "--dir", str(simple_project)], capsys)
+        assert cli.HUMAN_COMMITS_THE_HARNESS not in out  # --diff writes nothing
+    finally:
+        pyproject.write_text(original, encoding="utf-8")
+
+
 def test_update_refuses_a_newer_harness_unless_told(
     simple_project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

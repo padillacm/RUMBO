@@ -1060,8 +1060,20 @@ def _existing_pyproject_warnings(cfg: Config, dest: Path, report: Report) -> Non
         data = read_pyproject(dest)
     except ValueError:
         return
-    if not data or _rumbo_table(dest / "pyproject.toml"):
-        return  # no file yet (RUMBO writes a whole one), or said when the harness was mounted
+    if _rumbo_table(dest / "pyproject.toml"):
+        return  # said when the harness was mounted
+    project = data.get("project") if data else None
+    declared = project.get("dependencies") if isinstance(project, dict) else None
+    requirements = sorted(p.name for p in dest.glob("requirements*.txt") if p.is_file())
+    if cfg.adopted and requirements and not declared:
+        report.warnings.append(
+            f"{', '.join(requirements)} found, and pyproject.toml declares no dependencies: "
+            "the environment `uv` builds will not have those packages, so the tests cannot "
+            "import them. RUMBO did not copy them: add them yourself with "
+            f"`uv add -r {requirements[0]}`."
+        )
+    if not data:
+        return  # no file yet: RUMBO writes a whole one
     if "build-system" not in data:
         report.warnings.append(
             f"pyproject.toml has no [build-system]: uv treats the project as not installable, "
@@ -1085,6 +1097,12 @@ GUARD_HOOKS = (
     ("Stop", "stop", ()),
 )
 GUARD_GIT_STAGES = ("pre-commit", "commit-msg")
+# Pre-approvals that harnesses before v0.4.1 wrote and that defeat the guard: `rumbo update`
+# never rewrites an existing .claude/settings.json, so `rumbo doctor` names them.
+UNSAFE_PREAPPROVALS = (
+    ("Bash(make rumbo", "`make rumbo RUMBO=<any program>` runs that program"),
+    ("Bash(rumbo decision", "it records a decision, such as a gate signature, as the human"),
+)
 SETTINGS_FILE = ".claude/settings.json"
 PRE_COMMIT_FILE = ".pre-commit-config.yaml"
 _GUARD_HOOK_MARK = "      - id: rumbo-guard\n"
@@ -1164,6 +1182,15 @@ def _settings_wiring(text: str) -> tuple[list[str], list[str]]:
                 f"{', '.join(unmatched)} tool, so what an agent does through it is not checked; "
                 f'set its "matcher" to "{"|".join(tools)}"'
             )
+    permissions = data.get("permissions") if isinstance(data, dict) else None
+    allowed = permissions.get("allow") if isinstance(permissions, dict) else None
+    for entry in allowed if isinstance(allowed, list) else []:
+        for prefix, why in UNSAFE_PREAPPROVALS:
+            if isinstance(entry, str) and entry.startswith(prefix):
+                warnings.append(
+                    f'{SETTINGS_FILE}: "{entry}" is pre-approved for the agent, and {why}; '
+                    'remove it from "permissions.allow" (the agent then asks first)'
+                )
     return problems, warnings
 
 
@@ -1962,9 +1989,13 @@ def resolve_python(root: Path, flag: str | None) -> tuple[str, list[str]]:
     elif readable:
         allowed = [p for p in SUPPORTED_PYTHONS if requires_python_allows(requires, p)]
         if not allowed:
+            # Do not send anyone to "upgrade rumbo": no released version may support it yet.
             raise ValueError(
                 f'requires-python = "{requires}" allows none of the Pythons this rumbo '
-                f"supports ({supported}): upgrade rumbo, or change requires-python"
+                f"supports ({supported}), so the harness cannot be mounted on this project "
+                "yet: its tools, CI matrix and .python-version would name a Python the "
+                "project refuses. Widen requires-python to include one of them, or wait for "
+                "a rumbo that supports the Python this project needs"
             )
         python = allowed[0]
         lowest = next(

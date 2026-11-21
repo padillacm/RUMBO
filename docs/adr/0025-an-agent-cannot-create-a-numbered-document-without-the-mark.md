@@ -7,7 +7,7 @@ sentence "new documents stay editable" is narrowed here, and spec F-0001 (R7, R1
 
 ## Context
 ADR-0017 defines the human's signature as an absence: a numbered ADR or spec (`specs/NNNN-*.md`,
-`docs/adr/NNNN-*.md`) committed **without** the `<!-- rumbo:template` mark is signed. The guard
+`docs/adr/NNNN-*.md`) committed **without** the `rumbo:template` mark is signed. The guard
 refused to remove a mark that was in HEAD, and let any new document through, marked or not.
 
 The audit before v0.4.1 (finding G14) joined the two: an agent writes `docs/adr/0031-x.md`
