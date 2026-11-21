@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-21
+
 Fixes from two external audits of v0.4.0; the findings and their evidence are in
 `docs/audits/2026-11-16-pre-0.4.1.md`.
 
