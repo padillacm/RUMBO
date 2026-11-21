@@ -5,22 +5,60 @@ CLAUDE_CODE_OAUTH_TOKEN. Every call is bounded (timeout, max_tokens) and goes th
 offline guard so the check never reaches the network. The CLI runs as an asyncio subprocess
 (ADR-0012) with a fixed binary, list arguments and no shell, so awaiting it never blocks the
 event loop and several calls can be in flight under `asyncio.gather`.
+
+The prompt travels on standard input, never on the command line. Print mode reads stdin
+(https://code.claude.com/docs/en/headless, "Pipe data through Claude") and the arguments are
+the constants of `ARGS`. On Windows `claude` can be an npm `.cmd` shim, whose arguments
+`cmd.exe` parses a second time: nothing a caller or a user wrote may ever be added to `ARGS`.
+
+The run is isolated from this project. Its working directory is an empty temporary directory,
+so the CLI finds no CLAUDE.md, hooks, permissions or `.mcp.json` of the repository, and the
+flags (https://code.claude.com/docs/en/cli-reference) leave it no built-in tool (`--tools ""`),
+no MCP server (`--strict-mcp-config`), no skill or slash command (`--disable-slash-commands`),
+no project settings (`--setting-sources user`) and no saved session. `--bare` would say all of
+it in one flag, but it ignores the subscription login, which is the point of this provider.
+
+The subprocess never outlives the call: on a timeout, on cancellation and on any other error
+it is killed and waited for, for a bounded time. On Windows the npm shim is a `cmd.exe` that
+starts node: killing the shim alone leaves node running, holding the pipes and the temporary
+directory, so the whole process tree is ended first (`taskkill /T /F`, fixed arguments). The
+answer is awaited with `asyncio.wait`, which returns at the time limit whatever the pipes do:
+`asyncio.wait_for` waits for the cancelled read, and that read ends only when node does.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
+import sys
+import tempfile
+from collections.abc import Awaitable
 
 from {{package}}.app.ports import require_live
 
 DEFAULT_TIMEOUT_S = 120.0
+REAP_TIMEOUT_S = 5.0  # what ending a CLI that did not answer may take, at most
+
+# Fixed flags only (see the module docstring). `--tools` takes a list: keep a flag after its "".
+ARGS: tuple[str, ...] = (
+    "-p",
+    "--output-format",
+    "json",
+    "--max-turns",
+    "1",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--setting-sources",
+    "user",
+    "--no-session-persistence",
+)
 
 
-async def complete(
-    prompt: str, *, max_tokens: int = 1024, timeout_s: float = DEFAULT_TIMEOUT_S
-) -> str:
+async def complete(prompt: str, *, max_tokens: int = 1024, timeout_s: float | None = None) -> str:
     """One prompt in, one text out; `timeout_s` is typically `meter.remaining_seconds`."""
     require_live("Claude Code")
     binary = shutil.which("claude")
@@ -28,27 +66,80 @@ async def complete(
         raise RuntimeError(
             "the `claude` CLI is not installed (npm install -g @anthropic-ai/claude-code)"
         )
-    proc = await asyncio.create_subprocess_exec(
-        binary,
-        "-p",
-        prompt,
-        "--output-format",
-        "json",
-        "--max-turns",
-        "1",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout_s)
-    except TimeoutError:
-        proc.kill()  # the CLI does not outlive its budget
-        await proc.wait()
-        raise
+    limit = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
+    with tempfile.TemporaryDirectory(prefix="claude-p-", ignore_cleanup_errors=True) as empty:
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            *ARGS,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=empty,
+        )
+        answer = asyncio.ensure_future(proc.communicate(prompt.encode("utf-8")))
+        try:
+            done, _ = await asyncio.wait({answer}, timeout=limit)
+            if not done:
+                raise TimeoutError(f"claude -p gave no answer within {limit:g} s")
+            stdout, stderr = answer.result()
+        finally:
+            # timeout, cancellation, any error: the CLI does not outlive the call
+            await _reap(proc, answer)
     if proc.returncode != 0:
-        detail = stderr.decode(errors="replace").strip()[:500]
-        raise RuntimeError(f"claude -p failed ({proc.returncode}): {detail}")
+        detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+        raise RuntimeError(f"claude -p failed ({proc.returncode}): {detail[:500]}")
     return parse_result(stdout.decode(errors="replace"), max_chars=max_tokens * 4)
+
+
+async def _reap(
+    proc: asyncio.subprocess.Process, answer: asyncio.Future[tuple[bytes, bytes]]
+) -> None:
+    """Ends the CLI and what it started when it still runs, and waits for it, never for long."""
+    if proc.returncode is None:
+        await _kill_tree(proc.pid)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+    await _bounded(proc.wait())
+    if not answer.done():
+        answer.cancel()
+    await _bounded(answer)
+
+
+async def _kill_tree(pid: int) -> None:
+    """Windows: ends the processes the shim started (see the module docstring). The arguments
+    are constants and a process id: nothing from a prompt ever reaches this command line."""
+    if sys.platform != "win32" or pid <= 0:
+        return
+    taskkill = shutil.which("taskkill")
+    if taskkill is None:
+        return
+    with contextlib.suppress(OSError):
+        killer = await asyncio.create_subprocess_exec(
+            taskkill,
+            "/T",
+            "/F",
+            "/PID",
+            str(pid),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await _bounded(killer.wait())
+
+
+async def _bounded(awaitable: Awaitable[object]) -> None:
+    """Waits for `awaitable` at most `REAP_TIMEOUT_S` and swallows how it ended: it is cleanup."""
+    task = asyncio.ensure_future(awaitable)
+    task.add_done_callback(_retrieve)
+    await asyncio.wait({task}, timeout=REAP_TIMEOUT_S)
+    if not task.done():
+        task.cancel()
+
+
+def _retrieve(task: asyncio.Future[object]) -> None:
+    """Reads the outcome of a cleanup task so asyncio does not log it as never retrieved."""
+    if not task.cancelled():
+        task.exception()
 
 
 def parse_result(stdout: str, *, max_chars: int) -> str:

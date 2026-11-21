@@ -20,6 +20,10 @@
 > Guiding principle: AI amplifies the discipline that already exists; it does not replace it.
 > That is why the focus is on **executable verifiers** (tests, properties, types, architecture
 > contracts, evals) and not on prompts.
+>
+> ADR-NNNN numbers in this manual refer to RUMBO's own decisions, at
+> https://github.com/padillacm/RUMBO/tree/main/docs/adr; this project's ADRs are in its own
+> `docs/adr/`.
 
 ---
 
@@ -85,8 +89,12 @@ skipped or failed, and jump to **A8**. If you cannot use the CLI, follow A1–A7
 
 **An existing project** takes `rumbo init --adopt` (ADR-0013): it detects the package, the
 kind, the layout, the tests directory and whether the package lives under `src/` or at the root (`[tool.rumbo].src`, ADR-0020; the flags still win), writes the harness without the
-`src/` and tests skeleton, leaves an existing CI workflow alone and prints the two steps to add,
-and makes `lint`, `format` and `types` run on the changed files only (`{changed}`), so the
+`src/` and tests skeleton, leaves an existing CI workflow, pytest configuration,
+`.claude/settings.json` and `.pre-commit-config.yaml` alone and prints what to add to them,
+detects the Python version from `requires-python`, refuses to configure a package or a
+module that is not on disk (ADR-0029),
+adds no runtime dependency, and makes `lint`, `format`, `types` and `security` run on the
+changed files only (`{changed}`), so the
 legacy debt is measured nightly with `--full` instead of blocking every change. The adoption
 commit touches protected files, so the **human** makes it; from then on the hooks apply.
 
@@ -109,7 +117,7 @@ commit touches protected files, so the **human** makes it; from then on the hook
 ├── .github/dependabot.yml            # rigor mvp or production
 ├── .github/pull_request_template.md  # the G4 checklist, ticked by the human
 ├── .github/CODEOWNERS                # humans who review the harness files (placeholder handles)
-├── .claude/commands/rumbo-*.md       # /rumbo-r, -u, -m, -ancla, -review, -o, -gate, -tour
+├── .claude/commands/rumbo-*.md       # /rumbo-r, -u, -m, -ancla, -fix, -review, -o, -gate, -tour
 ├── .claude/settings.json             # permissions + hooks (scripts/rumbo_guard.py)
 ├── docs/
 │   ├── product/brief.md
@@ -240,7 +248,7 @@ format   = "uv run ruff format --check ."
 types    = "uv run pyright"
 test     = "uv run pytest --cov --cov-report=term-missing:skip-covered"   # no --cov in prototype
 arch     = "uv run lint-imports"
-security = "uv run bandit -q -r src evals"
+security = "uv run bandit -c pyproject.toml -q -r src evals"
 security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
 audit    = "uv run pip-audit --skip-editable"
 evals    = "uv run python evals/run_evals.py --suite smoke"   # LLM products and data pipelines, offline
@@ -248,25 +256,34 @@ sensor   = "uv run python scripts/check_tests_not_weakened.py --base {base}"
 ```
 
 Steps run in this order: `lint`, `format`, `types`, `test`, `arch`, `security`,
-`security-scripts`, `audit`, `evals` (LLM products only), `sensor`. `uv run python
+`security-scripts`, `audit`, `evals` (LLM products and data pipelines), `sensor`. `uv run python
 scripts/rumbo_check.py` runs them all and stops at the first failure; `--keep-going` runs them
 all; a subset runs with `uv run python scripts/rumbo_check.py lint types`; `--brief` writes the
 output to `.rumbo-check.log` and prints one line, or only the failing tail (this is what the
-agent runs). `{base}` is `--base`, else `origin/main`, else `main`. Operators such as `&&` or `|`
-are a configuration error: a step that needs logic becomes a small Python script.
+agent runs). `{base}` is `--base`, else the first that exists of `origin/main`, `origin/master`,
+`origin/HEAD`, `main` and `master`. Operators such as `&&` or `|` are a configuration error: a
+step that needs logic becomes a small Python script. Quotes group words and a backslash is an
+ordinary character, so a Windows path is written as it is.
 
 Exit codes: `0` green; `1` a verification failed; `3` the environment is broken (a tool missing
-or crashing, a malformed table). The `Stop` hook blocks the agent on `1`; on `3` it tells the
-agent to report to the human and not to repair the environment. With the CLI installed,
-`rumbo check` is the same command.
+or crashing, a malformed table). A step is red only when its tool ran and judged the code
+(ADR-0018, ADR-0022): a crash, a project script that is missing and the exit codes a tool
+was measured to keep for "I could not do my job" are the environment; exit `1` is red unless
+the launcher cannot start its interpreter (`uv run` exits `1` when it cannot build the
+environment), and any other code is red only if the tool answers `--version`. The `Stop` hook blocks the agent on `1`; on `3` it tells the agent to report
+to the human and not to repair the environment. With the CLI installed, `rumbo check` is the
+same command.
 
 The `Makefile` keeps one-line aliases for people who have `make` (`make check`, `make check-brief`,
-`make lint`, `make types`, `make test`, `make arch`, `make security`, `make sensor`,
-`make evals`) plus `make fmt`, `make evals-live`, `make mutation`, `make sbom`, `make hooks`,
-`make review` and `make rumbo`; the agent calls `rumbo` and the runner directly and does not need `make`.
+`make lint`, `make types`, `make test`, `make arch`, `make sensor`, `make evals`, and `make
+security` from mvp on) plus `make fmt`, `make evals-live`, `make mutation`, `make sbom`,
+`make hooks`, `make review` and `make rumbo`; the agent calls `rumbo` and the runner directly
+and does not need `make`.
 
-**The check is offline**: it never needs a model credential. The real model runs only in
-`make evals-live`. Prototypes drop the security steps.
+**The check is offline**: it never needs a model credential. The model is reachable only when
+`RUMBO_EVALS_LIVE=1` (`make evals-live`, which loads `.env` when the file exists) or
+`RUMBO_LIVE=1` (the production switch, set in the service image; ADR-0031) is in the
+environment. Prototypes drop the security and audit steps.
 
 ### A4. pre-commit
 
@@ -282,10 +299,13 @@ and a local hook that runs `uv run lint-imports`. Then `pre-commit autoupdate` a
   on `windows-latest` (the runner needs no `make`), actions pinned by SHA, `permissions: contents: read`:
   checkout with `fetch-depth: 0` → `astral-sh/setup-uv` → `uv sync --locked` → `python scripts/rumbo_check.py`
   (no secrets) → `scripts/check_tests_not_weakened.py --strict` with `RUMBO_BASE_REF` set to
-  the PR base → `pre-commit run --all-files` (mvp+) → SBOM artifact (production). A separate
+  the PR base → `pre-commit run --all-files` (mvp+; an adopted project runs it on the files
+  changed since the base only) → SBOM artifact (production). The pull request also re-runs
+  when a label is added or removed, so the `tests-change-approved` label takes effect. A separate
   `secrets` job runs `gitleaks/gitleaks-action` over the full history: the pre-commit hook only
   sees staged files, so this job is the sensor that actually protects the repository.
-- `nightly.yml` (daily cron, mvp+): `make mutation` (mutmut needs Linux, macOS or WSL) on `src/<pkg>/domain` and, for LLM
+- `nightly.yml` (daily cron, mvp+): `pip-audit` against fresh advisories; at production,
+  `make mutation` (mutmut needs Linux, macOS or WSL) on `src/<pkg>/domain`; and, for LLM
   products, `make evals-live` in a protected `evals` environment. **That is the only workflow
   that holds a model credential**, and it never runs on pull requests.
 - `.github/pull_request_template.md` carries the G4 checklist where the human is already
@@ -295,19 +315,34 @@ and a local hook that runs `uv run lint-imports`. Then `pre-commit autoupdate` a
 
 ### A6. Sensors the agent cannot bypass: the anti-cheat sensor and the guard hook
 
-Comparing against `origin/main` (or the PR base commit), the script fails if:
+Comparing against the base (the PR base commit, else the first that exists of `origin/main`,
+`origin/master`, `origin/HEAD`, `main`, `master`), the script fails if:
 
-- a file under `tests/` is deleted or a `test_*` function disappears;
+- a file under `tests/` is deleted or a test disappears. A test is a function whose name
+  starts with `test` and that pytest collects: a direct child of a module or of a test class,
+  inherited tests included. A test moved under a condition, deleted with `del`, hidden with
+  `__test__ = False` or replaced by a decorator is reported (ADR-0027);
 - a test loses assertions, or the total number of assertions in the tests directory drops
-  (`tests/` by default, `[tool.rumbo].tests` for other layouts);
+  (`tests/` by default, `[tool.rumbo].tests` for other layouts). Assertions that cannot run or
+  cannot fail count zero: under a swallowed `AssertionError`, in a helper turned into a
+  generator, in a nested function the test never calls;
 - a test gains always-true asserts (`assert True`), `skip`/`xfail` markers, or a shorter
-  `parametrize` list.
+  `parametrize` list, or a skip reaches it from outside (the module or class level, an
+  autouse fixture, a fixture it uses); a conftest hook that changes which tests run or how
+  they end is reported for review.
+
+The tests directory and `agent_authors` are read from the base, so the change under test
+cannot narrow them (ADR-0026). With `--strict` the script exits `2` when there is no base, when
+the base cannot be read, or when the base found by default is `HEAD` itself.
 
 It can only be bypassed by a **human**: a commit in `base..HEAD` with `[tests-change-approved]`
 in its message that was not authored by an agent, or the `tests-change-approved` label on the
-PR. What it does not see (review by hand; mutation testing covers part of it): early `return`,
-mocks that empty the behavior, helpers built dynamically or imported from outside the tests
-directory, changes to pytest configuration.
+PR (read only in a pull request run of GitHub Actions). What it does not see (review by hand;
+mutation testing covers part of it): early `return`, asserts under a condition that is never
+true, a helper named like an assertion that checks nothing, mocks that empty the behavior,
+helpers built dynamically or imported from outside the tests directory. A push straight to the
+default branch is compared with the push before it, so protect that branch and work through
+pull requests.
 An assertion is an `assert`, a `pytest.raises`/`warns`/`deprecated_call` block, a `self.assert*`
 or `self.fail` call, a mock assertion (`assert_called_once_with`, ...) or `pytest.fail`. A call
 to a helper defined in the same file, a `conftest.py` or a module imported from the tests
@@ -316,23 +351,31 @@ helper passes and hollowing the helper is reported.
 It ships with its own tests (`tests/unit/test_check_tests_not_weakened.py`).
 
 `scripts/rumbo_guard.py` is the **guard hook**, wired by `.claude/settings.json` as Claude Code
-hooks. Before every `Edit`/`Write`/`Bash` call it blocks (exit 2, the reason reaches the agent):
-edits to the protected files (Makefile, `pyproject.toml`, CI, `infra/`, pre-commit, both
-sensors, `evals/run_evals.py`, `.env*`), removal of the `<!-- rumbo:template` mark, writing
+hooks. Before every `Edit`/`Write` call and every shell command (the `Bash` and `PowerShell`
+tools) it blocks (exit 2, the reason reaches the agent):
+edits to the protected files (Makefile, `pyproject.toml` and the files that shadow it such as
+`ruff.toml`, `pytest.ini`, `mypy.ini` or `pyrightconfig.json`, CI, `infra/`, pre-commit, `.git/`,
+the sensors, `evals/run_evals.py`, `.env*`; ADR-0023), removal of the `<!-- rumbo:template`
+mark, creating a numbered ADR or spec without it (ADR-0025), writing
 `[tests-change-approved]`, `--no-verify`, force pushes, `git reset --hard`, disabling hooks,
-`rm -rf` on the root and shell redirections into protected files. On `Stop`, if Python, TOML
-or JSONL files changed since the last commit, it runs `scripts/rumbo_check.py --brief` and refuses to finish
+git configuration passed through `-c` or the environment, `verify-dep --index`, `git diff
+--no-index`, `rm -rf` on the root and shell redirections into protected files. After every
+shell command it reports protected files that changed, including through a commit made during
+the command without the `pre-commit` hook: the guard remembers `HEAD` (ADR-0024). On `Stop`,
+if Python, TOML or JSONL files changed since the last commit, or were committed since the
+last green `HEAD`, it runs `scripts/rumbo_check.py --brief` and refuses to finish
 while it is red; if the environment is broken (exit 3: a tool could not start) it asks the agent to report to the human instead; a tool that started and rejected the code, such as pytest failing to import a test file, is red (ADR-0018). In `pyproject.toml` only the dependency tables written by `uv add` may change without the human (ADR-0019). The human is never blocked: edits by hand do not go through the hook, and a
 rule can be overridden in `.claude/settings.local.json`. `settings.json` also pre-approves the
 harness commands (the check runner, pytest, ruff, read-only git) and denies `curl`/`wget` and
-reading `.env`.
+reading `.env`. `rumbo decision` and `make rumbo` are not pre-approved: recording a decision
+is the human's act, so the agent proposes the text and the human runs the command.
 
 The same script is also a **git hook** (ADR-0008), installed by `rumbo init` through
 pre-commit (`pre-commit` and `commit-msg`), so an agent running in Cursor, Codex, Cline or
 Roo Code meets the same rules when it commits. The actor is an agent when one of the
-environment markers in `[tool.rumbo].agent_env` is set (default: `CLAUDECODE`, `GEMINI_CLI`,
-`CURSOR_AGENT`, `CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_THREAD_ID`, `CODEX_CI`, `ROO_ACTIVE`,
-`CLINE_ACTIVE`; each confirmed in the tool's source or documentation, ADR-0021), the human when `git config rumbo.human` is
+environment markers in `[tool.rumbo].agent_env`, as committed in `HEAD` (ADR-0026), is set (the
+default list covers Claude Code, Gemini CLI, Cursor, Codex, Roo Code and Cline, each marker
+confirmed in the tool's source or documentation, ADR-0021), the human when `git config rumbo.human` is
 `true` in the clone (`rumbo init` sets it only for a human at a terminal, never when an agent runs it; `rumbo doctor` warns when it is missing), and
 unknown otherwise, which counts as an agent. For an agent the hooks refuse a staged protected
 file, a staged document whose template mark is gone, and a commit message carrying
@@ -349,7 +392,7 @@ through the shell is reported after the command together with any removed mark, 
 hook refuses it. New documents and documents still under the mark stay editable; to change a
 signed one, propose it to the human or write a document that supersedes it.
 
-### A7. Evals skeleton (LLM products only)
+### A7. Evals skeleton (LLM products and data pipelines)
 
 `evals/run_evals.py`:
 
@@ -360,10 +403,13 @@ signed one, propose it to the human or write a document that supersedes it.
   `run` works too) for each case, `k` times (`--k`, default 1; use 3 to measure consistency),
   with at most `--concurrency N` calls in flight (default 1; the report keeps the case order);
 - applies **deterministic** graders from `evals/graders/` (numeric accuracy with tolerance,
-  field equality, assertions on tool-call arguments, abstention when the data is missing);
+  field equality, assertions on tool-call arguments, abstention when the data is missing). A
+  grader takes the output and the expected value, optionally the case input as a third
+  parameter, and may be a coroutine (ADR-0030);
 - reports `pass@1` and `pass^k` (a case passes only if all `k` runs pass) and exits non-zero
   when `pass^k` falls below the threshold (`--min-pass`);
-- fingerprints the prompts and the judge (sha256) in every report; a `--live` run records them
+- fingerprints the prompts and the judge (sha256) in every report; a `--live` run of the whole
+  suite that reaches `--min-pass` records them
   in `evals/fingerprint.json` and an offline run warns when they changed since, so stale
   fixtures or an uncalibrated judge are noticed (ADR-0016; the warning never fails the step);
 - is **offline** unless `--live` is passed: adapters raise `OfflineError` instead of calling the
@@ -376,7 +422,8 @@ Two tools keep the dataset honest:
   turns a production failure or a reviewed trace into a case and logs it in
   `evals/error_analysis/log.md` (the weekly ritual reads that log).
 - LLM judges (`evals/graders/judge.py`) are added **after** the first error analysis and only
-  once calibrated: `calibrate()` over ≥30 human-labeled rows in `evals/calibration/` must give
+  once calibrated: `await calibrate()` over ≥30 human-labeled rows in `evals/calibration/` (each
+  with its `input`; the judge and its model call are asynchronous) must give
   TPR and TNR ≥ 0.8 before the judge is registered in `GRADERS`; the numbers and the date go in
   `docs/evals/plan.md`.
 
@@ -402,7 +449,7 @@ LLM flag; the generated file also has a "Commands" and a "Human compass" section
 - Architecture decisions: docs/adr/  (read them before any structural decision)
 - Layers: src/<pkg>/{domain,app,adapters,api}; contracts in pyproject.toml [tool.importlinter]
 - Security: docs/security/threat-model.md
-- Evals: evals/ (LLM products only)
+- Evals: evals/ (LLM products and data pipelines)
 
 ## Before declaring a task done
 uv run python scripts/rumbo_check.py   # must be green; paste the summarized output
@@ -435,7 +482,8 @@ Keep the file under ~100 lines (`rumbo doctor` checks it). It is a map, not a ma
 ## PART C — The RUMBO cycle (how we work after the harness)
 
 When the human says **"phase R"**, **"phase U"**, etc. (or uses `/rumbo-r`, `/rumbo-u`,
-`/rumbo-m`, `/rumbo-ancla`, `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`, `/rumbo-tour`), follow
+`/rumbo-m`, `/rumbo-ancla`, `/rumbo-fix`, `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`,
+`/rumbo-tour`), follow
 the matching section. Every gate is evaluated with `rumbo gate G1..G5` (automatic checks scaled
 to the rigor + a checklist the human signs; the exit code never means "signed").
 
@@ -495,7 +543,8 @@ to the rigor + a checklist the human signs; the exit code never means "signed").
   the spec). `rumbo tour origin/main --out docs/reviews/` writes a guided review for the human: risk hotspots first, reading
   order (tests first), verification commands and three explanation-test questions.
 - Learn **A**nd measure: repeated mistakes → a new sensor or a line in AGENTS.md. When a spec
-  closes, log how many sessions it took (`rumbo decision "F-000N closed" --why "1 session"`);
+  closes, the human logs how many sessions it took (`rumbo decision "F-000N closed" --why "1 session"`;
+  the agent proposes the entry, it does not run the command);
   `rumbo metrics` turns those decisions, git and the evals into the team's numbers (sessions
   per spec, gates signed, deploys and incidents, requirements with a test, latest eval run).
 - **Fix lane** (ADR-0009): a defect in existing behaviour does not need a spec or two pauses.
@@ -558,8 +607,8 @@ the agent's effective context"), so the harness keeps each unit of work small:
 - When the human is learning something new, explain and ask instead of solving everything.
 - Do not propose agents for: irreversible decisions, security code without prior tests, or
   topics the human needs to master (e.g. their thesis).
-- Log the decisions the human made, and why, in `docs/decisions.md`
-  (`rumbo decision "<title>" --why "<reason>"`).
+- Propose the entry for each decision the human made, and why; the human records it in
+  `docs/decisions.md` (`rumbo decision "<title>" --why "<reason>"`).
 
 ---
 
@@ -675,8 +724,8 @@ What `rumbo init` and `rumbo gate` do per rigor:
 |---|---|---|---|
 | the check | lint, format, types, test, arch unless flat (+evals) | + security, audit, coverage report | same (coverage is informational: mutation testing is the sensor) |
 | dev dependencies | ruff, pyright, pytest, hypothesis, pre-commit (+ import-linter unless flat) | + pytest-cov, bandit, pip-audit | + mutmut |
-| CI | check + sensor + gitleaks | + pre-commit on all files | + SBOM (CycloneDX from uv.lock) |
-| Nightly | — | mutation (+ live evals) | mutation + live evals with k=3 |
+| CI | check + sensor + gitleaks | + pre-commit (all files; the changed files when adopted) | + SBOM (CycloneDX from uv.lock) |
+| Nightly | — | dependency audit (+ live evals) | + mutation, live evals with k=3 |
 | Dependabot | — | weekly, 7-day cooldown | same |
 | Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases; budget + telemetry wired (G5) | + fitness function per ADR, nightly, SBOM, every requirement traced to a test (G4); 100 cases |
 | Hooks | `.claude/settings.json` + `scripts/rumbo_guard.py`, also as git hooks via pre-commit | same | same |

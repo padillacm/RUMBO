@@ -8,10 +8,15 @@ and Cohen's kappa. Register a judge in GRADERS only when `Calibration.acceptable
 The eval runner fingerprints this file (ADR-0016) and warns offline when it changed since
 the last live run.
 
-The model call is injected (`complete: str -> str`), so the unit tests use a fake and
+The judge is an asynchronous grader that takes the case input: the runner awaits it and hands
+it the case's `input`, so the question it shows the model is the one that was asked, not
+whatever the system under test echoed in its answer. The model call is injected and awaited
+(`complete: str -> Awaitable[str]`): an adapter of the `Completion` port plugs in as it is, a
+synchronous SDK goes through `asyncio.to_thread`, and the unit tests use an `async def` fake so
 the check stays offline. Calibration needs the real model: run it from a small script in
-evals/ under `make evals-live` conditions (RUMBO_EVALS_LIVE=1) and paste the summary in
-docs/evals/plan.md. JSON-quoting the answer and the "data, not instructions" line are a
+evals/ under `make evals-live` conditions (RUMBO_EVALS_LIVE=1), with
+`asyncio.run(calibrate(judge, rows))`, and paste the summary in docs/evals/plan.md.
+JSON-quoting the question and the answer and the "data, not instructions" line are a
 mitigation against prompt injection, not a guarantee: keep an injected answer in the
 calibration set (see evals/calibration/example.jsonl) to measure it.
 """
@@ -20,7 +25,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,17 +49,24 @@ Answer to grade:
 class Judge:
     """Grader: `expected = {"rubric": "..."}` (falls back to the judge's default rubric)."""
 
-    complete: Callable[[str], str]
+    complete: Callable[[str], Awaitable[str]]
     rubric: str = "The answer is correct, complete and does not invent data."
     name: str = "judge"
 
-    def __call__(self, output: dict[str, Any], expected: dict[str, Any]) -> Verdict:
+    async def __call__(
+        self, output: dict[str, Any], expected: dict[str, Any], case_input: Any = None
+    ) -> Verdict:
+        question: Any = case_input  # an input of another shape is shown whole
+        if isinstance(case_input, dict):
+            question = case_input.get("question", case_input)
+        elif case_input is None:  # a two-argument call: the row carries no input
+            question = output.get("question", "")
         prompt = PROMPT.format(
             rubric=expected.get("rubric", self.rubric),
-            question=json.dumps(output.get("question", ""), ensure_ascii=False),
+            question=json.dumps(question, ensure_ascii=False),
             answer=json.dumps(output.get("answer", output), ensure_ascii=False),
         )
-        raw = self.complete(prompt).strip().upper()
+        raw = (await self.complete(prompt)).strip().upper()
         if raw.startswith("PASS"):
             return Verdict(True)
         if raw.startswith("FAIL"):
@@ -82,13 +94,17 @@ class Calibration:
         )
 
 
-def calibrate(judge: Judge, labeled: Iterable[dict[str, Any]]) -> Calibration:
-    """`labeled` rows: {"id", "output", "human": true|false, "expected"?: {...}}."""
+async def calibrate(judge: Judge, labeled: Iterable[dict[str, Any]]) -> Calibration:
+    """`labeled` rows: {"id", "input"?: {...}, "output", "human": true|false, "expected"?: {...}}.
+
+    The rows are judged one at a time, in order: a calibration is rare and must not trip the
+    provider's rate limit.
+    """
     tp = tn = fp = fn = 0
     disagreements: list[str] = []
     for row in labeled:
         human = bool(row["human"])
-        verdict = judge(row["output"], row.get("expected", {})).ok
+        verdict = (await judge(row["output"], row.get("expected", {}), row.get("input"))).ok
         if verdict and human:
             tp += 1
         elif not verdict and not human:

@@ -13,15 +13,21 @@ commit it gives the reviewer:
   approving, with hints folded away (comprehension gate; Anthropic 2026 RCT: explaining
   back and conceptual questions preserve understanding, delegation erodes it).
 
-Standard library + git only.
+Standard library + git only. Every git call whose output is parsed fixes its own format
+(`GIT`, `LOG`, `SHOW`, `DIFF`, `PATCH` below), so the guide does not depend on the reviewer's
+git configuration; every path and ref printed inside a command is quoted for the shell.
 """
 
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from rumbo.project import DEFAULT_TESTS, GitMissing
+from rumbo.project import tests_dir as project_tests_dir
 
 BUDGET_LINES = 300
 LOCKFILES = ("uv.lock", "poetry.lock", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")
@@ -63,7 +69,9 @@ class FileChange:
     path: str
     added: int
     removed: int
-    status: str = "M"  # A, M, D, R
+    status: str = "M"  # A, M, D (a moved file is a D and an A: renames are not followed)
+    # The project's tests directory ([tool.rumbo].tests) as git names it, from the repository top.
+    tests_dir: str = DEFAULT_TESTS
 
     @property
     def lines(self) -> int:
@@ -71,10 +79,13 @@ class FileChange:
 
     @property
     def is_test(self) -> bool:
+        """In the project's tests directory, under any `tests/`, or named as pytest collects."""
+        name = PurePosixPath(self.path).name
         return (
-            self.path.startswith("tests/")
+            self.path.startswith((f"{self.tests_dir}/", "tests/"))
             or "/tests/" in self.path
-            or (Path(self.path).name.startswith("test_"))
+            or name.startswith("test_")
+            or name.endswith("_test.py")
         )
 
     @property
@@ -83,7 +94,7 @@ class FileChange:
 
     @property
     def is_lock(self) -> bool:
-        return Path(self.path).name in LOCKFILES
+        return PurePosixPath(self.path).name in LOCKFILES
 
 
 @dataclass
@@ -94,6 +105,7 @@ class Commit:
     author: str
     files: list[FileChange] = field(default_factory=list)
     weakening_hunks: list[str] = field(default_factory=list)
+    merge: bool = False  # more than one parent: reverted, like diffed, against the first
 
     @property
     def short(self) -> str:
@@ -139,16 +151,32 @@ class Commit:
         return sorted((f for f in self.files if not f.is_lock), key=key)
 
 
+# What makes the output of git the same on every machine, whatever the user configured: paths
+# as they are (not octal-quoted), no colour, messages in UTF-8.
+GIT = ("git", "-c", "core.quotepath=off", "-c", "color.ui=never")
+LOG = ("-c", "i18n.logOutputEncoding=UTF-8", "log", "--reverse", "--no-show-signature")
+# One diff per commit, against its first parent (a merge is what it brought into the branch);
+# a moved file is a deleted and an added one, so its removed asserts are seen.
+SHOW = ("show", "--format=", "--no-show-signature", "--diff-merges=first-parent")
+DIFF = ("--no-color", "--no-ext-diff", "--no-textconv", "--no-renames")
+PATCH = ("--src-prefix=a/", "--dst-prefix=b/", "--unified=0")
+_QUOTED = re.compile(r"\\([0-7]{3}|.)")
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+
+
 def _git(args: list[str], root: Path) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [*GIT, *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as exc:
+        raise GitMissing(exc) from exc
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"git {' '.join(args)} failed")
     return proc.stdout
@@ -158,73 +186,131 @@ BASE_CANDIDATES = ("origin/main", "origin/master", "origin/HEAD", "main", "maste
 
 
 def resolve_base(base: str | None, root: Path) -> str | None:
-    """The given base if git knows it; otherwise the first known default; None if nothing fits."""
+    """The given base if git knows it; otherwise the first known default; None if nothing fits.
+
+    Raises GitMissing when git cannot be started.
+    """
     candidates = [base] if base else []
     candidates += [c for c in BASE_CANDIDATES if c != base]
     for candidate in candidates:
-        proc = subprocess.run(
-            ["git", "rev-parse", "--verify", "-q", f"{candidate}^{{commit}}"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "--verify", "-q", f"{candidate}^{{commit}}"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except OSError as exc:
+            raise GitMissing(exc) from exc
         if proc.returncode == 0:
             return candidate
     return None
 
 
+def _unquote(name: str) -> str:
+    """A path git wrote in C quotes: it has a quote, a backslash or a control character."""
+    raw = bytearray()
+    position = 0
+    body = name[1:-1] if name.endswith('"') else name[1:]
+    for escape in _QUOTED.finditer(body):
+        raw += body[position : escape.start()].encode("utf-8", "replace")
+        code = escape.group(1)
+        raw += bytes([int(code, 8)]) if len(code) == 3 else _ESCAPES.get(code, code).encode()
+        position = escape.end()
+    raw += body[position:].encode("utf-8", "replace")
+    return raw.decode("utf-8", "replace")
+
+
+def _patch_path(text: str, prefix: str) -> str:
+    """The path of a `--- a/…` or `+++ b/…` line of a patch; "" for `/dev/null`."""
+    if text == "/dev/null":
+        return ""
+    text = text.removesuffix("\t")  # git ends a name that has a space with a tab
+    if text.startswith('"'):
+        text = _unquote(text)
+    return text.removeprefix(prefix)
+
+
+def _weakened(patch: str, tests: set[str]) -> list[str]:
+    """The test files of a patch that lose an assert or gain a skip, in the order of the patch.
+
+    Only the header of a file names it: inside a hunk a removed line may itself begin with
+    `-- a/`. The removed lines of a deleted file (`+++ /dev/null`) belong to the file deleted.
+    """
+    found: list[str] = []
+    old = new = ""
+    header = True
+    for line in patch.split("\n"):
+        if line.startswith("diff --git "):
+            header, old, new = True, "", ""
+        elif line.startswith("@@"):
+            header = False
+        elif header and line.startswith("--- "):
+            old = _patch_path(line[4:], "a/")
+        elif header and line.startswith("+++ "):
+            new = _patch_path(line[4:], "b/")
+        elif not header and WEAKENING.search(line):
+            path = new or old
+            if path in tests and path not in found:
+                found.append(path)
+    return found
+
+
 def load_commits(base: str, head: str, root: Path) -> list[Commit]:
-    log = _git(["log", "--reverse", "--format=%H%x1f%s%x1f%b%x1f%an%x1e", f"{base}..{head}"], root)
+    # Five fields per commit, each ended by NUL: no message can contain one, so no message
+    # can hide its commit or shift the fields.
+    log = _git([*LOG, "--format=%H%x00%s%x00%b%x00%an%x00%P%x00", f"{base}..{head}"], root)
+    parts = log.split("\0")
+    # The tests directory is the project's, seen from the top of the repository: the paths of
+    # `git show` start there, and the project may be one directory of it.
+    prefix = _git(["rev-parse", "--show-prefix"], root).strip()
+    tests_dir = prefix + project_tests_dir(root)
     commits: list[Commit] = []
-    for record in log.split("\x1e"):
-        parts = record.strip("\n").split("\x1f")
-        if len(parts) != 4:
-            continue
-        sha, subject, body, author = parts
-        commit = Commit(sha, subject.strip(), body.strip(), author.strip())
-        status_out = _git(["show", "--format=", "--name-status", sha], root)
-        statuses = {}
-        for line in status_out.splitlines():
-            cols = line.split("\t")
-            if len(cols) >= 2:
-                statuses[cols[-1]] = cols[0][0]
-        numstat = _git(["show", "--format=", "--numstat", sha], root)
-        for line in numstat.splitlines():
-            cols = line.split("\t")
+    show = [*SHOW, *DIFF]
+    for i in range(0, len(parts) - 4, 5):
+        sha, subject, body, author, parents = (part.strip() for part in parts[i : i + 5])
+        commit = Commit(sha, subject, body, author, merge=len(parents.split()) > 1)
+        named = _git([*show, "--name-status", "-z", sha], root).split("\0")
+        pairs = zip(named[0::2], named[1::2], strict=False)  # status, path, …, and a last ""
+        statuses = {path: status.strip()[:1] for status, path in pairs}
+        for entry in _git([*show, "--numstat", "-z", sha], root).split("\0"):
+            cols = entry.lstrip("\n").split("\t", 2)
             if len(cols) != 3:
                 continue
             added = int(cols[0]) if cols[0].isdigit() else 0
             removed = int(cols[1]) if cols[1].isdigit() else 0
-            commit.files.append(FileChange(cols[2], added, removed, statuses.get(cols[2], "M")))
-        test_paths = [f.path for f in commit.files if f.is_test]
+            status = statuses.get(cols[2], "M")
+            commit.files.append(FileChange(cols[2], added, removed, status, tests_dir))
+        test_paths = {f.path for f in commit.files if f.is_test}
         if test_paths:
-            diff = _git(["show", "--format=", sha, "--", *test_paths], root)
-            current = ""
-            for line in diff.splitlines():
-                if line.startswith("+++ b/"):
-                    current = line[6:]
-                elif WEAKENING.search(line) and current and current not in commit.weakening_hunks:
-                    commit.weakening_hunks.append(current)
+            patch = _git([*show, *PATCH, sha], root)
+            commit.weakening_hunks = _weakened(patch, test_paths)
         commits.append(commit)
     return commits
 
 
 def _verify_commands(commit: Commit) -> list[str]:
+    # A path comes from the branch under review: it goes into a command as one quoted word.
     tests = [
-        f.path for f in commit.files if f.is_test and f.status != "D" and f.path.endswith(".py")
+        shlex.quote(f.path)
+        for f in commit.files
+        if f.is_test and f.status != "D" and f.path.endswith(".py")
     ]
-    cmds = [f"git show --stat {commit.short}"]
+    sha = shlex.quote(commit.short)
+    cmds = [f"git show --stat {sha}"]
     if tests:
         cmds.append(f"uv run pytest -q {' '.join(tests[:3])}")
     if commit.kind in ("behavioral", "structural", "mechanical"):
         cmds.append("uv run python scripts/rumbo_check.py")
     if commit.kind == "behavioral":
+        # git refuses to revert a merge without naming the parent it keeps (`-m 1`).
+        mainline = "-m 1 " if commit.merge else ""
         cmds.append(
-            f"git revert --no-commit {commit.short} && uv run python scripts/rumbo_check.py test; "
-            "git revert --abort"
+            f"git revert --no-commit {mainline}{sha} && uv run python scripts/rumbo_check.py "
+            "test; git revert --abort"
         )
     return cmds
 
@@ -285,7 +371,7 @@ def render_markdown(commits: list[Commit], base: str, head: str, since: str | No
     if since:
         out += [
             f"Re-review? Compare with the previous version of the series: "
-            f"`git range-diff {base} {since} {head}`.",
+            f"`git range-diff {shlex.quote(base)} {shlex.quote(since)} {shlex.quote(head)}`.",
             "",
         ]
     for i, c in enumerate(commits, 1):

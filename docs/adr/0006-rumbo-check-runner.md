@@ -1,6 +1,14 @@
 # ADR-0006: `rumbo check` is the verification runner; `make` becomes an optional alias
 Status: accepted    Date: 2026-11-07
 
+Refined by later decisions; the rest stands. ADR-0013 adds the `{changed}` placeholder.
+ADR-0018, then ADR-0022, replace the exit-code paragraph (a step is red only when its
+tool ran and judged the code). ADR-0022 also replaces two sentences of the decision: a
+step is split into words by quotes alone, with no escape character (a backslash is an
+ordinary character, so a Windows path is written as it is), and `{base}` is `--base`
+when given, else the first that exists of `origin/main`, `origin/master`,
+`origin/HEAD`, `main` and `master`.
+
 ## Context
 The generated harness verifies itself through a Makefile whose recipes use POSIX tools
 (`command -v`, `find`, `grep`, `tail -40`, `date`), and the Claude Code `Stop` hook

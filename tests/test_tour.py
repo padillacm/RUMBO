@@ -72,6 +72,17 @@ def _commit(subject: str, files: list[FileChange], body: str = "") -> Commit:
     return Commit(SHA, subject, body, "t", files)
 
 
+def _subcommand(call: list[str]) -> str:
+    """The git subcommand of a recorded call: the first word after the global options."""
+    words = iter(call[1:])
+    for word in words:
+        if word == "-c":
+            next(words)
+        elif not word.startswith("-"):
+            return word
+    return ""
+
+
 def _verify(commit: Commit) -> list[str]:
     text = render_markdown([commit], "main", "HEAD")
     return text.split("```bash\n", 1)[1].split("\n```", 1)[0].splitlines()
@@ -283,10 +294,123 @@ def test_risk_hotspots_name_deleted_tests_removed_asserts_and_new_skips(repo: Re
     repo.write("src/code.py", "def f(x):\n    return x\n")  # an assert removed outside the tests
     repo.commit("test: second")
     (commit,) = load_commits("HEAD~1", "HEAD", repo.root)
+    # The asserts that went with the deleted file are its own (audit of 2026-11-16).
     assert commit.risks() == [
         "deleted test files: tests/test_0gone.py",
-        "removed asserts or added skip/xfail in: tests/test_a.py, tests/test_b.py, tests/test_c.py",
+        "removed asserts or added skip/xfail in: tests/test_0gone.py, tests/test_a.py, "
+        "tests/test_b.py, tests/test_c.py",
     ]
+
+
+BODY = "".join(f"def test_{n}():\n    x = {n}\n    assert x == {n}\n\n\n" for n in range(4))
+WEAK = BODY.replace("    assert x == 2\n", "    pass\n")
+
+
+# Covers F-0006.R5 (specs/0006-guided-review-of-a-change.md).
+def test_removed_asserts_are_found_whatever_the_file_the_commit_or_the_git_configuration(
+    repo: Repo,
+) -> None:
+    """A renamed test file, a name that is not ASCII or has a space, a merge commit that removes
+    asserts itself, tests in the project's own directory and pytest's `*_test.py`: each is
+    reported, and the user's git configuration (no prefix, forced colour, quoted paths, copy
+    detection) changes nothing, because every git call that is parsed fixes its own format."""
+    repo.write("pyproject.toml", '[tool.rumbo]\npackage = "pkg"\ntests = "./test/"\n')
+    tests = ("tests/test_a.py", "tests/test_ñ.py", "tests/with space.py", "tests/test_m.py")
+    for name in (*tests, "test/unit/checks.py", "src/pkg/core_test.py"):
+        repo.write(name, BODY)
+    repo.write("src/pkg/core.py", "def f():\n    return 1\n")
+    base = repo.commit("chore: the tests")
+    repo.git("branch", "side")
+    repo.git("mv", "tests/test_a.py", "tests/helpers_a.py")
+    repo.write("tests/helpers_a.py", WEAK)
+    repo.commit("refactor: tidy the test helpers")
+    repo.write("tests/test_ñ.py", WEAK)
+    repo.write("tests/with space.py", WEAK)
+    repo.commit("test: simplify")
+    repo.write("test/unit/checks.py", WEAK)
+    repo.write("src/pkg/core_test.py", WEAK)
+    repo.commit("fix: adjust")
+    repo.git("checkout", "-q", "side")
+    repo.write("src/pkg/core.py", "def f():\n    return 2\n")
+    repo.commit("fix: side change")
+    repo.git("checkout", "-q", "feature")
+    repo.git("merge", "-q", "--no-ff", "--no-commit", "side")
+    repo.write("tests/test_m.py", WEAK)
+    repo.commit("Merge branch 'side'")
+    expected = {
+        "refactor: tidy the test helpers": ["tests/test_a.py"],  # deleted here, added there
+        "test: simplify": ["tests/test_ñ.py", "tests/with space.py"],
+        "fix: adjust": ["src/pkg/core_test.py", "test/unit/checks.py"],
+        "fix: side change": [],
+        "Merge branch 'side'": ["tests/test_m.py"],
+    }
+
+    def weakened() -> dict[str, list[str]]:
+        return {c.subject: c.weakening_hunks for c in load_commits(base, "HEAD", repo.root)}
+
+    assert weakened() == expected
+    commits = {c.subject: c for c in load_commits(base, "HEAD", repo.root)}
+    moved = commits["refactor: tidy the test helpers"]
+    assert [(f.path, f.status) for f in moved.files] == [
+        ("tests/helpers_a.py", "A"),
+        ("tests/test_a.py", "D"),
+    ]
+    assert "deleted test files: tests/test_a.py" in moved.risks()
+    merge = commits["Merge branch 'side'"]  # against its first parent: what the merge brought
+    assert sorted(f.path for f in merge.files) == ["src/pkg/core.py", "tests/test_m.py"]
+    assert all(f.is_test for f in commits["fix: adjust"].files)
+    settings = {
+        "diff.noprefix": "true",
+        "diff.mnemonicPrefix": "true",
+        "color.ui": "always",
+        "core.quotepath": "true",
+        "diff.renames": "copies",
+    }
+    for key, value in settings.items():
+        repo.git("config", key, value)
+        assert weakened() == expected, key
+        repo.git("config", "--unset", key)
+
+
+# Covers F-0006.R5 (specs/0006-guided-review-of-a-change.md).
+def test_asserts_of_a_deleted_test_file_are_not_blamed_on_the_file_before_it(repo: Repo) -> None:
+    repo.write("tests/test_a.py", "def test_a():\n    assert 1\n")
+    repo.write("tests/test_z.py", "def test_z():\n    assert 1\n    assert 2\n")
+    repo.commit("test: first")
+    repo.write("tests/test_a.py", "def test_a():\n    assert 1\n    assert 2\n")  # stronger
+    (repo.root / "tests" / "test_z.py").unlink()
+    repo.commit("test: second")
+    (commit,) = load_commits("HEAD~1", "HEAD", repo.root)
+    assert commit.weakening_hunks == ["tests/test_z.py"]
+
+
+# Covers F-0006.R5 and F-0006.R6 (specs/0006-guided-review-of-a-change.md).
+def test_what_a_test_file_is_follows_the_project_and_pytest() -> None:
+    """Under the project's tests directory (`[tool.rumbo].tests`), under any `tests/`, or
+    named as pytest collects it: `test_*.py` and `*_test.py`."""
+    assert FileChange("test/unit/checks.py", 1, 0, tests_dir="test").is_test
+    assert not FileChange("test/unit/checks.py", 1, 0).is_test
+    assert FileChange("svc/spec/checks.py", 1, 0, tests_dir="svc/spec").is_test
+    assert FileChange("src/pkg/core_test.py", 1, 0).is_test
+    assert FileChange("src/test_core.py", 1, 0).is_test
+    assert not FileChange("src/pkg/contest.py", 1, 0).is_test
+    assert not FileChange("docs/latest_test.txt", 1, 0).is_test
+    assert tour._patch_path('"a/tests/t\\303\\261 \\"q\\".py"', "a/") == 'tests/tñ "q".py'
+    assert tour._patch_path("b/tests/with space.py\t", "b/") == "tests/with space.py"
+    assert tour._patch_path("/dev/null", "b/") == ""
+
+
+# Covers F-0006.R1 (specs/0006-guided-review-of-a-change.md).
+def test_a_message_with_a_separator_character_does_not_hide_its_commit(repo: Repo) -> None:
+    """The fields of a commit are separated by NUL, which no message can contain."""
+    repo.write("a.py", "a = 1\n")
+    repo.commit("feat: one\x1fwith a unit separator\n\nbody \x1e and \x1f here")
+    repo.write("b.py", "b = 1\n")
+    repo.commit("feat: two")
+    commits = load_commits("main", "HEAD", repo.root)
+    assert [c.subject for c in commits] == ["feat: one\x1fwith a unit separator", "feat: two"]
+    assert commits[0].body == "body \x1e and \x1f here"
+    assert [[f.path for f in c.files] for c in commits] == [["a.py"], ["b.py"]]
 
 
 # Covers F-0006.R6 (specs/0006-guided-review-of-a-change.md).
@@ -358,6 +482,62 @@ def test_verification_commands_use_the_runner_never_make() -> None:
     for subject in ("feat: x", "refactor: x", "chore: x", "test: x", "docs: x"):
         guide = render_markdown([_commit(subject, [CODE, TEST, DOC])], "main", "HEAD")
         assert "make" not in guide
+
+
+# Covers F-0006.R7 (specs/0006-guided-review-of-a-change.md).
+def test_a_merge_commit_is_reverted_against_its_first_parent(tmp_path: Path) -> None:
+    """git refuses `git revert` of a merge without `-m`: the guide gave a command that failed."""
+    merge = _commit("Merge branch 'feature'", [CODE])
+    merge.merge = True
+    assert _verify(merge)[-1] == (
+        f"git revert --no-commit -m 1 {SHORT} && uv run python scripts/rumbo_check.py test; "
+        "git revert --abort"
+    )
+    # Read from git: a merge commit is known as one, an ordinary commit is not.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["config", "commit.gpgsign", "false"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True)
+    (repo / "a.py").write_text("a = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "chore: base"], cwd=repo, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "-qb", "feature"], cwd=repo, check=True)
+    (repo / "b.py").write_text("b = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "feat: b"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    (repo / "c.py").write_text("c = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "feat: c"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "-m", "Merge feature", "feature"], cwd=repo, check=True
+    )
+    loaded = {c.subject: c.merge for c in load_commits(base, "HEAD", repo)}
+    assert loaded == {"feat: b": False, "feat: c": False, "Merge feature": True}
+
+
+# Covers F-0006.R3 and F-0006.R7 (specs/0006-guided-review-of-a-change.md).
+def test_paths_and_refs_are_quoted_in_the_commands_the_reviewer_will_paste() -> None:
+    """A file name is data from the branch under review: in a command it is one quoted word,
+    whatever it contains. The refs of the `git range-diff` line are quoted the same way."""
+    hostile = "tests/test_x;echo PWNED;$(id).py"
+    files = [FileChange(hostile, 3, 0, "A"), FileChange("tests/test it.py", 1, 0)]
+    commit = _commit("test: add a case", files)
+    assert _verify(commit) == [
+        f"git show --stat {SHORT}",
+        "uv run pytest -q 'tests/test_x;echo PWNED;$(id).py' 'tests/test it.py'",
+    ]
+    guide = render_markdown([commit], "main", "topic;echo PWNED", since="v1 && echo PWNED")
+    assert "`git range-diff main 'v1 && echo PWNED' 'topic;echo PWNED'`" in guide
+    assert "range-diff main v1 &&" not in guide and " -q tests/test_x;" not in guide
 
 
 # Covers F-0006.R8 (specs/0006-guided-review-of-a-change.md).
@@ -474,7 +654,8 @@ def test_the_tour_runs_only_read_only_git_commands_and_opens_no_socket(
     monkeypatch.undo()
     capsys.readouterr()
     assert calls and {call[0] for call in calls} == {"git"}
-    assert {call[1] for call in calls} == {"rev-parse", "log", "show"}
+    # The subcommand comes after the `-c key=value` pairs that fix the output format.
+    assert {_subcommand(call) for call in calls} == {"rev-parse", "log", "show"}
     assert (repo.root / "guide.md").exists()
 
 
@@ -489,6 +670,8 @@ def test_tour_imports_the_standard_library_only_and_no_network_module() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
     assert "subprocess" in imported  # git is its only way out of the process
-    assert imported <= sys.stdlib_module_names | {"__future__"}
+    # `rumbo.project` tells it the project's tests directory; it is standard library only too
+    # (ADR-0001, tests/test_fitness.py::test_cli_has_no_runtime_dependencies).
+    assert imported <= sys.stdlib_module_names | {"__future__", "rumbo"}
     network = {"socket", "ssl", "urllib", "http", "ftplib", "smtplib", "asyncio", "xmlrpc"}
     assert not imported & network

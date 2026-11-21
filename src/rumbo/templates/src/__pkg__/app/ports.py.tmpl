@@ -1,9 +1,15 @@
 """Ports the use cases depend on, and the offline guard.
 
-The check (`scripts/rumbo_check.py`) must stay offline: the smoke evals call the entry point with
-RUMBO_EVALS_LIVE unset, and any adapter that would reach the network raises `OfflineError`
-instead. Record real responses as fixtures for the smoke suite; call the model only in
-`make evals-live`. Adapters implement these ports; the domain never imports them.
+Offline is the default: with neither variable of `LIVE_VARIABLES` set to `1`, any adapter that
+would reach the network raises `OfflineError` instead. The check (`scripts/rumbo_check.py`)
+relies on it: the smoke evals call the entry point with both variables removed, so they can only
+answer from recorded fixtures.
+
+- `RUMBO_LIVE=1` is the production switch: set where the product is deployed, never in a
+  test, the check or CI.{{#deployable}} `infra/Dockerfile` sets it in the image.{{/deployable}}
+- `RUMBO_EVALS_LIVE=1` is set by the eval runner with `--live` (`make evals-live`).
+
+Adapters implement these ports; the domain never imports them.
 
 The ports are async (ADR-0012): every current model SDK and web framework is async-native, so
 the skeleton is written that way from day one instead of being migrated under real code later.
@@ -14,21 +20,32 @@ from __future__ import annotations
 import os
 from typing import Protocol
 
+LIVE_VARIABLES = ("RUMBO_LIVE", "RUMBO_EVALS_LIVE")
+
 
 class OfflineError(RuntimeError):
-    """Raised when code tries to call the model while evals are offline."""
+    """Raised when code tries to call the model while neither live variable is set."""
 
 
 def live() -> bool:
-    return os.environ.get("RUMBO_EVALS_LIVE") == "1"
+    return any(os.environ.get(name) == "1" for name in LIVE_VARIABLES)
 
 
 def require_live(what: str = "the model") -> None:
     if not live():
-        raise OfflineError(f"{what} cannot be called offline; use `make evals-live` or a fixture")
+        raise OfflineError(
+            f"{what} cannot be called offline: set RUMBO_LIVE=1 where the product is deployed, "
+            "or RUMBO_EVALS_LIVE=1 for the evals (`make evals-live`); offline, use a fixture"
+        )
 
 
 class Completion(Protocol):
-    """Minimal LLM port: one prompt in, one text out; awaited by the use cases."""
+    """Minimal LLM port: one prompt in, one text out; awaited by the use cases.
 
-    async def __call__(self, prompt: str, *, max_tokens: int = 1024) -> str: ...
+    `timeout_s` bounds the call in seconds (pass `meter.remaining_seconds`); `None` leaves the
+    adapter's own default.
+    """
+
+    async def __call__(
+        self, prompt: str, *, max_tokens: int = 1024, timeout_s: float | None = None
+    ) -> str: ...

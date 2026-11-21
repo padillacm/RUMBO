@@ -1,11 +1,16 @@
 """RUMBO eval runner (RUMBO.md, Part A, step A7 "Evals skeleton").
 
 Reads JSONL cases ({"id", "input", "expected", "grader", "tags"}) from
-evals/datasets/<suite>.jsonl, runs the real system k times per case, applies deterministic
-graders and reports pass@1 and pass^k. Exits non-zero when pass^k < --min-pass.
+evals/datasets/<suite>.jsonl, runs the real system k times per case, applies the graders
+and reports pass@1 and pass^k. Exits non-zero when pass^k < --min-pass, and with a one-line
+error naming the file and the line when a dataset cannot be read.
 
-Offline by default: the entry point must answer from recorded fixtures.{{#llm}} `--live` sets
+Offline by default: the entry point must answer from recorded fixtures, and a run without
+`--live` removes RUMBO_LIVE and RUMBO_EVALS_LIVE from its environment.{{#llm}} `--live` sets
 RUMBO_EVALS_LIVE=1 so adapters may call the real model (use `make evals-live`).{{/llm}}
+
+A grader is called through `graders.grade`: with the case `input` when it declares a third
+parameter, and awaited when it is a coroutine function (an LLM judge is both).
 
 The entry may be a coroutine function (awaited) or a plain function (run in a worker thread);
 `--concurrency N` bounds how many entry calls are in flight (ADR-0012). The report keeps the
@@ -13,7 +18,9 @@ case order whatever the concurrency, and with the default N=1 it is identical to
 
 Every report carries a fingerprint (ADR-0016): sha256 digests of the prompts under
 {{package_path}}/prompts/, of evals/graders/judge.py and of the --entry reference. A `--live`
-run records them in evals/fingerprint.json (commit it with the fixtures it describes); an
+run records them in evals/fingerprint.json (commit it with the fixtures it describes) when
+it ran every case (no `--tag`) and reached `--min-pass`: a filtered or failing run says
+nothing about the fixtures. An
 offline run that finds the file prints one warning per changed part after the summary line:
 the prompts changed (the recorded fixtures may be stale: re-record with --live) or the judge
 changed (re-calibrate, see evals/calibration/). The exit code is not affected by the warnings.
@@ -39,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from graders import GRADERS
+from graders import GRADERS, grade
 
 DATASETS = Path(__file__).resolve().parent / "datasets"
 REPORTS = Path(__file__).resolve().parent / "reports"
@@ -53,10 +60,18 @@ def load_cases(suite: str) -> list[dict[str, Any]]:
     files = sorted(DATASETS.glob("*.jsonl")) if suite == "all" else [DATASETS / f"{suite}.jsonl"]
     cases: list[dict[str, Any]] = []
     for file in files:
+        if not file.is_file():
+            raise ValueError(f"{file.name}: no such dataset in evals/datasets/")
         for n, line in enumerate(file.read_text(encoding="utf-8").splitlines(), 1):
             if not line.strip():
                 continue
-            case = json.loads(line)
+            try:
+                case = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{file.name}:{n}: not valid JSON ({exc.msg})") from exc
+            if not isinstance(case, dict):
+                kind = type(case).__name__
+                raise ValueError(f"{file.name}:{n}: a case is a JSON object, not a {kind}")
             missing = {"id", "input", "expected", "grader"} - case.keys()
             if missing:
                 raise ValueError(f"{file.name}:{n}: missing fields {sorted(missing)}")
@@ -143,7 +158,8 @@ async def run_case(
             start = time.perf_counter()
             try:
                 output = await call_entry(entry, case["input"])
-                verdict = GRADERS[case["grader"]](output, case["expected"])  # grading is sync
+                grader = GRADERS[case["grader"]]
+                verdict = await grade(grader, output, case["expected"], case["input"])
                 ok, detail = verdict.ok, verdict.detail
             except Exception as exc:  # a case that blows up is a failed case
                 ok, detail = False, f"exception: {exc!r}"
@@ -184,6 +200,13 @@ async def run_all(
     return [row for row in rows if row is not None]
 
 
+def report_path(suite: str) -> Path:
+    """A name no other run shares, sorted by time: nanoseconds and the process id."""
+    now = time.time_ns()
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now // 1_000_000_000))
+    return REPORTS / f"{suite}-{stamp}-{now % 1_000_000_000:09d}-{os.getpid()}.json"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deterministic evals")
     parser.add_argument("--suite", default="smoke", help="dataset name or 'all'")
@@ -199,15 +222,22 @@ def main(argv: list[str] | None = None) -> int:
         "--concurrency", type=int, default=1, help="entry calls in flight at once (default 1)"
     )
     args = parser.parse_args(argv)
+    if args.k < 1:
+        parser.error("--k must be >= 1")
     if args.concurrency < 1:
         parser.error("--concurrency must be >= 1")
 
     if args.live:
         os.environ["RUMBO_EVALS_LIVE"] = "1"
-    else:
-        os.environ.pop("RUMBO_EVALS_LIVE", None)
+    else:  # offline whatever the caller's environment says: the check never calls the model
+        for variable in ("RUMBO_EVALS_LIVE", "RUMBO_LIVE"):
+            os.environ.pop(variable, None)
 
-    cases = load_cases(args.suite)
+    try:
+        cases = load_cases(args.suite)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     if args.tag:
         cases = [c for c in cases if args.tag in c.get("tags", [])]
     if not cases:
@@ -225,16 +255,21 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     current = fingerprint(ROOT, args.entry)
-    if args.live:
+    passed = pass_hat_k >= args.min_pass
+    if args.live and passed and not args.tag:
         record = {**current, "recorded": date.today().isoformat(), "suite": args.suite}
         FINGERPRINT.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    elif args.live:
+        print(
+            "NOTE: fingerprint not recorded: only a live run of every case (no --tag) that "
+            "reaches --min-pass records it"
+        )
     else:
         for warning in drift_warnings(current):
             print(warning)
 
     REPORTS.mkdir(exist_ok=True)
-    report = REPORTS / f"{args.suite}-{time.strftime('%Y%m%d-%H%M%S')}.json"
-    report.write_text(
+    report_path(args.suite).write_text(
         json.dumps(
             {
                 "suite": args.suite,
@@ -251,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         encoding="utf-8",
     )
-    if pass_hat_k < args.min_pass:
+    if not passed:
         print(f"FAIL: pass^{args.k}={pass_hat_k:.3f} < threshold {args.min_pass}")
         return 1
     return 0

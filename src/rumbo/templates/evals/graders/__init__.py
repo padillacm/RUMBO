@@ -1,5 +1,10 @@
 """Deterministic graders (A7). Each grader takes (output, expected) and returns a Verdict.
 
+A grader that needs the case itself declares a third parameter and receives the case's
+`input`: `(output, expected, case_input)`. A grader that awaits something (a model) is a
+coroutine function. The runner calls every grader through `grade()`, which reads the signature
+and awaits when it must, so the two-argument synchronous graders below need nothing.
+
 LLM judges (graders/judge.py) are added AFTER the first error analysis, and only once
 calibrated against human labels (TPR/TNR ≥ 0.8 on ≥30 cases in evals/calibration/).
 Register new graders in GRADERS.
@@ -7,8 +12,9 @@ Register new graders in GRADERS.
 
 from __future__ import annotations
 
+import inspect
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,7 +25,32 @@ class Verdict:
     detail: str = ""
 
 
-Grader = Callable[[dict[str, Any], dict[str, Any]], Verdict]
+# (output, expected) or (output, expected, case_input); synchronous or a coroutine function.
+Grader = Callable[..., Verdict | Awaitable[Verdict]]
+
+
+def takes_input(grader: Grader) -> bool:
+    """True when the grader declares a third positional parameter (or `*args`)."""
+    try:
+        parameters = list(inspect.signature(grader).parameters.values())
+    except (TypeError, ValueError):  # no signature to read: the two-argument form
+        return False
+    positional = (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    declared = sum(parameter.kind in positional for parameter in parameters)
+    return declared >= 3 or any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters)
+
+
+async def grade(
+    grader: Grader, output: dict[str, Any], expected: dict[str, Any], case_input: Any = None
+) -> Verdict:
+    """Calls a grader the way its signature asks and awaits it when it is asynchronous."""
+    if takes_input(grader):
+        result = grader(output, expected, case_input)
+    else:
+        result = grader(output, expected)
+    if isinstance(result, Verdict):
+        return result
+    return await result
 
 
 def field_equality(output: dict[str, Any], expected: dict[str, Any]) -> Verdict:

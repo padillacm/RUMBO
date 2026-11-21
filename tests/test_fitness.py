@@ -48,3 +48,20 @@ def test_every_adr_has_a_fitness_function_section() -> None:
     for adr in adrs:
         text = adr.read_text(encoding="utf-8")
         assert "## Fitness function" in text and "<!-- rumbo:template" not in text, adr.name
+
+
+def test_no_numbered_document_quotes_the_template_mark_in_its_text() -> None:
+    """The mark is found anywhere in a document, not only on its first line: an ADR or a spec
+    that quotes it in its prose stays "unsigned" after the human removes the first line (it
+    happened to ADR-0025 in the rehearsal of slice 7). Write it as `rumbo:template`."""
+    from rumbo.project import numbered_documents
+
+    documents = numbered_documents(ROOT / "docs" / "adr") + numbered_documents(ROOT / "specs")
+    assert len(documents) >= 10
+    quoting = [
+        f"{doc.parent.name}/{doc.name}:{number}"
+        for doc in documents
+        for number, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1)
+        if number > 1 and "<!-- rumbo:template" in line
+    ]
+    assert quoting == []

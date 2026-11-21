@@ -7,8 +7,10 @@
 | Failure | Count | Evaluator (code / LLM judge with TPR/TNR) |
 |---|---|---|
 
-LLM judges: rubric, calibration file (`evals/calibration/<name>.jsonl`, ≥30 human-labeled rows), TPR/TNR/kappa
-from `graders.judge.calibrate` and the date of the last calibration. Below 0.8 the judge does not count.
+LLM judges: rubric, calibration file (`evals/calibration/<name>.jsonl`, ≥30 human-labeled rows, each with the
+case `input`, the `output` and the `human` label), TPR/TNR/kappa from `asyncio.run(graders.judge.calibrate(judge, rows))`
+(the judge is asynchronous and reads the question from the case input) and the date of the last calibration.
+Below 0.8 the judge does not count.
 
 ## Dataset
 Sources, how it grows (production traces become cases). Minimum real cases by rigor:

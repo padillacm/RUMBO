@@ -1,11 +1,22 @@
 """Tests of the deterministic graders in evals/."""
 
+import asyncio
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "evals"))
 
-from graders import abstention, field_equality, numeric, tool_arguments
+from graders import (
+    GRADERS,
+    Verdict,
+    abstention,
+    field_equality,
+    grade,
+    numeric,
+    takes_input,
+    tool_arguments,
+)
 
 
 def test_field_equality() -> None:
@@ -29,3 +40,23 @@ def test_tool_arguments() -> None:
 def test_abstention() -> None:
     assert abstention({"abstain": True}, {}).ok
     assert not abstention({"answer": "42"}, {}).ok
+
+
+def test_grade_runs_two_argument_graders_as_they_are() -> None:
+    assert not any(takes_input(grader) for grader in GRADERS.values())
+    assert asyncio.run(grade(field_equality, {"a": 1}, {"a": 1}, {"question": "ignored"})).ok
+    assert not asyncio.run(grade(abstention, {"answer": "42"}, {})).ok
+
+
+def test_grade_passes_the_case_input_and_awaits_coroutines() -> None:
+    def same_language(output: dict[str, Any], expected: dict[str, Any], case: Any) -> Verdict:
+        return Verdict(output.get("lang") == case["lang"], "answered in another language")
+
+    async def slow(output: dict[str, Any], expected: dict[str, Any]) -> Verdict:
+        await asyncio.sleep(0)
+        return field_equality(output, expected)
+
+    assert takes_input(same_language) and not takes_input(slow)
+    assert asyncio.run(grade(same_language, {"lang": "es"}, {}, {"lang": "es"})).ok
+    assert not asyncio.run(grade(same_language, {"lang": "en"}, {}, {"lang": "es"})).ok
+    assert asyncio.run(grade(slow, {"a": 1}, {"a": 1})).ok

@@ -12,14 +12,12 @@
       "Bash(make arch)",
       "Bash(make sensor)",
       "Bash(make review)",
-      "Bash(make rumbo *)",
       "Bash(rumbo gate *)",
       "Bash(rumbo trace*)",
       "Bash(rumbo verify-dep *)",
       "Bash(rumbo tour *)",
       "Bash(rumbo doctor*)",
       "Bash(rumbo new *)",
-      "Bash(rumbo decision *)",
       "Bash(rumbo eval *)",
       "Bash(rumbo metrics*)",
       "Bash(rumbo check-tests*)",
@@ -49,7 +47,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",
@@ -61,7 +59,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {
             "type": "command",

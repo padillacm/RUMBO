@@ -1,12 +1,14 @@
-"""The Claude Code adapter never reaches the network offline and parses bounded results."""
+"""The Claude Code adapter: offline guard, prompt on stdin, fixed arguments, always reaped."""
 
 import asyncio
+import os
 import shutil
 from typing import Any
 
 import pytest
 
-from {{package}}.adapters.claude_code import complete, parse_result
+from {{package}}.adapters import claude_code
+from {{package}}.adapters.claude_code import ARGS, complete, parse_result
 from {{package}}.app.ports import OfflineError
 
 
@@ -14,27 +16,40 @@ class FakeProcess:
     """Stands in for the `claude -p` subprocess: no CLI is spawned in tests."""
 
     def __init__(self, stdout: bytes, returncode: int = 0, hang: bool = False) -> None:
-        self.stdout, self.returncode, self.hang = stdout, returncode, hang
-        self.killed = False
+        self.stdout, self.exit_code, self.hang = stdout, returncode, hang
+        self.returncode: int | None = None  # None while it runs, as in asyncio
+        self.pid = 0  # not a process: the adapter ends the process tree of a real pid only
+        self.stdin: bytes | None = None
+        self.killed = self.reaped = False
 
-    async def communicate(self) -> tuple[bytes, bytes]:
+    async def communicate(self, data: bytes | None = None) -> tuple[bytes, bytes]:
+        self.stdin = data
         if self.hang:
             await asyncio.sleep(3600)
+        self.returncode = self.exit_code
         return self.stdout, b"stderr text"
 
     def kill(self) -> None:
         self.killed = True
+        self.returncode = -9
 
     async def wait(self) -> int:
-        return self.returncode
+        self.reaped = True
+        return self.exit_code if self.returncode is None else self.returncode
 
 
-def _spawn(process: FakeProcess, calls: list[tuple[str, ...]]) -> Any:
-    async def fake_exec(*args: str, **_: Any) -> FakeProcess:
-        calls.append(args)
-        return process
+class Spawn:
+    """Replaces `asyncio.create_subprocess_exec`: records the arguments and the directory."""
 
-    return fake_exec
+    def __init__(self, process: FakeProcess) -> None:
+        self.process = process
+        self.calls: list[tuple[str, ...]] = []
+        self.directories: list[list[str]] = []
+
+    async def __call__(self, *args: str, **kwargs: Any) -> FakeProcess:
+        self.calls.append(args)
+        self.directories.append(os.listdir(kwargs["cwd"]))
+        return self.process
 
 
 @pytest.fixture
@@ -45,6 +60,7 @@ def live(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_offline_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RUMBO_EVALS_LIVE", raising=False)
+    monkeypatch.delenv("RUMBO_LIVE", raising=False)
     with pytest.raises(OfflineError):
         asyncio.run(complete("hello"))
 
@@ -52,18 +68,31 @@ def test_offline_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_runs_the_cli_without_a_shell_and_parses_its_json(
     live: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[str, ...]] = []
     process = FakeProcess(b'{"result": "pong!"}')
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn(process, calls))
+    spawn = Spawn(process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     assert asyncio.run(complete("ping", max_tokens=1)) == "pong"  # bounded: 1 token ~ 4 chars
-    assert calls == [
-        ("/usr/bin/claude", "-p", "ping", "--output-format", "json", "--max-turns", "1")
-    ]
+    assert spawn.calls == [("/usr/bin/claude", *ARGS)]
+    assert process.stdin == b"ping" and process.reaped and not process.killed
+
+
+def test_the_prompt_never_reaches_the_command_line(
+    live: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows `claude` can be a `.cmd` shim: `cmd.exe` would parse an argument again."""
+    prompt = 'hello" & echo injected & rem %PATH%\n--version'
+    process = FakeProcess(b'{"result": "ok"}')
+    spawn = Spawn(process)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    assert asyncio.run(complete(prompt)) == "ok"
+    assert process.stdin == prompt.encode("utf-8")
+    assert spawn.calls == [("/usr/bin/claude", *ARGS)]  # the same whatever the prompt says
+    assert spawn.directories == [[]]  # an empty directory: no CLAUDE.md, hooks or settings
 
 
 def test_a_failing_cli_raises_with_its_stderr(live: None, monkeypatch: pytest.MonkeyPatch) -> None:
     process = FakeProcess(b"", returncode=1)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn(process, []))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", Spawn(process))
     with pytest.raises(RuntimeError, match="stderr text"):
         asyncio.run(complete("ping"))
 
@@ -72,10 +101,57 @@ def test_a_hanging_cli_is_killed_at_the_timeout(
     live: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     process = FakeProcess(b"", hang=True)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn(process, []))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", Spawn(process))
     with pytest.raises(TimeoutError):
         asyncio.run(complete("ping", timeout_s=0.01))
-    assert process.killed
+    assert process.killed and process.reaped
+
+
+def test_a_cancelled_call_kills_the_cli(live: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    process = FakeProcess(b"", hang=True)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", Spawn(process))
+
+    async def cancel_midway() -> None:
+        task = asyncio.create_task(complete("ping"))
+        while process.stdin is None:  # until the call is waiting on the CLI
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_midway())
+    assert process.killed and process.reaped
+
+
+def test_on_windows_the_whole_process_tree_is_ended(
+    live: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The npm shim is a `cmd.exe` that starts node: killing the shim alone leaves node alive."""
+    process = FakeProcess(b"", hang=True)
+    process.pid = 4242
+    commands: list[tuple[str, ...]] = []
+
+    class Killer:
+        async def wait(self) -> int:
+            return 0
+
+    async def spawn(*args: str, **kwargs: Any) -> FakeProcess | Killer:
+        commands.append(args)
+        return process if len(commands) == 1 else Killer()
+
+    monkeypatch.setattr(claude_code.sys, "platform", "win32")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(TimeoutError):
+        asyncio.run(complete("ping", timeout_s=0.01))
+    assert commands[1] == ("/usr/bin/claude", "/T", "/F", "/PID", "4242")  # `which` is faked
+    assert process.killed and process.reaped
+    # Elsewhere the kill reaches the CLI itself: no second command.
+    monkeypatch.setattr(claude_code.sys, "platform", "linux")
+    commands.clear()
+    process.returncode, process.killed = None, False
+    with pytest.raises(TimeoutError):
+        asyncio.run(complete("ping", timeout_s=0.01))
+    assert len(commands) == 1 and process.killed
 
 
 def test_parse_result_is_bounded() -> None:

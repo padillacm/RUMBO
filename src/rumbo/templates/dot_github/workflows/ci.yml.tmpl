@@ -7,6 +7,9 @@ name: ci
 on:
   push:
   pull_request:
+    # The three default activity types plus the label ones: adding or removing the approval
+    # label re-runs the anti-cheat sensor, which reads the labels of the pull request.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -38,18 +41,37 @@ jobs:
         run: uv run python scripts/rumbo_check.py
       - name: Anti-cheat sensor (tests not weakened)
         env:
+          # A default branch that is not main or master: the base when the event names none.
+          RUMBO_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RUMBO_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: uv run python scripts/check_tests_not_weakened.py --strict
 {{#mvp_or_more}}
+{{^adopted}}
       - name: Hygiene (pre-commit, all files)
         run: uv run pre-commit run --all-files --show-diff-on-failure
+{{/adopted}}
+{{#adopted}}
+      # ADR-0013: an adopted project is judged on what the change touches, as the runner does
+      # with {changed}; the hooks never run over the legacy tree. The base is the sensor's, and
+      # when the event carries none (the first push of a branch) the runner's {base} candidates.
+      - name: Hygiene (pre-commit, changed files)
+        env:
+          RUMBO_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base=HEAD
+          for ref in "$RUMBO_BASE_REF" origin/main origin/master origin/HEAD main master; do
+            if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null; then base="$ref"; break; fi
+          done
+          uv run pre-commit run --from-ref "$base" --to-ref HEAD --show-diff-on-failure
+{{/adopted}}
 {{/mvp_or_more}}
 {{#production}}
       - name: SBOM (CycloneDX, runtime dependencies from uv.lock)
         run: uv export --no-dev --no-emit-project --format cyclonedx1.5 -o sbom.cdx.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: sbom
+          # One artifact per job: two legs of the Python matrix cannot upload the same name.
+          name: sbom{{#packaged}}-py${{ matrix.python }}{{/packaged}}
           path: sbom.cdx.json
 {{/production}}
 

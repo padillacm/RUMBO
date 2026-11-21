@@ -95,6 +95,8 @@ adopted = true
 types = "pyright"
 python = "3.11"
 src = "src"
+own_ci = false
+own_infra = false
 
 [tool.rumbo.checks]
 # Verification steps in execution order, read by `scripts/rumbo_check.py` (`rumbo check`).

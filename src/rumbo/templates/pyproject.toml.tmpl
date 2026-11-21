@@ -17,6 +17,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["{{package_path}}"]
+{{#packaged}}
+
+[tool.hatch.build.targets.sdist]
+# What is published: the package and its tests. hatchling always adds pyproject.toml, the
+# README, the licence files and .gitignore; specs, docs, CI and the agent configuration
+# stay in the repository.
+only-include = ["{{code_root}}", "{{tests_dir}}"]
+{{/packaged}}
 
 [tool.rumbo]
 # RUMBO harness configuration, read by `rumbo gate`, `rumbo doctor` and `rumbo update`.
@@ -52,16 +60,22 @@ adopted = true
 {{#custom_tests_dir}}
 tests = "{{tests_dir}}"
 {{/custom_tests_dir}}
+# ADR-0029: what the project already had when it was adopted, decided once: its own CI
+# workflows (RUMBO wrote no ci.yml) and its own infra/ (RUMBO wrote nothing there).
+own_ci = {{own_ci_toml}}
+own_infra = {{own_infra_toml}}
 {{/adopted}}
 
 [tool.rumbo.checks]
 # Verification steps in execution order, read by `scripts/rumbo_check.py` (`rumbo check`).
-# One command per step, run without a shell (ADR-0006); `{base}` is origin/main if it exists, else main.
+# One command per step, run without a shell (ADR-0006); `{base}` is `--base` when given, else
+# the first that exists of origin/main, origin/master, origin/HEAD, main and master.
 # The steps scale with `rigor` (ADR-0011): `rumbo update` appends the ones your level requires
 # (after `rumbo promote` or a hand edit of `rigor`) and never replaces or removes one.
 {{#adopted}}
 # `{changed}` is the changed .py files (vs {base}, plus uncommitted and untracked ones); `rumbo
-# check --full` (or `scripts/rumbo_check.py --full`) replaces it with `.`: the whole tree.
+# check --full` (or `scripts/rumbo_check.py --full`) replaces it with `.`: the whole tree. An
+# explicit `.` replaces the type checker's own list of paths; its `exclude` below still holds.
 lint = "uv run ruff check {changed}"
 format = "uv run ruff format --check {changed}"
 types = "uv run {{types}} {changed}"
@@ -76,7 +90,16 @@ test = "uv run pytest{{#mvp_or_more}} --cov --cov-report=term-missing:skip-cover
 arch = "uv run lint-imports"
 {{/arch}}
 {{#mvp_or_more}}
-security = "uv run bandit -q -r {{code_root}}{{#evals}} evals{{/evals}}"
+# `-c pyproject.toml`: bandit reads [tool.bandit] (below) only when it is told where it is.
+{{#adopted}}
+# ADR-0013, ADR-0029: like lint, format and types, bandit judges the files a change touches.
+# What the project already had (a framework's sample secret key, say) is measured by `--full`
+# in the nightly; it does not make the first check red.
+security = "uv run bandit -c pyproject.toml -q -r {changed}"
+{{/adopted}}
+{{^adopted}}
+security = "uv run bandit -c pyproject.toml -q -r {{code_root}}{{#evals}} evals{{/evals}}"
+{{/adopted}}
 security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
 audit = "uv run pip-audit --skip-editable"
 {{/mvp_or_more}}
@@ -104,6 +127,19 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "S", "RUF"]
 {{#pyright}}
 [tool.pyright]
 include = ["{{code_root}}", "{{tests_dir}}"]
+# `rumbo check --full` passes `.`, which replaces `include`; `exclude` still holds for it, so
+# throwaway code in spikes/ (ADR-0020) and the three sensors RUMBO copies into scripts/ (typed
+# in RUMBO's own repository) are never type-checked here. The first three are pyright's own
+# defaults, repeated for the versions in which a custom list replaces them.
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "spikes",
+    "scripts/rumbo_check.py",
+    "scripts/rumbo_guard.py",
+    "scripts/check_tests_not_weakened.py",
+]
 typeCheckingMode = "standard"
 {{#arch}}
 strict = ["{{package_path}}/{{inner_layer}}"]
@@ -117,6 +153,10 @@ extraPaths = ["evals"]
 # ADR-0015: the same contract as [tool.pyright]: {{code_root}} and {{tests_dir}} checked{{#arch}}, the
 # {{inner_layer}} layer strict{{/arch}}.
 files = ["{{code_root}}", "{{tests_dir}}"]
+# `rumbo check --full` passes `.`, which replaces `files`; `exclude` still holds while mypy
+# walks it, so throwaway code in spikes/ (ADR-0020) and the three sensors RUMBO copies into
+# scripts/ (typed in RUMBO's own repository, with pyright) are never type-checked here.
+exclude = ['^spikes/', '^scripts/(rumbo_check|rumbo_guard|check_tests_not_weakened)\.py$']
 python_version = "{{python}}"
 check_untyped_defs = true
 warn_unused_ignores = true
@@ -144,10 +184,18 @@ extra_checks = true
 {{/arch}}
 {{/mypy}}
 
+{{#pytest_table}}
 [tool.pytest.ini_options]
-testpaths = ["{{tests_dir}}"]
+{{#adopted}}
+# ADR-0029: the directories where adoption found tests, and none of RUMBO's own options (a
+# project that already configured pytest gets no table at all).
+{{/adopted}}
+testpaths = [{{testpaths_toml}}]
+{{^adopted}}
 addopts = "-q --strict-markers"
+{{/adopted}}
 
+{{/pytest_table}}
 [tool.coverage.run]
 source = ["{{package_path}}"]
 branch = true
@@ -176,5 +224,18 @@ also_copy = [{{#evals}}"evals/", {{/evals}}"scripts/"]
 {{/arch}}
 
 [tool.bandit]
-# asserts in evals/ and tests/ are intended (B101); ruff S101 still guards {{code_root}}/.
+# Read by the `security` step (`-c pyproject.toml`). Asserts in evals/ and tests/ are intended
+# (B101); ruff S101 still guards {{code_root}}/.
 skips = ["B101"]
+{{#adopted}}
+# The step names files, or `.` with --full. As in a new project, bandit judges the code: not
+# the environment, the tests, spikes/ nor scripts/ (which has its own step). Globs, in both
+# spellings bandit meets (`-r .` and a named file): measured with bandit 1.9.4, a plain name
+# such as "tests" is matched anywhere in a path and would silently skip `pkg/contests.py`.
+exclude_dirs = [
+    "./.venv/*", ".venv/*",
+    "./scripts/*", "scripts/*",
+    "./spikes/*", "spikes/*",
+    "./{{tests_dir}}/*", "{{tests_dir}}/*",
+]
+{{/adopted}}

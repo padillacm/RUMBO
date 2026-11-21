@@ -1,4 +1,6 @@
 # Copy to .env (git-ignored) for local development. Never commit real values.
+# `make evals-live` loads it (`uv run --env-file .env ...`); the check never reads it, and a
+# variable already set in your shell wins over the one written here.
 {{#claude_code}}
 # Provider claude-code: the `claude` CLI uses your own login; no API key is needed locally.
 # CI (nightly evals) uses the CLAUDE_CODE_OAUTH_TOKEN secret instead.
@@ -7,8 +9,12 @@
 # Use a DEVELOPMENT key with a spending limit, never the production one.
 {{sdk_env_key}}=
 {{/claude_code}}
-# Set to 1 to let evals call the real model (make evals-live does this for you).
+# The offline guard (app/ports.py): with both variables blank no adapter can reach the model.
+# RUMBO_EVALS_LIVE=1 lets the evals call it (`make evals-live` sets it for you with --live).
 RUMBO_EVALS_LIVE=
+# RUMBO_LIVE=1 is the production switch: set it where the product is deployed{{#deployable}} (infra/Dockerfile
+# does){{/deployable}}; leave it blank on a laptop.
+RUMBO_LIVE=
 # Per-request limits (app/budget.py). Blank = default; 0 = every request abstains (kill switch).
 RUMBO_BUDGET_INPUT_TOKENS=20000
 RUMBO_BUDGET_OUTPUT_TOKENS=4000

@@ -6,64 +6,132 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Fixes from an external audit of v0.4.0 (eight findings), in four decisions (ADR-0018 to
-ADR-0021).
+Fixes from two external audits of v0.4.0; the findings and their evidence are in
+`docs/audits/2026-11-16-pre-0.4.1.md`.
+
+### Upgrading a project
+1. Run `rumbo update` yourself, with no agent working in the project, and **commit the result
+   before the agent goes on**. It rewrites protected files (`scripts/`, the workflows), and
+   the guard stops an agent that finds them changed and not committed.
+2. Run `rumbo doctor` and do what it says. `rumbo update` never rewrites an existing
+   `.claude/settings.json`, so a project created before this version keeps two things that
+   `doctor` now names: hook matchers that do not name `PowerShell`, and the pre-approved
+   commands `make rumbo *` and `rumbo decision *`, which you should remove.
+3. `rumbo update` replaces `RUMBO.md`, which now describes two things your own code does not
+   have until you port them, because files under `src/` and `evals/graders/` are yours and
+   are never replaced:
+   - `RUMBO_LIVE=1` as the production switch: copy `live()` and `LIVE_VARIABLES` from the
+     new template of `app/ports.py`.
+   - Graders that take the case input and may be coroutines: take the new
+     `evals/run_evals.py` together with the new `evals/graders/__init__.py` (the first
+     imports `grade` from the second), and make a judge you registered asynchronous.
+   `rumbo update --diff` shows each of these files against the new template. Until you port
+   them your project keeps working as before: nothing forces the port.
+4. `--strict` in the anti-cheat sensor now exits `2` when it finds no base other than `HEAD`.
+   The generated CI and `[tool.rumbo.checks]` pass a base and are not affected; a force push
+   to the default branch, whose previous commit is unreachable, is.
 
 ### Security
-- `rumbo verify-dep` no longer sends the credentials of a private index over plain `http`:
-  Basic authentication is not encryption, so a URL with a user name on an `http` index that
-  is not on this machine (loopback) is refused before any request, the index lookup is
-  reported as "verify by hand" and the PyPI measurements still run. `https`, loopback and an
-  `http` index without credentials are unchanged.
+- The guard judges every shell tool like Bash (the `PowerShell` tool on Windows skipped it),
+  protects `.git/` and the files that shadow `pyproject.toml` (`ruff.toml`, `pytest.ini`,
+  `setup.cfg` and the like), lets an agent change in `pyproject.toml` only the dependency
+  tables `uv add` writes, and refuses `verify-dep --index` and `git diff --no-index` from an
+  agent's shell (ADR-0019, ADR-0023).
+- The guard remembers `HEAD`: a commit made without the `pre-commit` hook is judged after the
+  command, and `Stop` also checks code committed since the last green `HEAD` (ADR-0024).
+- An agent can no longer create a numbered ADR or spec without the template mark, and
+  renames, symlinks, hidden files, unusual file names, orphan branches and more spellings of
+  a bypass no longer escape the guard (ADR-0025).
+- The anti-cheat sensor reports a test that stays in the file but no longer runs, a skip that
+  reaches a test from a fixture, a class or the module, and an assert that cannot fail; a
+  project in a sub-directory of its repository is measured instead of always passing
+  (ADR-0027).
+- The anti-cheat sensor reads its settings from the base, so the change under test cannot
+  narrow them; it ignores an approval mark authored by any known agent, not only Claude; the
+  pull request label counts only in a pull request run (ADR-0021, ADR-0026).
+- `rumbo verify-dep` never sends index credentials over plain `http` to another machine nor to
+  another host through a redirect, and an answer that is not a package page is "could not
+  confirm" (exit `2`), never "exists" (ADR-0028).
+- `rumbo tour` quotes every file name and ref it puts in a command of its guide.
+- The generated Claude Code adapter sends the prompt on standard input, so on Windows `cmd.exe`
+  no longer parses it, and ends the whole process tree at the time limit.
+- On Windows the runner no longer runs a `uv.cmd` planted in the project in place of `uv`.
 
-### Fixed
-- ADR-0018: a step whose tool started and rejected the code is **red**, not a broken
-  environment. pytest exits `2` on an import or syntax error while collecting and `5` when it
-  collects nothing; mypy and `ruff format --check` exit `2` on a syntax error. The runner used
-  to report all of them as exit `3`, so the `Stop` hook told the agent not to repair its own
-  mistake and `rumbo gate G4` exited `0`. On such a code the runner now asks whether the tool
-  can start (`<launcher> <tool> --version`): yes means red, no means environment. In G4 a
-  runner or sensor that could not be measured fails the gate.
-- ADR-0019: the guard no longer exempts the whole `pyproject.toml`. An agent's shell command
-  or commit may change `project.dependencies`, `project.optional-dependencies`,
-  `dependency-groups` and `tool.uv` (what `uv add` writes) and nothing else; a change to
-  `[tool.rumbo.checks]`, the linter, the type checker, pytest, coverage or the version is
-  reported after the command and refused at commit, with the tables named. `uv.lock` stays free.
-- ADR-0020: adoption follows the project's layout. Gate G3 and `rumbo trace` read the tests
-  directory from `[tool.rumbo].tests` instead of assuming `tests/`; a package at the root
-  (no `src/`) is recorded in the new `[tool.rumbo].src` key and bandit, the type checker,
-  coverage, the mutation paths and the architecture test point at it; `{changed}` never
-  contains files under `spikes/`, and the generated `[tool.ruff]` sets `force-exclude = true`.
-- ADR-0021: the anti-cheat sensor ignores an approval mark authored or co-authored by other
-  agents, not only Claude, and a project adds its own with `[tool.rumbo].agent_authors`;
-  `rumbo init` sets `rumbo.human` only for a human at a terminal, never when an agent runs it.
-- The sensor resolves assertion helpers that are methods of the test class (`self._verify()`),
-  including inherited ones: moving asserts into such a method is not reported as a weakening,
-  and emptying it is.
-- The human checklists of G3 and G5 follow `kind` and `layout` like the automatic checks: a
-  flat package is not asked for import-linter contracts, a library or CLI is not asked for
-  SLOs, a runbook or a canary.
-- `rumbo init` printed `provider=` and `rigor=` twice in its summary line.
-
-- On Windows `rumbo init` took a process without a terminal for a human (`isatty()` is true
-  for the NUL device) and declared `rumbo.human`; it now asks the console API and requires
-  both standard input and output to be consoles.
-
-- Found while writing the specs below:
-  - git output is decoded as UTF-8 everywhere. With the locale encoding (cp1252 on Windows)
-    the sensor dropped from the base a test file holding a byte that encoding lacks, so
-    emptying its tests passed, and such a byte in a commit message crashed the approval check.
-  - `{changed}` includes files that are staged but not committed; `git add` hid them from
-    the strict steps of an adopted project.
-  - `rumbo verify-dep` no longer raises on a JSON answer of an unexpected shape (PyPI or OSV)
-    nor on an index URL that cannot be parsed; a port that is not a number is refused
-    instead of dropped.
+### Changed
+- The runner's exit codes (ADR-0018, ADR-0022): a step is red (`1`) only when its tool ran and
+  judged the code, so pytest failing to import a test is the agent's to fix. A crash, a missing
+  project script, a launcher that cannot start its interpreter and the codes a tool keeps for
+  "I could not do my job" are a broken environment (`3`). G4 fails when the runner or the
+  sensor could not be measured.
+- `{base}` and the sensor try `origin/main`, `origin/master`, `origin/HEAD`, `main` and
+  `master`; the upstream of the branch is no longer a base.
+- Gates: G3 and G5 read every workflow under `.github/workflows/`, and one Python version is
+  enough for G5 when it is the newest supported (ADR-0032); their human checklists follow
+  `kind` and `layout`; a threat model or C4 still equal to the template, an eval case without
+  `input` and an empty brief no longer count; `rumbo trace` reports a requirement line it
+  cannot parse, and `--strict` and G4 fail on it.
+- `rumbo init --adopt` follows the project (ADR-0020, ADR-0029): the tests directory and a
+  package at the root are recorded in `[tool.rumbo]` (`tests`, `src`); the Python version is
+  read from `requires-python` or `.python-version`; an existing pytest configuration,
+  `.claude/settings.json` and `.pre-commit-config.yaml` are left alone and the guard snippets
+  printed; no runtime dependency is added; `security` judges the changed files; nothing that
+  is not on disk is configured; the project's own CI and `infra/` are recorded (`own_ci`,
+  `own_infra`).
+- Generated projects: graders receive the case input and may be coroutines, and the judge is
+  asynchronous (ADR-0030); the nightly runs mutation testing only at production; an adopted
+  project's CI runs pre-commit on the changed files only; a package's sdist carries the
+  package and its tests only; `make security` exists from mvp on.
 
 ### Added
-- Specs for the features that were already built: F-0002 (the runner), F-0003 (the sensor),
-  F-0004 (mount, adopt, update, promote), F-0005 (gates and traceability), F-0006 (`rumbo
-  tour`) and F-0007 (`rumbo verify-dep`), each requirement traced to a test. Every feature
-  of the PRD now has its spec.
+- `RUMBO_LIVE=1` in generated LLM projects: the production switch of the offline guard, set in
+  the service image (ADR-0031).
+- `rumbo update --allow-downgrade`: without it `update` refuses a harness newer than the CLI.
+  `update` also reports the check steps and Makefile aliases that differ from the template.
+- `rumbo doctor` checks that the guard is wired in `.claude/settings.json` and
+  `.pre-commit-config.yaml`, and warns when the harness is newer than the CLI.
+- `[tool.rumbo].agent_authors`: more commit identities whose approval mark the sensor ignores
+  (ADR-0021).
+- The generated CI passes `RUMBO_DEFAULT_BRANCH` to the sensor, so a default branch other than
+  `main` or `master` is found.
+
+### Fixed
+- Runner: on Windows `.cmd` shims (`npx`, `pnpm`) are found and a backslash in a step is
+  literal; `{changed}` includes staged files, never files under `spikes/`, and becomes the whole
+  tree when too long for one command line, and a changed file named `-x.py` is passed as
+  `./-x.py`; a malformed `[tool.rumbo]` table, an unwritable log or an unexpected error exits
+  `3`, never `1`; `pyproject.toml` may start with a byte order mark (what PowerShell 5
+  writes), for the guard and the anti-cheat sensor too: the guard refused an agent's `uv add`
+  and the sensor ignored `[tool.rumbo].tests` and `agent_authors`.
+- Anti-cheat sensor: git output is read as UTF-8 (on Windows a test file could drop out of the
+  base); assertion helpers that are methods of the test class are resolved.
+- `rumbo init`: `--force` never overwrites an earlier `.bak` and skips files equal to the
+  template, and `doctor` no longer suggests it; the summary line no longer repeats `provider=`
+  and `rigor=`; `rumbo.human` is set only for a human at a terminal, never when an agent runs
+  it, on Windows too (ADR-0021); an error reading `pyproject.toml` or `.gitignore` no longer
+  leaves a partial harness.
+- `rumbo promote` is atomic: a failed update no longer leaves the project promoted.
+- `rumbo gate`: G4 measures a project in a sub-directory of its repository, counts untracked
+  files, excludes lockfiles at any depth and ignores merge commits when it decides the lane; a
+  document saved as UTF-16 or cp1252 fails its check with a message; `"tags": null` in a dataset
+  no longer crashes; the EARS check accepts `<...>` and `...` in code.
+- `rumbo tour` finds removed asserts in renamed test files, in tests outside `tests/` and in
+  merge commits, and with `diff.noprefix` or forced colour; a file name outside ASCII or a
+  commit message holding a separator no longer hides a change; the revert command it suggests
+  for a merge commit carries `-m 1`, which git requires.
+- `rumbo gate` and `rumbo tour` without git installed end with one error line (exit `2`)
+  instead of a traceback.
+- `rumbo verify-dep` no longer crashes on an unexpected JSON answer or index URL; a port that is
+  not a number is refused.
+- `rumbo decision` rejects an empty or multi-line title; `rumbo new` numbers after four-digit
+  prefixes only; `rumbo metrics --days` is validated; every file RUMBO writes ends its lines
+  with `\n` on Windows too.
+- Generated CI: the SBOM artifact no longer collides across the Python matrix; adding or
+  removing the approval label re-runs the pull request.
+- Generated project: bandit reads `[tool.bandit]`; Dependabot lists docker only with `infra/`;
+  the nightly no longer runs mutmut at mvp; `make evals-live` loads `.env`; the type checkers
+  skip `spikes/` given an explicit path; JSON logs keep tracebacks; a cancelled call ends the
+  `claude -p` process; the eval runner rejects `--k 0`, gives concurrent runs their own report
+  and keeps the fingerprint after a failed live run; the budget rejects `nan`.
 
 ## [0.4.0] - 2026-11-09
 
@@ -120,7 +188,7 @@ and RUMBO running its own harness.
 - ADR-0017: a numbered ADR or spec committed without the template mark is signed and
   read-only for the agent (edit blocked, shell change reported, commit refused); a template
   mark removed through the shell is reported after the command. RUMBO's own brief, PRD and
-  spec F-0001 (the guard, twelve requirements traced to tests) are written.
+  spec F-0001 (the guard, fifteen requirements traced to tests) are written.
 - ADR-0016: the eval runner fingerprints the prompts, the judge and the entry (sha256) in
   every report, records them in `evals/fingerprint.json` on a live run, and warns offline
   when fixtures or calibration may be stale; the warning never fails the step.

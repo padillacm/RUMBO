@@ -191,10 +191,11 @@ def test_checks_table_lists_the_steps_in_order(cfg: Config) -> None:
         "security": " security security-scripts audit",
         "sensor": " sensor",
     }.items():
-        line = next(ln for ln in makefile.splitlines() if ln.startswith(f"{target}:"))
-        assert line.split(";", 1)[1].strip() == RUNNER + steps
+        lines = [ln for ln in makefile.splitlines() if ln.startswith(f"{target}:")]
         if target == "security" and cfg.rigor == "prototype":
-            continue  # ADR-0011: a prototype has no security steps; the alias waits for promote
+            assert lines == []  # no alias for steps the table does not have yet
+            continue
+        assert lines[0].split(";", 1)[1].strip() == RUNNER + steps
         assert all(step in checks for step in steps.split() if step != "--brief")
 
 
@@ -218,7 +219,8 @@ def test_generated_ci_runs_the_runner_on_linux_and_windows_without_make(cfg: Con
     nightly = plan.get(".github/workflows/nightly.yml")
     if nightly is not None:
         make_lines = [ln for ln in str(nightly).splitlines() if re.search(r"\bmake\b", ln)]
-        assert make_lines == ["        run: make mutation"]  # mutmut needs os.fork: POSIX only
+        mutation = ["        run: make mutation"]  # mutmut needs os.fork: POSIX only
+        assert make_lines == (mutation if cfg.rigor == "production" else [])
         if cfg.llm:
             assert "run: uv run python evals/run_evals.py --suite all --live" in str(nightly)
 
@@ -923,7 +925,8 @@ def test_each_layout_has_its_contracts_or_none(
     assert "arch:" in makefile and f"find src/x/{inner}" in makefile
     assert f'INNER = SRC / "{inner}"' in arch_test
     assert "lint-imports" in pre_commit
-    assert f"mutmut on src/x/{inner}" in nightly
+    production = plan_files(dataclasses.replace(cfg, rigor="production"))
+    assert f"mutmut on src/x/{inner}" in str(production[".github/workflows/nightly.yml"])
     assert src_files == sorted(
         [
             "src/x/__init__.py",
@@ -966,6 +969,26 @@ def test_layout_defaults_follow_the_kind_and_llm_forces_hexagonal() -> None:
 def test_axes_validation(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         Config(name="x", package="x", llm=False, **kwargs)
+
+
+def test_an_adopted_project_is_given_no_runtime_dependency() -> None:
+    """ADR-0029 fitness: the runtime dependencies serve the skeleton RUMBO writes. An adopted
+    project gets no skeleton; a Flask or Django service was being handed FastAPI."""
+    for kind, llm in (("service", False), ("service", True), ("cli", True), ("data", False)):
+        provider = "anthropic" if llm else ""
+        adopted = Config(
+            name="Legacy",
+            package="legacy_app",
+            llm=llm,
+            provider=provider,
+            kind=kind,
+            layout="flat",
+            adopted=True,
+        )
+        assert runtime_dependencies(adopted) == []
+        assert "pytest" in dev_dependencies(adopted)  # the tools of the harness still come
+    fresh = Config(name="New", package="new_app", llm=False, kind="service")
+    assert runtime_dependencies(fresh) == ["fastapi", "uvicorn", "httpx"]
 
 
 # Covers F-0004.R3, F-0004.R4, F-0004.R5 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
@@ -1395,11 +1418,14 @@ def test_adoption_plan_writes_the_harness_and_no_skeleton() -> None:
     assert checks["lint"] == "uv run ruff check {changed}"
     assert checks["format"] == "uv run ruff format --check {changed}"
     assert checks["types"] == "uv run pyright {changed}"
+    # ADR-0029: bandit too judges the files a change touches, not the legacy tree.
+    assert checks["security"] == "uv run bandit -c pyproject.toml -q -r {changed}"
     plain = _rendered_checks_of(
         Config(name="Legacy", package="legacy_app", llm=False, rigor="mvp", kind="cli")
     )
-    assert {k: v for k, v in checks.items() if k not in ("lint", "format", "types")} == {
-        k: v for k, v in plain.items() if k not in ("lint", "format", "types")
+    on_changed = ("lint", "format", "types", "security")
+    assert {k: v for k, v in checks.items() if k not in on_changed} == {
+        k: v for k, v in plain.items() if k not in on_changed
     }
     assert list(checks) == list(plain) == check_steps(cfg)
     assert "--full" in pyproject and "{changed}` is the changed .py files" in pyproject
@@ -1552,8 +1578,15 @@ def test_adopting_a_root_package_points_every_tool_at_it(
     )
     cfg = Config.from_project(project)
     assert (cfg.src, cfg.code_root, cfg.package_path) == (".", "legacy_app", "legacy_app")
-    # The checks table, the type checker, coverage: the package, never `src`.
-    assert tool["rumbo"]["checks"]["security"] == "uv run bandit -q -r legacy_app"
+    # The checks table, the type checker, coverage: the package, never `src`. Bandit
+    # judges the changed files of an adopted project, like the other strict tools.
+    assert tool["rumbo"]["checks"]["security"] == "uv run bandit -c pyproject.toml -q -r {changed}"
+    # Globs: a plain name is matched anywhere in a path by bandit (measured).
+    assert tool["bandit"]["exclude_dirs"] == [
+        f"{prefix}{name}/*"
+        for name in (".venv", "scripts", "spikes", "test")
+        for prefix in ("./", "")
+    ]
     assert tool["pyright"]["include"] == ["legacy_app", "test"]
     assert tool["coverage"]["run"]["source"] == ["legacy_app"]
     assert tool["ruff"]["force-exclude"] is True and tool["ruff"]["extend-exclude"] == ["spikes"]
@@ -1586,7 +1619,7 @@ def test_adopting_a_root_package_points_every_tool_at_it(
     report = update(Project.load(proto), proto)
     assert "pyproject.toml (+checks: security, security-scripts, audit)" in report.merged
     checks = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["rumbo"]["checks"]
-    assert checks["security"] == "uv run bandit -q -r legacy_app"
+    assert checks["security"] == "uv run bandit -c pyproject.toml -q -r {changed}"
 
     # A project adopted before the key existed: `update` looks once and writes what it finds.
     pyproject.write_text(
@@ -1639,8 +1672,9 @@ def test_a_src_project_renders_as_before(simple_project: Path, tmp_path: Path) -
         assert (cfg.src, cfg.code_root, cfg.package_path) == ("src", "src", "src/demo")
         plan = plan_files(cfg)
         pyproject = str(plan["pyproject.toml"])
+        scanned = "{changed}" if cfg.adopted else "src"  # ADR-0029: the files of a change
         for literal in (
-            'security = "uv run bandit -q -r src"\n',
+            f'security = "uv run bandit -c pyproject.toml -q -r {scanned}"\n',
             'include = ["src", "tests"]\n',
             'strict = ["src/demo/domain"]\n',
             'source = ["src/demo"]\n',
@@ -1657,7 +1691,8 @@ def test_a_src_project_renders_as_before(simple_project: Path, tmp_path: Path) -
     mypy = Config(name="Demo", package="demo", llm=False, rigor="mvp", types="mypy")
     assert 'files = ["src", "tests"]\n' in str(plan_files(mypy)["pyproject.toml"])
     llm = Config(name="Demo", package="demo", llm=True, provider="anthropic", rigor="mvp")
-    assert 'security = "uv run bandit -q -r src evals"\n' in str(plan_files(llm)["pyproject.toml"])
+    security = 'security = "uv run bandit -c pyproject.toml -q -r src evals"\n'
+    assert security in str(plan_files(llm)["pyproject.toml"])
     runner = str(plan_files(llm)["evals/run_evals.py"])
     assert 'prompts = root / "src" / "demo" / "prompts"\n' in runner
     # The one new line of `[tool.ruff]`: a project's exclusions hold for a file named by path.
@@ -2041,3 +2076,689 @@ def test_the_scaffolder_imports_only_the_standard_library() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 imported.add(node.module.split(".")[0])
         assert imported and imported <= allowed, (module, sorted(imported - allowed))
+
+
+# ----------------- ADR-0029: adoption respects what the project has, and destroys nothing
+def _files(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def _tool(root: Path) -> dict[str, Any]:
+    return tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+
+
+def _at_root(cfg: Config) -> Config:
+    """The same adopted configuration for a package that lives at the project root."""
+    return dataclasses.replace(cfg, src=".")
+
+
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_force_never_overwrites_a_backup_and_skips_identical_files(tmp_path: Path) -> None:
+    """ADR-0029 fitness (C1): the second `--force` lost the human's text, because the first
+    backup was overwritten with the template the first run had just written."""
+    cfg = Config(name="Demo", package="demo", llm=False, rigor="mvp")
+    scaffold(cfg, tmp_path)
+    # Nothing was edited: nothing to overwrite, nothing to back up.
+    report = scaffold(cfg, tmp_path, force=True)
+    assert not [rel for rel in _files(tmp_path) if ".bak" in rel]
+    assert not report.created and "AGENTS.md" in report.unchanged
+    assert "Unchanged" in report.summary()
+
+    decisions = tmp_path / "docs" / "decisions.md"
+    signed = "# Decisions\n\n## 2026-11-01 — G1 signed\n- Decided by: Carlos\n"
+    decisions.write_text(signed, encoding="utf-8")
+    report = scaffold(cfg, tmp_path, force=True)
+    assert report.created == ["docs/decisions.md"]
+    assert (tmp_path / "docs" / "decisions.md.bak").read_text(encoding="utf-8") == signed
+    # The second run finds the template it wrote: identical, so the backup is not touched.
+    scaffold(cfg, tmp_path, force=True)
+    assert (tmp_path / "docs" / "decisions.md.bak").read_text(encoding="utf-8") == signed
+    # A second text of the human's gets the next free name; the first one stays.
+    decisions.write_text("# Decisions\n\nsecond text\n", encoding="utf-8")
+    scaffold(cfg, tmp_path, force=True)
+    assert (tmp_path / "docs" / "decisions.md.bak").read_text(encoding="utf-8") == signed
+    assert "second text" in (tmp_path / "docs" / "decisions.md.bak.1").read_text(encoding="utf-8")
+    # A text that a backup already holds is not copied again.
+    decisions.write_text(signed, encoding="utf-8")
+    scaffold(cfg, tmp_path, force=True)
+    assert sorted(p.name for p in decisions.parent.glob("decisions.md.bak*")) == [
+        "decisions.md.bak",
+        "decisions.md.bak.1",
+    ]
+
+
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+@pytest.mark.parametrize(
+    ("rel", "content", "named"),
+    [
+        ("pyproject.toml", b"[project\nname='x'\n", "pyproject.toml"),
+        ("pyproject.toml", b"tool = {black = {line-length = 88}}\n", "pyproject.toml"),
+        ("pyproject.toml", "[project]\nname = 'caf\xe9'\n".encode("cp1252"), "pyproject.toml"),
+        ("pyproject.toml", b'[tool.rumbo]\nagent_env = ["MY_AGENT"]\n', "[tool.rumbo] table"),
+        (".gitignore", ".venv\n".encode("utf-16"), ".gitignore"),
+        (".gitignore", "# caf\xe9\n.venv\n".encode("cp1252"), ".gitignore"),
+        ("scripts", b"a file where the harness needs a directory\n", "scripts"),
+        ("docs/adr/0000-template.md/keep", b"a directory where a file goes\n", "0000-template.md"),
+    ],
+    ids=[
+        "toml",
+        "inline-tool",
+        "cp1252-toml",
+        "partial-table",
+        "utf16",
+        "cp1252",
+        "file-as-dir",
+        "dir-as-file",
+    ],
+)
+def test_init_reads_everything_before_it_writes_anything(
+    tmp_path: Path, rel: str, content: bytes, named: str
+) -> None:
+    """ADR-0029 fitness (C11): an error found half-way left a partial harness behind."""
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    before = _files(tmp_path)
+    with pytest.raises(ValueError, match=re.escape(named)):
+        scaffold(Config(name="Demo", package="demo", llm=False), tmp_path)
+    assert _files(tmp_path) == before
+
+
+# Covers F-0004.R8 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_init_merges_a_pyproject_with_a_byte_order_mark_and_refuses_a_file_as_target(
+    tmp_path: Path,
+) -> None:
+    bom = tmp_path / "bom"
+    bom.mkdir()
+    (bom / "pyproject.toml").write_bytes(b"\xef\xbb\xbf[project]\nname = 'x'\nversion = '1'\n")
+    report = scaffold(Config(name="Demo", package="demo", llm=False), bom)
+    assert any(item.startswith("pyproject.toml (") for item in report.merged)
+    assert Project.load(bom).package == "demo"
+    notes = tmp_path / "notes.txt"
+    notes.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a directory"):
+        scaffold(Config(name="Demo", package="demo", llm=False), notes)
+    assert notes.read_text(encoding="utf-8") == "x"
+
+
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+@pytest.mark.parametrize(
+    ("rel", "content", "where"),
+    [
+        ("pytest.ini", "[pytest]\naddopts = -ra\n", "pytest.ini"),
+        ("tox.ini", "[tox]\nenvlist = py\n\n[pytest]\nmarkers =\n    slow: slow\n", "tox.ini"),
+        ("setup.cfg", "[metadata]\nname = legacy\n\n[tool:pytest]\naddopts = -ra\n", "setup.cfg"),
+    ],
+)
+def test_adoption_writes_no_pytest_configuration_over_the_projects_own(
+    tmp_path: Path, rel: str, content: str, where: str
+) -> None:
+    """ADR-0029 fitness (C2): `[tool.pytest.ini_options]` outranks setup.cfg and tox.ini, and
+    `--strict-markers` turned the project's own markers into errors."""
+    from rumbo.scaffold import pytest_configuration
+
+    root = _legacy(tmp_path, LEGACY_PYPROJECT, "src/legacy_app/__init__.py", "test/test_x.py")
+    assert pytest_configuration(root) == ""
+    (root / rel).write_text(content, encoding="utf-8")
+    assert where in pytest_configuration(root)
+    report = scaffold(_adopted(), root)
+    assert "pytest" not in _tool(root)
+    assert any(where in warning and "pytest" in warning for warning in report.warnings)
+    assert (root / rel).read_text(encoding="utf-8") == content
+    # Adopting a second time (and updating) keeps the decision of the first: the project had
+    # its own configuration, so no table is added behind it later either.
+    scaffold(_adopted(), root)
+    assert "pytest" not in _tool(root)
+    update(Project.load(root), root)
+    assert "pytest" not in _tool(root)
+    assert (root / rel).read_text(encoding="utf-8") == content
+
+
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_adoption_keeps_a_pytest_table_in_pyproject_and_ignores_lookalikes(tmp_path: Path) -> None:
+    from rumbo.scaffold import pytest_configuration
+
+    own = LEGACY_PYPROJECT + '\n[tool.pytest.ini_options]\naddopts = "-ra"\n'
+    root = _legacy(tmp_path / "own", own, "src/legacy_app/__init__.py", "test/test_x.py")
+    assert "pyproject.toml" in pytest_configuration(root)
+    scaffold(_adopted(), root)
+    assert _tool(root)["pytest"] == {"ini_options": {"addopts": "-ra"}}
+    # A tox.ini or a setup.cfg without a pytest section configures nothing.
+    plain = _legacy(tmp_path / "plain", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
+    (plain / "tox.ini").write_text("[tox]\nenvlist = py\n", encoding="utf-8")
+    (plain / "setup.cfg").write_text("[metadata]\nname = legacy\n", encoding="utf-8")
+    assert pytest_configuration(plain) == ""
+
+
+# Covers F-0004.R9, F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_adoption_points_pytest_at_the_tests_it_finds(tmp_path: Path) -> None:
+    """ADR-0029 fitness (C2): `testpaths = ["tests"]` stopped collecting the tests that live
+    elsewhere, and the suite went green without them."""
+    from rumbo.scaffold import stray_tests
+
+    # Tests in `test/` and inside the package: both are collected, the sensor watches `test/`.
+    root = _legacy(
+        tmp_path / "both",
+        LEGACY_PYPROJECT,
+        "src/legacy_app/__init__.py",
+        "test/test_x.py",
+        "src/legacy_app/tests/unit/test_core.py",
+        "spikes/test_idea.py",
+        ".venv/lib/test_vendored.py",
+    )
+    assert stray_tests(root, "test") == ["src/legacy_app/tests"]
+    report = scaffold(_adopted(), root)
+    pytest_table = _tool(root)["pytest"]["ini_options"]
+    assert pytest_table == {"testpaths": ["test", "src/legacy_app/tests"]}  # no --strict-markers
+    assert _tool(root)["rumbo"]["tests"] == "test"
+    assert any("src/legacy_app/tests" in w and "sensor" in w for w in report.warnings)
+
+    # No tests directory at the root: said, never assumed.
+    none = _legacy(tmp_path / "none", LEGACY_PYPROJECT, "legacy_app/__init__.py")
+    report = scaffold(_at_root(_adopted(tests_dir="tests")), none)
+    assert _tool(none)["pytest"]["ini_options"] == {"testpaths": ["tests"]}
+    assert any("no tests directory" in w.lower() for w in report.warnings)
+
+    # Test files at the root itself: no `testpaths` narrows what pytest collects.
+    flat = _legacy(tmp_path / "flat", LEGACY_PYPROJECT, "legacy_app/__init__.py", "test_all.py")
+    assert stray_tests(flat, "tests") == ["."]
+    report = scaffold(_at_root(_adopted(tests_dir="tests")), flat)
+    assert "pytest" not in _tool(flat)
+    assert any("project root" in w for w in report.warnings)
+
+    # A project that is not adopted keeps the configuration it always had.
+    fresh = tomllib.loads(
+        str(plan_files(Config(name="x", package="x", llm=False))["pyproject.toml"])
+    )
+    assert fresh["tool"]["pytest"]["ini_options"] == {
+        "testpaths": ["tests"],
+        "addopts": "-q --strict-markers",
+    }
+
+
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+@pytest.mark.parametrize(
+    ("requires", "pin", "flag", "expected"),
+    [
+        ("", "", None, "3.11"),
+        (">=3.12", "", None, "3.12"),
+        (">=3.12,<4", "", None, "3.12"),
+        (">= 3.12 , < 4", "", None, "3.12"),
+        ("~=3.12", "", None, "3.12"),
+        ("==3.12.*", "", None, "3.12"),
+        (">3.11", "", None, "3.11"),  # PEP 440: 3.11.1 is greater than 3.11
+        (">=3.13", "", None, "3.13"),
+        (">=3.9", "", None, "3.11"),
+        (">=3.8,!=3.11.*", "", None, "3.12"),
+        ("", "3.12\n", None, "3.12"),
+        ("", "3.12.4\n", None, "3.12"),
+        ("", "cpython-3.13\n", None, "3.13"),
+        ("", "3.9\n", None, "3.11"),
+        ("", "3.99\n", None, "3.13"),
+        (">=3.12", "3.13\n", None, "3.12"),  # the pin may be newer than the promise
+        (">=3.11", "", "3.13", "3.13"),  # the flag wins
+        ("", "3.13\n", "3.12", "3.12"),
+    ],
+)
+def test_the_python_version_is_detected(
+    tmp_path: Path, requires: str, pin: str, flag: str | None, expected: str
+) -> None:
+    """ADR-0029 fitness (C3): a project with `requires-python = ">=3.13"` got 3.11."""
+    from rumbo.scaffold import resolve_python
+
+    if requires:
+        (tmp_path / "pyproject.toml").write_text(
+            f'[project]\nname = "x"\nversion = "1"\nrequires-python = "{requires}"\n',
+            encoding="utf-8",
+        )
+    if pin:
+        (tmp_path / ".python-version").write_text(pin, encoding="utf-8")
+    assert resolve_python(tmp_path, flag)[0] == expected
+
+
+# Covers F-0004.R14 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_a_python_that_contradicts_the_project_is_refused_or_reported(tmp_path: Path) -> None:
+    from rumbo.scaffold import resolve_python
+
+    pyproject = tmp_path / "pyproject.toml"
+
+    def requires(spec: str) -> None:
+        pyproject.write_text(
+            f'[project]\nname = "x"\nversion = "1"\nrequires-python = "{spec}"\n',
+            encoding="utf-8",
+        )
+
+    requires(">=3.13")
+    with pytest.raises(ValueError, match=r"--python 3\.11.*>=3\.13"):
+        resolve_python(tmp_path, "3.11")
+    requires(">=3.99")
+    with pytest.raises(ValueError, match=r">=3\.99.*3\.11, 3\.12, 3\.13"):
+        resolve_python(tmp_path, None)
+    requires(">=3.8,<3.11")
+    with pytest.raises(ValueError, match=r">=3\.8,<3\.11"):
+        resolve_python(tmp_path, None)
+    # Older than supported: said, and the nearest supported one is used because it satisfies it.
+    requires(">=3.9")
+    python, notes = resolve_python(tmp_path, None)
+    assert python == "3.11" and any(">=3.9" in note and "3.11" in note for note in notes)
+    # A pin below the result is reported, never left silently inconsistent.
+    requires(">=3.13")
+    (tmp_path / ".python-version").write_text("3.11\n", encoding="utf-8")
+    python, notes = resolve_python(tmp_path, None)
+    assert python == "3.13" and any(".python-version" in note and "3.11" in note for note in notes)
+    (tmp_path / ".python-version").write_text("3.13\n", encoding="utf-8")
+    assert resolve_python(tmp_path, None) == ("3.13", [])
+    # A specifier it cannot read is said, and decides nothing.
+    requires("^3.12")
+    python, notes = resolve_python(tmp_path, None)
+    assert python == "3.13" and any("^3.12" in note for note in notes)  # the pin decided
+
+
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_update_refuses_a_harness_newer_than_the_cli(simple_project: Path) -> None:
+    """ADR-0029 fitness (C5): an older CLI replaced a newer guard without a word."""
+    from rumbo.scaffold import NewerHarness, release_key
+
+    assert release_key("0.4.10") > release_key("0.4.9") > release_key("0.4")
+    assert release_key("1.0.0rc1") == release_key("1.0") and release_key("dev") == ()
+    pyproject = simple_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    guard = simple_project / "scripts" / "rumbo_guard.py"
+    newer = guard.read_text(encoding="utf-8") + "# a newer guard\n"
+    try:
+        pyproject.write_text(
+            original.replace(f'version = "{__version__}"', 'version = "99.0.0"', 1),
+            encoding="utf-8",
+        )
+        guard.write_text(newer, encoding="utf-8")
+        with pytest.raises(NewerHarness, match=rf"99\.0\.0.*{re.escape(__version__)}"):
+            update(Project.load(simple_project), simple_project)
+        assert guard.read_text(encoding="utf-8") == newer
+        assert Project.load(simple_project).harness_version == "99.0.0"
+        report = update(Project.load(simple_project), simple_project, allow_downgrade=True)
+        assert "scripts/rumbo_guard.py" in report.updated
+        assert Project.load(simple_project).harness_version == __version__
+    finally:
+        pyproject.write_text(original, encoding="utf-8")
+
+
+def test_pre_approvals_of_older_harnesses_that_defeat_the_guard_are_named(tmp_path: Path) -> None:
+    """`rumbo update` keeps an existing .claude/settings.json, so a project made before v0.4.1
+    still pre-approves `make rumbo *` and `rumbo decision *`: `doctor` has to say so."""
+    from rumbo.scaffold import guard_wiring
+
+    fresh = tmp_path / "fresh"
+    scaffold(Config(name="Demo", package="demo", llm=False), fresh)
+    settings = fresh / ".claude" / "settings.json"
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert guard_wiring(fresh) == ([], [])  # the template of this version pre-approves neither
+    data["permissions"]["allow"] += ["Bash(make rumbo *)", "Bash(rumbo decision *)"]
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    problems, warnings = guard_wiring(fresh)
+    assert problems == [] and len(warnings) == 2
+    assert '"Bash(make rumbo *)"' in warnings[0] and "permissions.allow" in warnings[0]
+    assert '"Bash(rumbo decision *)"' in warnings[1] and "as the human" in warnings[1]
+    # A permissions object of another shape is not judged, and never crashes.
+    data["permissions"] = ["Bash(make rumbo *)"]
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    assert guard_wiring(fresh) == ([], [])
+
+
+# Covers F-0004.R10, F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_the_guard_wiring_is_checked_and_the_snippets_are_printed(tmp_path: Path) -> None:
+    """ADR-0029 fitness (C6): adopting over an existing settings.json or pre-commit
+    configuration left the guard unwired, and nothing said so."""
+    from rumbo.scaffold import guard_wiring
+    from rumbo.sensors.guard import SHELL_TOOLS
+
+    assert SHELL_TOOLS == ("Bash", "PowerShell")
+    fresh = tmp_path / "fresh"
+    scaffold(Config(name="Demo", package="demo", llm=False), fresh)
+    assert guard_wiring(fresh) == ([], [])
+    settings = fresh / ".claude" / "settings.json"
+    text = settings.read_text(encoding="utf-8")
+    # A project created before the PowerShell tool was matched: a warning names tool and event.
+    settings.write_text(text.replace("|PowerShell", ""), encoding="utf-8")
+    problems, warnings = guard_wiring(fresh)
+    assert problems == [] and len(warnings) == 2
+    assert all("PowerShell" in w for w in warnings)
+    assert "PreToolUse" in warnings[0] and "PostToolUse" in warnings[1]
+    # A hook that is gone is a problem; so is a file that is not JSON.
+    data = json.loads(text)
+    del data["hooks"]["Stop"]
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    assert guard_wiring(fresh)[0] == [
+        ".claude/settings.json: no Stop hook runs scripts/rumbo_guard.py stop"
+    ]
+    settings.write_text("{not json", encoding="utf-8")
+    assert "not valid JSON" in guard_wiring(fresh)[0][0]
+    settings.write_text(text, encoding="utf-8")
+    hooks = fresh / ".pre-commit-config.yaml"
+    config = hooks.read_text(encoding="utf-8")
+    hooks.write_text(config.replace("rumbo_guard.py commit-msg", "other.py"), encoding="utf-8")
+    assert guard_wiring(fresh)[0] == [
+        ".pre-commit-config.yaml: no hook runs scripts/rumbo_guard.py commit-msg"
+    ]
+
+    # Adoption over the project's own two files: untouched, and the report says what to add.
+    root = _legacy(tmp_path / "legacy", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
+    own_settings = '{"permissions": {"allow": []}}\n'
+    own_hooks = (
+        "repos:\n  - repo: https://github.com/psf/black\n    rev: 23.1.0\n"
+        "    hooks:\n      - id: black\n"
+    )
+    (root / ".claude").mkdir()
+    (root / ".claude" / "settings.json").write_text(own_settings, encoding="utf-8")
+    (root / ".pre-commit-config.yaml").write_text(own_hooks, encoding="utf-8")
+    report = scaffold(_adopted(tests_dir="tests"), root)
+    assert (root / ".claude" / "settings.json").read_text(encoding="utf-8") == own_settings
+    assert (root / ".pre-commit-config.yaml").read_text(encoding="utf-8") == own_hooks
+    summary = report.summary()
+    assert '"PreToolUse"' in summary and '"matcher": "Bash|PowerShell"' in summary
+    assert 'rumbo_guard.py\\" stop' in summary
+    assert "- id: rumbo-guard\n" in summary and "- id: rumbo-guard-commit-msg\n" in summary
+    assert "default_install_hook_types: [pre-commit, commit-msg]" in summary
+    problems, _ = guard_wiring(root)
+    assert len(problems) == 5  # three hooks of settings.json, two of pre-commit
+    # The snippets are the fix: pasted, the wiring is complete; and they are not printed again.
+    from rumbo.scaffold import pre_commit_snippet, settings_snippet
+
+    assert settings_snippet() in summary and pre_commit_snippet() in summary
+    pasted = json.loads(own_settings) | json.loads(settings_snippet())
+    (root / ".claude" / "settings.json").write_text(json.dumps(pasted), encoding="utf-8")
+    (root / ".pre-commit-config.yaml").write_text(
+        own_hooks + pre_commit_snippet(), encoding="utf-8"
+    )
+    assert guard_wiring(root) == ([], [])
+    again = scaffold(_adopted(tests_dir="tests"), root).summary()
+    assert settings_snippet() not in again and pre_commit_snippet() not in again
+
+
+# Covers F-0004.R15 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_install_updates_only_its_own_hook_configuration_and_knows_a_sub_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0029 fitness (C6, C11): `pre-commit autoupdate` rewrote the revisions of a
+    configuration RUMBO did not write; a project in a sub-directory of a repository was told
+    it was not in one."""
+    from rumbo.cli import main
+    from rumbo.scaffold import git_prefix
+
+    commands = _init_without_network(tmp_path, monkeypatch, terminal=False)
+    autoupdate = ["uv", "run", "pre-commit", "autoupdate"]
+    install = ["uv", "run", "pre-commit", "install"]
+    init = ["init", "--yes", "--name", "Demo", "--package", "demo", "--no-llm", "--rigor", "mvp"]
+    own = _git_repo(tmp_path / "own")
+    (own / ".pre-commit-config.yaml").write_text("repos: []\n", encoding="utf-8")
+    assert main([*init, "--dir", str(own)]) == 0
+    assert autoupdate not in commands and install in commands
+    commands.clear()
+    fresh = _git_repo(tmp_path / "fresh")
+    assert main([*init, "--dir", str(fresh)]) == 0
+    assert commands.index(autoupdate) < commands.index(install)
+    capsys.readouterr()
+
+    mono = _git_repo(tmp_path / "mono")
+    billing = mono / "services" / "billing"
+    billing.mkdir(parents=True)
+    assert (git_prefix(mono), git_prefix(billing)) == ("", "services/billing/")
+    assert git_prefix(tmp_path) is None
+    commands.clear()
+    assert main([*init, "--dir", str(billing)]) == 0
+    out = capsys.readouterr().out
+    assert "not a git repository" not in out
+    assert "repository root" in out and "services/billing" in out
+    assert autoupdate not in commands and install not in commands
+    assert not (mono / ".git" / "hooks" / "pre-commit").exists()
+
+
+# Covers F-0004.R1, F-0004.R9 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_reserved_names_are_only_the_ones_that_collide() -> None:
+    """ADR-0029 fitness (C8): `app`, `api` and `domain` were refused for every project."""
+    for package in ("app", "api", "domain"):
+        with pytest.raises(ValueError, match="package"):
+            Config(name="x", package=package, llm=False)  # a service: hexagonal layers
+        adopted = Config(name="x", package=package, llm=False, adopted=True, layout="flat")
+        assert adopted.package == package
+        assert valid_package(package, adopted=True) and not valid_package(package)
+    assert Config(name="x", package="domain", llm=False, kind="library").layout == "flat"
+    with pytest.raises(ValueError, match="package"):
+        Config(name="x", package="api", llm=False, kind="service", layout="flat")  # api/http.py
+    with pytest.raises(ValueError, match="package"):
+        Config(
+            name="x", package="app", llm=False, kind="cli", layout="layered", layers=("app", "x")
+        )
+    # An adopted project keeps its spelling; it is still an identifier and not a keyword.
+    camel = Config(name="x", package="MyPkg", llm=False, adopted=True, layout="flat")
+    assert camel.package == "MyPkg"
+    for package in ("class", "My-Pkg", "1pkg", "", "pkg.sub"):
+        assert not valid_package(package, adopted=True)
+        with pytest.raises(ValueError, match="package"):
+            Config(name="x", package=package, llm=False, adopted=True, layout="flat")
+    # A package at the root named like a directory the harness writes into is still refused.
+    with pytest.raises(ValueError, match="scripts"):
+        Config(name="x", package="scripts", llm=False, adopted=True, layout="flat", src=".")
+
+
+# Covers F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_adoption_configures_only_what_is_on_disk(tmp_path: Path) -> None:
+    """ADR-0029 fitness (C7): layers, an evals entry and a package that were never written."""
+    from rumbo.scaffold import find_package, missing_modules
+
+    root = _legacy(tmp_path / "flat", LEGACY_PYPROJECT, "legacy_app/__init__.py")
+    flat = _at_root(_adopted(tests_dir="tests"))
+    assert missing_modules(flat, root) == []
+    hexagonal = _at_root(_adopted(tests_dir="tests", layout="hexagonal"))
+    assert missing_modules(hexagonal, root) == [
+        "legacy_app/api/",
+        "legacy_app/adapters/",
+        "legacy_app/app/",
+        "legacy_app/domain/",
+    ]
+    before = _files(root)
+    with pytest.raises(ValueError, match=r"legacy_app/api/, legacy_app/adapters/"):
+        scaffold(hexagonal, root)
+    llm = _at_root(_adopted(tests_dir="tests", llm=True))
+    assert "legacy_app/app/entrypoint.py" in missing_modules(llm, root)
+    data = _at_root(_adopted(tests_dir="tests", kind="data"))
+    assert missing_modules(data, root) == ["legacy_app/pipeline.py"]
+    with pytest.raises(ValueError, match=r"legacy_app/pipeline\.py"):
+        scaffold(data, root)
+    # A package that is not there at all.
+    with pytest.raises(ValueError, match="src/legacy_app"):
+        scaffold(_adopted(tests_dir="tests"), root)
+    assert _files(root) == before
+    # With the modules on disk the same configuration is accepted.
+    (root / "legacy_app" / "pipeline.py").write_text("def run(x):\n    return x\n", "utf-8")
+    assert missing_modules(data, root) == []
+    scaffold(data, root)
+    assert "evals" in _tool(root)["rumbo"]["checks"]
+
+    # The package is found with the spelling it has on disk.
+    camel = _legacy(tmp_path / "camel", LEGACY_PYPROJECT, "MyPkg/__init__.py")
+    assert find_package(camel, "mypkg") == (".", "MyPkg")
+    assert find_package(camel, "MyPkg") == (".", "MyPkg")
+    assert find_package(camel, "other") is None
+    under = _legacy(tmp_path / "under", LEGACY_PYPROJECT, "src/legacy_app/__init__.py")
+    assert find_package(under, "legacy_app") == ("src", "legacy_app")
+
+
+# Covers F-0004.R8, F-0004.R10 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_a_pyproject_without_a_build_system_is_said_not_fixed(tmp_path: Path) -> None:
+    """ADR-0029 fitness (C7): without `[build-system]` uv does not install the package."""
+    root = _legacy(tmp_path / "none", LEGACY_PYPROJECT, "legacy_app/__init__.py", "tests/t.py")
+    report = scaffold(_at_root(_adopted(tests_dir="tests")), root)
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "build-system" not in data and "hatch" not in data["tool"]
+    warning = next(w for w in report.warnings if "[build-system]" in w)
+    assert "not installed" in warning and 'packages = ["legacy_app"]' in warning
+    backend = (
+        '\n[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n'
+    )
+    built = _legacy(tmp_path / "built", LEGACY_PYPROJECT + backend, "legacy_app/__init__.py")
+    report = scaffold(_at_root(_adopted(tests_dir="tests")), built)
+    assert not [w for w in report.warnings if "[build-system]" in w]
+
+
+def test_requirements_that_pyproject_does_not_declare_are_said_not_copied(tmp_path: Path) -> None:
+    """A project that keeps its dependencies in requirements.txt was adopted in silence with
+    `dependencies = []`: its tests could not import them on day one."""
+    cfg = _at_root(_adopted(tests_dir="tests"))
+    root = _legacy(tmp_path / "req", LEGACY_PYPROJECT, "legacy_app/__init__.py", "tests/t.py")
+    (root / "requirements.txt").write_text("flask\n", encoding="utf-8")
+    (root / "requirements-dev.txt").write_text("pytest\n", encoding="utf-8")
+    report = scaffold(cfg, root)
+    warning = next(w for w in report.warnings if "requirements" in w)
+    assert "requirements-dev.txt, requirements.txt found" in warning
+    assert "`uv add -r requirements-dev.txt`" in warning
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert data["project"]["dependencies"] == []  # said, not copied
+    # Dependencies that pyproject.toml already declares: nothing to say.
+    declared = LEGACY_PYPROJECT.replace("dependencies = []", 'dependencies = ["flask"]')
+    other = _legacy(tmp_path / "ok", declared, "legacy_app/__init__.py", "tests/t.py")
+    (other / "requirements.txt").write_text("flask\n", encoding="utf-8")
+    assert not [w for w in scaffold(cfg, other).warnings if "requirements" in w]
+
+
+# Covers F-0004.R10, F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_what_the_project_already_had_is_decided_once_at_adoption(tmp_path: Path) -> None:
+    """ADR-0029 fitness (C9): RUMBO's own ci.yml and infra/ counted as the project's, so their
+    drift and their deletion went unreported."""
+    from rumbo.scaffold import config_for
+
+    cfg = _at_root(_adopted(tests_dir="tests", kind="service", layout="flat"))
+    root = _legacy(tmp_path / "bare", LEGACY_PYPROJECT, "legacy_app/__init__.py", "tests/t.py")
+    report = scaffold(cfg, root)
+    ci = root / ".github" / "workflows" / "ci.yml"
+    dockerfile = root / "infra" / "Dockerfile"
+    assert ci.is_file() and dockerfile.is_file() and report.notes == []
+    rumbo = _tool(root)["rumbo"]
+    assert (rumbo["own_ci"], rumbo["own_infra"]) == (False, False)
+    # Later commands read the decision: they do not look at the files RUMBO wrote itself.
+    stored = config_for(Project.load(root), root)
+    assert (stored.own_ci, stored.own_infra) == (False, False)
+    ci.write_text(ci.read_text(encoding="utf-8") + "# drift\n", encoding="utf-8")
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    differs = update(Project.load(root), root).differs
+    assert ".github/workflows/ci.yml" in differs and "infra/Dockerfile" in differs
+    ci.unlink()
+    assert ".github/workflows/ci.yml" in plan_files(stored, root)
+    assert ".github/workflows/ci.yml (missing)" in update(Project.load(root), root).differs
+    report = scaffold(cfg, root)  # the command again: ci.yml comes back, with no note
+    assert ci.is_file() and report.notes == []
+
+    # A project with its own workflow and its own infra/: recorded, and still true later.
+    own = _legacy(
+        tmp_path / "own",
+        LEGACY_PYPROJECT,
+        "legacy_app/__init__.py",
+        "tests/t.py",
+        ".github/workflows/build.yml",
+        "infra/k8s.yaml",
+    )
+    report = scaffold(cfg, own)
+    rumbo = _tool(own)["rumbo"]
+    assert (rumbo["own_ci"], rumbo["own_infra"]) == (True, True)
+    assert report.notes == [CI_STEPS_NOTE]
+    assert not (own / ".github" / "workflows" / "ci.yml").exists()
+    assert not (own / "infra" / "Dockerfile").exists()
+    (own / ".github" / "workflows" / "build.yml").unlink()  # the human removes their workflow
+    stored = config_for(Project.load(own), own)
+    assert ".github/workflows/ci.yml" not in plan_files(stored, own)
+    assert not [rel for rel in plan_files(stored, own) if rel.startswith("infra/")]
+
+    # Adopted before the keys existed: the names decide, and `update` writes the keys once.
+    for project in (root, own):
+        pyproject = project / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        pyproject.write_text(re.sub(r"(?m)^own_(ci|infra) = .*\n", "", text), encoding="utf-8")
+    (own / ".github" / "workflows" / "build.yml").write_text("name: build\n", encoding="utf-8")
+    assert "own_ci" not in _tool(root)["rumbo"]
+    older = config_for(Project.load(root), root)
+    assert (older.own_ci, older.own_infra) == (False, False)  # only RUMBO's own file names
+    older = config_for(Project.load(own), own)
+    assert (older.own_ci, older.own_infra) == (True, True)  # build.yml; infra/ has no Dockerfile
+    assert "pyproject.toml (+own_ci, own_infra)" in update(Project.load(own), own).merged
+    assert (_tool(own)["rumbo"]["own_ci"], _tool(own)["rumbo"]["own_infra"]) == (True, True)
+    assert not update(Project.load(own), own).merged
+
+
+# Covers F-0004.R11 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_update_follows_the_tests_directory_and_finds_the_version_key(tmp_path: Path) -> None:
+    """ADR-0029 fitness (C10): `tests/architecture/` was hard-coded, and an array before
+    `version` hid the key from the regular expression that rewrote it."""
+    from rumbo.scaffold import is_harness_file
+
+    assert is_harness_file("tests/architecture/test_architecture.py")
+    assert is_harness_file("test/architecture/test_architecture.py", "test")
+    assert not is_harness_file("tests/architecture/test_architecture.py", "test")
+    root = _legacy(tmp_path, LEGACY_PYPROJECT, "src/legacy_app/__init__.py", "test/test_x.py")
+    scaffold(_adopted(), root)
+    arch = root / "test" / "architecture" / "test_architecture.py"
+    arch.write_text(arch.read_text(encoding="utf-8") + "# mine\n", encoding="utf-8")
+    assert "test/architecture/test_architecture.py" in update(Project.load(root), root).differs
+
+    pyproject = root / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+    current = f'version = "{__version__}"\n'
+    assert text.count(current) == 1
+    arrays = 'agent_env = ["MY_AGENT"]\nagent_authors = [\n    "bot@example.com",\n]\n'
+    text = (
+        text.replace(current, "")
+        .replace("[tool.rumbo]\n", "[tool.rumbo]\n" + arrays, 1)
+        .replace("adopted = true\n", 'adopted = true\nversion = "0.0.1"  # the harness\n', 1)
+    )
+    pyproject.write_text(text, encoding="utf-8")
+    assert Project.load(root).harness_version == "0.0.1"
+    report = update(Project.load(root), root)
+    assert Project.load(root).harness_version == __version__
+    assert f'version = "{__version__}"  # the harness\n' in pyproject.read_text(encoding="utf-8")
+    assert tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"] == "0.1.0"
+    assert not [w for w in report.warnings if "version" in w]
+    # A spelling it cannot rewrite is reported, not skipped in silence.
+    text = pyproject.read_text(encoding="utf-8")
+    pyproject.write_text(
+        text.replace(f'version = "{__version__}"  # the harness', "version = '''0.0.1'''"),
+        encoding="utf-8",
+    )
+    report = update(Project.load(root), root)
+    assert Project.load(root).harness_version == "0.0.1"
+    assert any("[tool.rumbo].version" in w and __version__ in w for w in report.warnings)
+
+
+# Covers F-0004.R11, F-0004.R13 (specs/0004-mount-adopt-update-and-promote-the-harness.md).
+def test_update_reports_steps_and_aliases_that_differ_from_the_template(
+    simple_project: Path,
+) -> None:
+    """A rigor raised later keeps the `test` step of the old level and a Makefile without the
+    new aliases: `update` says so and rewrites neither."""
+    assert update(Project.load(simple_project), simple_project).drift == []
+    pyproject = simple_project / "pyproject.toml"
+    original = pyproject.read_text(encoding="utf-8")
+    makefile = (simple_project / "Makefile").read_bytes()
+    try:
+        pyproject.write_text(set_rigor(original, "mvp"), encoding="utf-8")
+        report = update(Project.load(simple_project), simple_project)
+        assert any(item.startswith("differs from the template: test ") for item in report.drift)
+        assert not [item for item in report.drift if "template: lint" in item]
+        assert any("Makefile" in item and "security" in item for item in report.drift)
+        assert "differs from the template: test" in report.summary()
+        assert _tool(simple_project)["rumbo"]["checks"]["test"] == "uv run pytest"
+        assert (simple_project / "Makefile").read_bytes() == makefile
+    finally:
+        pyproject.write_text(original, encoding="utf-8")
+
+
+def test_agents_md_leaves_rumbo_decision_to_the_human() -> None:
+    """`rumbo decision` records a decision as the human and is no longer pre-approved for an
+    agent: the agent proposes the text, the human runs the command."""
+    for cfg in (Config(name="x", package="x", llm=False), _adopted()):
+        agents = str(plan_files(cfg)["AGENTS.md"])
+        lines = [line for line in agents.splitlines() if "rumbo decision" in line]
+        assert len(lines) == 2
+        assert all("propose" in line.lower() and "human" in line for line in lines)
+        assert "log `rumbo decision" not in agents and len(agents.splitlines()) < 100
+    settings = plan_files(Config(name="x", package="x", llm=False))[".claude/settings.json"]
+    assert isinstance(settings, Path)
+    allowed = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert "Bash(rumbo decision *)" not in allowed

@@ -1,6 +1,13 @@
 # ADR-0013: `rumbo init --adopt` mounts the harness on an existing project; strict checks apply to changed files
 Status: accepted    Date: 2026-11-07
 
+Refined by later decisions; the rest stands. `{changed}` also holds the files that
+are staged and not committed (`git diff --name-only --diff-filter=ACMR HEAD`); plain
+`git diff` missed the index. An adopted project's `security` step names `{changed}`
+too, and its `[tool.bandit]` keeps the environment, the tests, `spikes/` and
+`scripts/` out (ADR-0029): the sentence "`security*` [is] unchanged" no longer holds.
+`{changed}` never holds a path under `spikes/` (ADR-0020).
+
 ## Context
 `rumbo init` already respects existing files and merges `pyproject.toml` and `.gitignore`, but
 it still generates the `src/` and `tests/` skeleton a real project does not need, and the
@@ -92,7 +99,7 @@ and not run, `--full`. `tests/test_cli.py`: `rumbo init --adopt --yes` on a tmp 
 package, a `test/` directory and an existing workflow; `rumbo check --full` passes through.
 The e2e script adopts a small pre-existing project and requires the runner, `rumbo doctor` and
 `rumbo gate G4 --no-run` to pass. The repository's own `pyproject.toml` carries `[tool.rumbo]`
-with `kind = "cli"`, `layout = "flat"`, and `tests/test_fitness.py` asserts `rumbo doctor` passes
+with `kind = "cli"`, `layout = "flat"`, and `tests/test_self_adoption.py::test_rumbo_doctor_passes_on_the_repository_itself` asserts `rumbo doctor` passes
 on the repository itself.
 
 ## Reversibility: high

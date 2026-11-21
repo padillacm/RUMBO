@@ -39,7 +39,7 @@ def _text(plan: dict[str, str | Path], path: str) -> str:
 def test_llm_skeleton_is_async(cfg: Config) -> None:
     plan = plan_files(cfg)
     pkg = f"src/{cfg.package}"
-    assert "async def __call__(self, prompt: str" in _text(plan, f"{pkg}/app/ports.py")
+    assert "async def __call__(\n        self, prompt: str" in _text(plan, f"{pkg}/app/ports.py")
     entrypoint = _text(plan, f"{pkg}/app/entrypoint.py")
     assert "async def answer(request" in entrypoint and "return await _answer(" in entrypoint
     telemetry = _text(plan, f"{pkg}/app/telemetry.py")
@@ -62,13 +62,19 @@ def test_claude_code_adapter_is_an_asyncio_subprocess() -> None:
     adapter = _text(plan, "src/y/adapters/claude_code.py")
     assert "async def complete(" in adapter
     assert "await asyncio.create_subprocess_exec(" in adapter
-    assert "asyncio.wait_for(proc.communicate(), timeout_s)" in adapter
+    # The prompt is written to stdin (never an argument), under the caller's time limit:
+    # `asyncio.wait` returns at the limit even when the pipe of a shim's child stays open.
+    assert 'asyncio.ensure_future(proc.communicate(prompt.encode("utf-8")))' in adapter
+    assert "await asyncio.wait({answer}, timeout=limit)" in adapter
     assert "import subprocess" not in adapter  # no blocking call left
     assert adapter.index("require_live(") < adapter.index("shutil.which(")  # offline guard first
     assert "def parse_result(stdout: str, *, max_chars: int) -> str:" in adapter
-    assert "async def complete(prompt: str, *, max_tokens: int = 1024) -> str:" in _text(
-        plan_files(ANTHROPIC), "src/x/adapters/llm.py"
-    )
+    # Every adapter takes the port's `timeout_s` (the stub wraps at its indentation).
+    assert (
+        "    async def complete(\n"
+        "        prompt: str, *, max_tokens: int = 1024, timeout_s: float | None = None\n"
+        "    ) -> str:\n"
+    ) in _text(plan_files(ANTHROPIC), "src/x/adapters/llm.py")
     tests = _text(plan, "tests/unit/test_claude_code_adapter.py")
     assert "create_subprocess_exec" in tests and "asyncio.run(complete(" in tests
 

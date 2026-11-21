@@ -1,6 +1,14 @@
 # ADR-0009: A fix lane in ANCLA, recognised by commit types and held to its own gate rules
 Status: accepted    Date: 2026-11-07
 
+Refined on 2026-11-21 (second audit, findings T4 and T12); the lane and its rules
+stand. Detection reads `git log --no-merges`: a `git merge main` into the branch does
+not move a fix out of the fix lane. The size and the regression-test rule count the
+files git tracks since the merge base and also the files not yet added to it, paths
+relative to the project (a project may be one directory of its repository), and
+exclude lockfiles at any depth. The dependency rule compares `[project].dependencies`
+of the working tree with the merge base, not of HEAD.
+
 ## Context
 Every change goes through the full ANCLA loop: read the spec, tests that cite `F-NNNN.Rk`, two
 approval pauses, gate G4. spec-kit, BMAD and GSD show what happens when a five-line bug costs the

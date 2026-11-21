@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rumbo.project import is_template, numbered_documents
+from rumbo.project import NotUTF8, is_template, numbered_documents, read_utf8
 from rumbo.trace import trace, uncovered
 
 # Tolerant of hand-written entries: em dash, en dash or hyphen, extra spaces, CRLF.
@@ -34,6 +34,7 @@ CLOSED = re.compile(r"^(F-\d{4}) closed\b", re.I)
 SIGNED = re.compile(r"^(G[1-5]) signed\b", re.I)
 SESSIONS = re.compile(r"(\d+)\s*sessions?", re.I)
 CONVENTIONAL = re.compile(r"^(feat|fix|refactor|test|docs|chore|ci|build|perf|style)(\(|!|:)")
+MAX_DAYS = 36500  # a century: beyond it the window is a typing mistake, and `date` overflows
 
 
 @dataclass
@@ -94,10 +95,28 @@ def parse_decisions(text: str) -> list[Decision]:
     return decisions
 
 
+def _text(path: Path) -> str:
+    """The text of a file; "" when it is missing or not UTF-8, which counts as nothing."""
+    try:
+        return read_utf8(path) if path.is_file() else ""
+    except (NotUTF8, OSError):
+        return ""
+
+
+def _complete(spec: Path) -> bool:
+    """The human removed the template mark; a spec that is not UTF-8 counts as nothing."""
+    try:
+        return not is_template(read_utf8(spec))
+    except (NotUTF8, OSError):
+        return False
+
+
 def _commits(root: Path, since: dt.date) -> list[str]:
+    # The first instant of the day, as for the decisions: git reads a bare date as "that day at
+    # the current time of day" and would leave out the morning of the first day.
     try:
         proc = subprocess.run(
-            ["git", "log", f"--since={since.isoformat()}", "--format=%s%n%b%x00"],
+            ["git", "log", f"--since={since.isoformat()}T00:00:00", "--format=%s%n%b%x00"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -119,8 +138,8 @@ def _latest_eval(root: Path) -> dict[str, Any] | None:
         return None
     latest = max(reports, key=lambda p: p.stat().st_mtime)
     try:
-        data = json.loads(latest.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        data = json.loads(read_utf8(latest))
+    except (ValueError, OSError):  # not JSON, not UTF-8 (PowerShell 5 writes UTF-16 with `>`)
         return None
     if not isinstance(data, dict):
         return None
@@ -131,36 +150,54 @@ def _latest_eval(root: Path) -> dict[str, Any] | None:
     return summary
 
 
-def eval_cases(root: Path) -> int:
-    """Dataset cases that are not tagged 'example'; malformed or non-object lines are skipped."""
+def dataset_cases(root: Path) -> tuple[int, list[str]]:
+    """(real cases, datasets with a line that is not UTF-8) of `evals/datasets/*.jsonl`.
+
+    A case is a JSON object with an `input` (what `evals/run_evals.py` runs) that is not tagged
+    `example`; anything else on a line is skipped and counts as nothing.
+    """
     folder = root / "evals" / "datasets"
     count = 0
-    for file in folder.glob("*.jsonl") if folder.is_dir() else []:
-        for line in file.read_text(encoding="utf-8").splitlines():
+    unreadable: list[str] = []
+    for file in sorted(folder.glob("*.jsonl")) if folder.is_dir() else []:
+        try:
+            lines = file.read_bytes().splitlines()
+        except OSError:
+            continue
+        for raw in lines:
             try:
-                case = json.loads(line) if line.strip() else None
-            except json.JSONDecodeError:
-                case = None
-            if isinstance(case, dict) and "example" not in case.get("tags", []):
+                case = json.loads(raw.decode("utf-8-sig")) if raw.strip() else None
+            except UnicodeDecodeError:
+                if file.name not in unreadable:
+                    unreadable.append(file.name)
+                continue
+            except ValueError:
+                continue
+            if not isinstance(case, dict) or "input" not in case:
+                continue
+            tags = case.get("tags")
+            if not (isinstance(tags, list) and "example" in tags):
                 count += 1
-    return count
+    return count, unreadable
+
+
+def eval_cases(root: Path) -> int:
+    """Dataset cases that are not tagged 'example'; see `dataset_cases` for what a case is."""
+    return dataset_cases(root)[0]
 
 
 def collect(root: Path, days: int = 30, today: dt.date | None = None) -> Metrics:
+    if not 0 <= days <= MAX_DAYS:
+        raise ValueError(f"--days must be between 0 and {MAX_DAYS}, got {days}")
     today = today or dt.date.today()
     since = today - dt.timedelta(days=days)
     m = Metrics(days=days)
 
     specs = numbered_documents(root / "specs")
     m.specs_total = len(specs)
-    m.specs_complete = sum(not is_template(s.read_text(encoding="utf-8")) for s in specs)
+    m.specs_complete = sum(_complete(spec) for spec in specs)
 
-    decisions_text = (
-        (root / "docs" / "decisions.md").read_text(encoding="utf-8")
-        if (root / "docs" / "decisions.md").is_file()
-        else ""
-    )
-    for d in parse_decisions(decisions_text):
+    for d in parse_decisions(_text(root / "docs" / "decisions.md")):
         if closed := CLOSED.match(d.title):
             m.specs_closed.append(closed.group(1).upper())
             if sessions := SESSIONS.search(d.why):
