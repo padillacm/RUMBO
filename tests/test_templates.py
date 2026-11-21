@@ -439,7 +439,8 @@ def test_production_switch_is_set_where_the_product_is_deployed_and_documented(n
         assert "RUMBO_LIVE" not in plan.get(f".github/workflows/{workflow}", "")
     assert "RUMBO_LIVE" not in plan["pyproject.toml"] and "RUMBO_LIVE" not in plan["Makefile"]
     if not cfg.llm:  # only the runner of a data pipeline names it: to remove it
-        named = [rel for rel, text in plan.items() if "RUMBO_LIVE" in text]
+        # RUMBO.md is the method manual, the same text for every project: it explains the switch.
+        named = [rel for rel, text in plan.items() if "RUMBO_LIVE" in text and rel != "RUMBO.md"]
         assert named == (["evals/run_evals.py"] if cfg.evals else [])
         return
     assert (

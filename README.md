@@ -113,17 +113,19 @@ rumbo init --yes --name "XM Agent" --package xm_agent \
 | `--provider` | `anthropic`, `openai`, `google`, `mistral`, `claude-code` (the Claude Code CLI with your own login: no API key anywhere), `other` (with `--sdk-package`, `--sdk-module`, `--sdk-env-key`) |
 | `--rigor` | `prototype`, `mvp`, `production` (scales the check, the dev dependencies, CI, nightly, Dependabot and the gates; `rumbo promote` moves up) |
 | `--types` | `pyright` (default) or `mypy`: the dev tool, the `types` step and the `[tool.pyright]`/`[tool.mypy]` section follow it; the inner layer is strict under both (`ty` when it leaves preview) |
-| `--python` | minimum Python the project promises (`3.11` by default, up to the newest rumbo supports); feeds `requires-python`, ruff's `target-version`, the CI matrix, the Dockerfile and `.python-version` |
+| `--python` | minimum Python the project promises (`3.11` by default, up to the newest rumbo supports; in a directory that already has a `pyproject.toml` or a `.python-version`, the lowest supported version they allow, and a `--python` below it is refused); feeds `requires-python`, ruff's `target-version`, the CI matrix, the Dockerfile and `.python-version` |
 | `--no-install` | write files only; skip `uv add` and pre-commit |
 | `--adopt` | existing project: detect package, kind, layout and tests directory; harness only (no skeleton); strict checks on changed files (`{changed}`), `--full` for the whole tree |
-| `--force` | overwrite existing files (keeps `.bak` copies). `pyproject.toml` and `.gitignore` are always merged, never replaced |
+| `--force` | overwrite existing files that differ from the template (each gets a `.bak` copy; an earlier `.bak` is never overwritten). `pyproject.toml` and `.gitignore` are always merged, never replaced |
 
 In an existing project use `rumbo init --adopt`: it detects the package (from `[project].name`
 or the single top-level package), the kind (`[project.scripts]` → cli, a web framework
 dependency → service, else library), the layout, the tests directory (`tests` or `test`) and
 where the package lives (under `src/` or at the root, kept in `[tool.rumbo].src`, ADR-0020),
 writes the harness without the `src/` and tests skeleton, keeps an existing CI workflow and
-prints the two steps to add, and writes `lint`, `format` and `types` with `{changed}` so the
+prints the two steps to add, leaves an existing pytest configuration,
+`.claude/settings.json` and `.pre-commit-config.yaml` as they are and prints what to add
+to them, refuses to configure what is not on disk (ADR-0029), and writes `lint`, `format` and `types` with `{changed}` so the
 strict tools run on the files a change touches; `uv run python scripts/rumbo_check.py --full`
 (or `rumbo check --full`) measures the whole tree and the nightly runs it. Nothing is
 overwritten: the missing `[tool.*]` sections are merged into `pyproject.toml`, missing lines
@@ -173,9 +175,10 @@ one approval), `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`, `/rumbo-tour`.
 
 ```bash
 rumbo init [--yes ...]               # mount the harness (RUMBO.md Part A); see the table above
-rumbo update [--diff]                # refresh framework-owned files; --diff previews and writes nothing
+rumbo update [--diff]                # refresh framework-owned files; --diff previews and writes nothing;
+                                     # a harness newer than the CLI is refused (--allow-downgrade)
 rumbo promote mvp|production [--no-install]           # raise the rigor: deps, checks table, nightly, Dependabot
-rumbo doctor                         # structure complete, AGENTS.md ≤ 100 lines, harness up to date
+rumbo doctor                         # structure complete, guard wired, AGENTS.md ≤ 100 lines, harness up to date
 rumbo new adr|spec|postmortem "T"    # docs/adr/0001-t.md · specs/0001-t.md · docs/postmortems/<date>-t.md
 rumbo decision "title" --why "..." [--who human|ci]   # append to docs/decisions.md
 rumbo gate G1|G2|G3|G4|G5 [--no-run] # automatic checks (by rigor) + the human checklist; exit 1 on failure
@@ -197,12 +200,16 @@ harness, offline, in the order of the `[tool.rumbo.checks]` table in `pyproject.
 name steps to run a subset (`... rumbo_check.py lint types`), add `--brief` so only the failing
 tail reaches the agent (full log in `.rumbo-check.log`), `--full` to expand `{changed}` to the
 whole tree in an adopted project. Exit codes: 0 green, 1 a verification
-failed, 3 the environment is broken. The `Makefile` keeps optional one-line aliases (`make check`,
-`make check-brief`, `make lint`, `make types`, `make test`, `make arch`, `make security`,
-`make sensor`, `make evals`) and the targets `make fmt`, `make review`, `make evals-live`,
+failed, 3 the environment is broken. A step is red only when its tool ran and judged the
+code: a crash, a missing script or a tool that cannot start (`uv run` exits 1 when it cannot
+build the environment) is exit 3 (ADR-0018, ADR-0022). The `Makefile` keeps optional one-line
+aliases (`make check`, `make check-brief`, `make lint`, `make types`, `make test`, `make arch`,
+`make sensor`, `make evals`, and `make security` from mvp on) and the targets `make fmt`, `make review`, `make evals-live`,
 `make mutation`, `make sbom`, `make hooks`, `make rumbo ARGS="..."`. The Makefile uses a locally installed `rumbo`
 when there is one and `uvx` otherwise (`RUMBO=... make review` overrides it); `BASE` is
-`origin/main` when it exists, else `main` (`make review BASE=develop` overrides it).
+`origin/main` when it exists, else `main` (`make review BASE=develop` overrides it). The
+runner's own `{base}` is the first that exists of `origin/main`, `origin/master`,
+`origin/HEAD`, `main` and `master`.
 
 ## What `rumbo init` generates
 
@@ -218,13 +225,17 @@ when there is one and `uvx` otherwise (`RUMBO=... make review` overrides it); `B
 - `scripts/check_tests_not_weakened.py`: fails when tests or files are deleted, assertions drop
   (`assert`, `pytest.raises`, unittest and mock assertions; helpers inside the tests directory are
   resolved, so extracting an assertion helper passes; the directory is `[tool.rumbo].tests`),
-  always-true asserts or skip markers appear, or `parametrize` lists shrink, unless a human
-  approves it (`[tests-change-approved]` in a human-authored commit, or the PR label).
+  always-true asserts or skips appear (in a test, a fixture or a `conftest.py` hook), or
+  `parametrize` lists shrink, unless a human approves it (`[tests-change-approved]` in a
+  human-authored commit, or the PR label). A test that stays in the file but pytest never
+  runs counts as deleted, an assert that cannot fail counts zero, and its settings are read
+  from the base, not from the change under test (ADR-0026, ADR-0027).
 - `evals/` (LLM products): JSONL datasets, deterministic graders (numeric with tolerance,
   field equality, tool arguments, abstention), an LLM judge that counts only after calibration
   against human labels (`evals/calibration/`), and `run_evals.py` with pass@1 and pass^k and
-  bounded concurrency (`--concurrency N`; sync and async entries alike) and a fingerprint of
-  the prompts and the judge in every report: a live run records it in
+  bounded concurrency (`--concurrency N`; sync and async entries alike; graders may take the
+  case input and be coroutines, ADR-0030) and a fingerprint of
+  the prompts and the judge in every report: a full live run that passes records it in
   `evals/fingerprint.json`, and an offline run warns when fixtures or calibration may be
   stale (ADR-0016),
   offline unless `--live`.
@@ -233,7 +244,8 @@ when there is one and `uvx` otherwise (`RUMBO=... make review` overrides it); `B
   OpenTelemetry GenAI attribute names and cost, logged as JSON, no dependency); the runbook and
   SLO templates carry the matching entries.
 - CI with actions pinned by SHA, a full-history gitleaks scan, the sensor, pre-commit on all
-  files (mvp+) and an SBOM from `uv.lock` (production); a nightly with mutation testing and
+  files (mvp+; on the changed files when the project was adopted) and an SBOM from `uv.lock`
+  (production); a nightly with the dependency audit, mutation testing (production) and
   live evals in a protected environment, the only place a model credential lives. A PR template
   with the ANCLA checklist and `CODEOWNERS` for the harness files; Dependabot with a cooldown.
 - Templates: brief, PRD, ADR (MADR + fitness function), EARS spec with data contracts, C4,
@@ -248,12 +260,19 @@ Rules are prose until a hook enforces them. The generated `.claude/settings.json
 the harness commands (the check runner, pytest, ruff, read-only git) and wires
 `scripts/rumbo_guard.py` as Claude Code hooks:
 
-- **Before every `Edit`/`Write`/`Bash` call** it blocks edits to the Makefile, `pyproject.toml`
-  (`uv add` may change its dependency tables and nothing else, ADR-0019), CI, `infra/`, the
-  pre-commit config, the sensors and `.env`;
-  removing a template mark; writing `[tests-change-approved]`; `--no-verify`; force pushes;
-  `git reset --hard`; disabling git hooks; `rm -rf` on the root; shell redirections into
+- **Before every `Edit`/`Write` call and every shell command** (the `Bash` and `PowerShell`
+  tools) it blocks edits to the Makefile, `pyproject.toml`
+  (`uv add` may change its dependency tables and nothing else, ADR-0019), the files that
+  shadow it (`ruff.toml`, `pytest.ini`, `mypy.ini`, `pyrightconfig.json` and the like,
+  ADR-0023), CI, `infra/`, `.git/`, the pre-commit config, the sensors and `.env`;
+  removing a template mark, or creating a numbered ADR or spec without it; writing
+  `[tests-change-approved]`; `--no-verify`; force pushes;
+  `git reset --hard`; disabling git hooks, also through `git -c` or the environment;
+  `verify-dep --index`; `rm -rf` on the root; shell redirections into
   protected files. The reason reaches the agent, which has to ask you.
+- **After every shell command** it reports protected files that changed, even when the
+  command committed them without the `pre-commit` hook: the guard remembers `HEAD`
+  (ADR-0024).
 - **On `Stop`**, if Python, TOML or JSONL files changed since the last commit, it runs
   `scripts/rumbo_check.py --brief` and refuses to finish while it is red. If the environment is
   broken (exit 3: a tool could not even start) it tells the agent to report to you instead of
@@ -297,8 +316,8 @@ make the same rules binding on GitHub.
 | | prototype | mvp | production |
 |---|---|---|---|
 | the check | lint, types, test, arch (+evals) | + security, coverage report | same (coverage is informational: mutation testing is the sensor) |
-| CI | check + sensor + gitleaks | + pre-commit on all files | + SBOM (CycloneDX from uv.lock) |
-| Nightly | — | mutation (+ live evals) | mutation + live evals with k=3 |
+| CI | check + sensor + gitleaks | + pre-commit (all files; the changed files when adopted) | + SBOM (CycloneDX from uv.lock) |
+| Nightly | — | dependency audit (+ live evals) | + mutation, live evals with k=3 |
 | Dependabot | — | weekly, 7-day cooldown | same |
 | Gates | PRD, threat model, C4, runbook optional; 20 real eval cases | all required; 50 cases; budget + telemetry wired | + fitness function per ADR, nightly, SBOM, every requirement traced to a test; 100 cases |
 
@@ -307,7 +326,9 @@ is in `RUMBO.md`, Part E "Scaling the rigor".
 
 ## Security by design
 
-- The check never needs a model credential; the real model runs only in the nightly
+- The check never needs a model credential: the model is unreachable unless
+  `RUMBO_EVALS_LIVE=1` or `RUMBO_LIVE=1` (the production switch, ADR-0031) is set. In CI
+  the real model runs only in the nightly
   `evals-live` job, in a GitHub environment you protect with required reviewers. With the
   `claude-code` provider no API key exists on any machine.
 - Secrets: gitleaks over the full history in CI (the pre-commit hook only sees staged files),
@@ -315,7 +336,10 @@ is in `RUMBO.md`, Part E "Scaling the rigor".
 - Supply chain: `rumbo verify-dep` before adding a package (existence and versions on the
   index the project installs from, `--index` or `UV_INDEX_URL`/`UV_DEFAULT_INDEX`/
   `PIP_INDEX_URL`, with credentials never printed and never sent over plain `http` unless the
-  index is on this machine; age, repository, typosquatting against
+  index is on this machine, nor to another host through a redirect or a proxy (put them in
+  the user part of the URL, `https://USER:TOKEN@HOST/simple/`: a token in the path is
+  printed; ADR-0028). An answer that is not a package page is "verify by hand", never
+  "exists". Age, repository, typosquatting against
   popular names and OSV measured against PyPI and labelled so), `pip-audit` and `bandit`
   in the check,
   lockfile, Dependabot with cooldown, actions pinned by SHA, SBOM in production.
