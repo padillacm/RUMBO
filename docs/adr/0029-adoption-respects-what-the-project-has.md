@@ -1,5 +1,5 @@
 # ADR-0029: Adoption respects what the project already has, and never destroys what the human wrote
-Status: proposed    Date: 2026-11-20
+Status: accepted    Date: 2026-11-20
 
 Completes ADR-0013 (adopting an existing project) and ADR-0020 (adoption follows the layout the
 project has); narrows one sentence of ADR-0011 and one of ADR-0014. All four stand.

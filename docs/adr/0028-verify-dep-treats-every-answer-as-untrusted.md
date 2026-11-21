@@ -1,5 +1,5 @@
 # ADR-0028: `verify-dep` treats every answer as untrusted and sends credentials only to the index it was given
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0014 (`verify-dep` honours a private index). ADR-0014 stands.
 

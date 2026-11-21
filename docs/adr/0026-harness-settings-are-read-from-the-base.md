@@ -1,5 +1,5 @@
 # ADR-0026: Harness settings are read from the base, not from the tree under test
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0007 (the tests directory), ADR-0021 (`agent_authors`, `agent_env`) and ADR-0019
 (pyproject.toml is protected). All three stand.

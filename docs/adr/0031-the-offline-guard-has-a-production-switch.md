@@ -1,5 +1,5 @@
 # ADR-0031: The offline guard has a production switch
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0003 (the check is offline; a model credential lives only in the nightly job).
 ADR-0003 stands: the check never reaches the network and offline remains the default.

@@ -1,5 +1,5 @@
 # ADR-0032: G3 and G5 read the project's workflows, and one supported Python is enough when it is the newest
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0010 (what each kind has in operation), ADR-0013 (adoption) and ADR-0014 (the
 minimum Python). They stand.

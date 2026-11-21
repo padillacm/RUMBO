@@ -1,5 +1,5 @@
 # ADR-0030: Graders receive the case and may be asynchronous
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0012 (the LLM skeleton is async-first). ADR-0012 stands: it made the port, the
 entry point and the adapters asynchronous and left grading synchronous on purpose, because the

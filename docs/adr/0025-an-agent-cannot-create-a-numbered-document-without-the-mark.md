@@ -1,5 +1,5 @@
 # ADR-0025: An agent cannot create a numbered ADR or spec without the template mark
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0017 (a signed ADR or spec is read-only for the agent). ADR-0017 stands; its
 sentence "new documents stay editable" is narrowed here, and spec F-0001 (R7, R14, R15) with it.

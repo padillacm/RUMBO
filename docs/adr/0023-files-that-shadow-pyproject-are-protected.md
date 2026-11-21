@@ -1,5 +1,5 @@
 # ADR-0023: The files that shadow `pyproject.toml` and the Makefile are protected, and so is `.git/`
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0005 (the hard rules as hooks) and ADR-0019 (`pyproject.toml` is protected except
 its dependency tables). Both stand; spec F-0001 (R1, R3, R4, R7) needs the wider list.

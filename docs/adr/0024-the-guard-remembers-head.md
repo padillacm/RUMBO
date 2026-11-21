@@ -1,5 +1,5 @@
 # ADR-0024: The guard remembers HEAD: a commit that skipped the hook is judged afterwards, and Stop verifies committed code
-Status: proposed    Date: 2026-11-16
+Status: accepted    Date: 2026-11-16
 
 Completes ADR-0005 (the hard rules as hooks), ADR-0006 (the runner at Stop) and ADR-0008 (the
 guard as a git hook). All three stand; spec F-0001 (R4, R5) needs the new behaviour.

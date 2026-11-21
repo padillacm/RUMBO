@@ -1,5 +1,5 @@
 # ADR-0027: What counts as a test that runs
-Status: proposed    Date: 2026-11-21
+Status: accepted    Date: 2026-11-21
 
 Completes ADR-0007 (what counts as an assertion). ADR-0007 stands: its counted forms and its
 helper resolution are unchanged; this ADR says which functions are inventoried, which changes of

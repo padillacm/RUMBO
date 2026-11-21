@@ -1,5 +1,5 @@
 # ADR-0022: A step is red only when its tool ran and judged the code
-Status: proposed    Date: 2026-11-21
+Status: accepted    Date: 2026-11-21
 
 Refines ADR-0018 (a tool that ran and refused the code is red). It supersedes nothing: the
 probe of ADR-0018 stays the rule for every exit code other than `0` and `1`. The sentences of
