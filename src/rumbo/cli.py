@@ -29,7 +29,6 @@ import ipaddress
 import json
 import os
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -54,9 +53,12 @@ from rumbo.project import (
     RIGOR_LEVELS,
     SUPPORTED_PYTHONS,
     TYPE_CHECKERS,
+    GitMissing,
     Project,
+    normalize_name,
     read_utf8,
     rigor_rank,
+    run_git,
     slug,
 )
 from rumbo.scaffold import (
@@ -489,7 +491,10 @@ def cmd_gate(args: argparse.Namespace) -> int:
         project = Project.load(Path(args.dir).resolve())
     except (FileNotFoundError, ValueError) as exc:
         return _err(str(exc))
-    gate, results = evaluate(args.code, project, run=not args.no_run)
+    try:
+        gate, results = evaluate(args.code, project, run=not args.no_run)
+    except GitMissing as exc:
+        return _err(str(exc))
     text, ok = report(gate, results, project)
     print(text)
     return 0 if ok else 1
@@ -502,15 +507,7 @@ def _declared_human(root: Path) -> bool:
     The human declares it; `rumbo init` does it only for a human at a terminal (ADR-0021).
     """
     try:
-        proc = subprocess.run(
-            ["git", "config", "--get", "rumbo.human"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        proc = run_git(["config", "--get", "rumbo.human"], root)
     except FileNotFoundError:
         return False
     return proc.returncode == 0 and proc.stdout.strip() == "true"
@@ -646,11 +643,6 @@ def _levenshtein(a: str, b: str) -> int:
             cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
         prev = cur
     return prev[-1]
-
-
-def _normalize(name: str) -> str:
-    """PEP 503 normalisation: lowercase, runs of `-`, `_` and `.` collapsed to one dash."""
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 # ADR-0028: every answer is untrusted, and credentials go only to the index they were given for.
@@ -1083,13 +1075,17 @@ def _page_from_files(
     return SimplePage(versions, frozenset(v for v in versions if live.get(v) is False))
 
 
+def _parse_version(version: str) -> re.Match[str] | None:
+    return _VERSION_RE.fullmatch(version.strip()) if len(version) <= _VERSION_MAX else None
+
+
 def _version_key(version: str) -> tuple[Any, ...]:
     """The order of PEP 440: epoch, release, then dev < a < b < rc < final < post, then local.
 
     Written from the PEP (no dependency, ADR-0001), for what an index really lists: epochs,
     post-releases, dev and pre-releases with numeric counters, local versions.
     """
-    match = _VERSION_RE.fullmatch(version.strip()) if len(version) <= _VERSION_MAX else None
+    match = _parse_version(version)
     if match is None:
         return (0, 0, (), (0, 0), 0, (0, 0), (), version)
     release = [int(number) for number in match["release"].split(".")]
@@ -1112,7 +1108,7 @@ def _version_key(version: str) -> tuple[Any, ...]:
 
 def _is_prerelease(version: str) -> bool:
     """A PEP 440 pre-release or development release: what an installer skips unless asked."""
-    match = _VERSION_RE.fullmatch(version.strip()) if len(version) <= _VERSION_MAX else None
+    match = _parse_version(version)
     return match is not None and (match["pre"] is not None or match["dev"] is not None)
 
 
@@ -1192,7 +1188,7 @@ def index_page(index: str, name: str) -> SimplePage | None:
         raise ValueError(INDEX_NOT_HTTP)
     if parts.username is not None and parts.scheme == "http" and not _is_loopback(parts.hostname):
         raise ValueError("refusing to send the index credentials over plain http; use https")
-    segment = urllib.parse.quote(_normalize(name), safe="")
+    segment = urllib.parse.quote(normalize_name(name), safe="")
     url = _index_base(index).rstrip("/") + "/" + segment + "/"
     request = urllib.request.Request(  # noqa: S310 - http(s), checked above
         url, headers={"Accept": f"{SIMPLE_JSON}, text/html;q=0.1"}
@@ -1238,7 +1234,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def _lookalikes(name: str) -> list[str]:
-    normalized = _normalize(name)
+    normalized = normalize_name(name)
     return [p for p in POPULAR_PACKAGES if p != normalized and _levenshtein(normalized, p) <= 2]
 
 
@@ -1331,7 +1327,7 @@ def _verify_on_pypi(name: str, on_index: bool) -> int:
     print(f"   on PyPI: {headline}{label}" if on_index else f"📦 {headline}")
     print(f"   first release: {first or '?'} ({age if age is not None else '?'} days ago){label}")
     print(f"   repository: {repo or '(not declared)'}  ·  releases: {len(releases)}{label}")
-    if _normalize(canonical) != _normalize(name):
+    if normalize_name(canonical) != normalize_name(name):
         warnings.append(f"the canonical name is {shown!r}")
     if age is not None and age < 90:
         warnings.append("younger than 90 days: review with care")
@@ -1395,7 +1391,10 @@ def cmd_verify_dep(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------------- tour
 def cmd_tour(args: argparse.Namespace) -> int:
     root = Path(args.dir).resolve()
-    base = resolve_base(args.base, root)
+    try:
+        base = resolve_base(args.base, root)
+    except GitMissing as exc:
+        return _err(str(exc))
     if base is None:
         return _err(
             f"base {args.base!r} is not a known ref and none of the defaults (origin/main, main, "
@@ -1753,7 +1752,8 @@ def build_parser() -> argparse.ArgumentParser:
         "base",
         nargs="?",
         default="origin/main",
-        help="base ref (default: origin/main, falling back to origin/master, main, master)",
+        help="base ref (default: origin/main, falling back to origin/master, origin/HEAD, main, "
+        "master)",
     )
     p.add_argument("--head", default="HEAD", help="head ref (default: HEAD)")
     p.add_argument("--since", help="previous head of the same series, for git range-diff")

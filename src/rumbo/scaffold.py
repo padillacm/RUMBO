@@ -34,6 +34,7 @@ from rumbo.project import (
     package_path,
     read_utf8,
     resolve_layout,
+    run_git,
     validate_axes,
     validate_python,
     validate_src,
@@ -1344,10 +1345,16 @@ def update(project: Project, dest: Path, allow_downgrade: bool = False) -> Repor
     pyproject = dest / "pyproject.toml"
     template = _content(plan["pyproject.toml"])
     _add_checks_table(pyproject, template, report)
-    _add_missing_steps(pyproject, template, report)
+    # ADR-0011: a rigor raised by hand (or by `rumbo promote`) brings new steps; they go at the
+    # end of the table in template order, with the template's command.
+    steps = {key: json.dumps(command) for key, command in _rendered_checks(template).items()}
+    _add_rumbo_keys(pyproject, steps, report, checks=True)
     _add_axes_keys(pyproject, cfg, report)
-    _add_python_key(pyproject, cfg, report)
-    _add_src_key(pyproject, cfg, report)
+    # ADR-0014: `Project.load` defaulted `python` to 3.11; writing it makes the promise explicit.
+    _add_rumbo_keys(pyproject, {"python": f'"{cfg.python}"'}, report)
+    # ADR-0020: `Project.load` defaulted `src` to "src"; `config_for` looked once at where an
+    # adopted project keeps its package. Writing it makes that the stored fact.
+    _add_rumbo_keys(pyproject, {"src": f'"{cfg.src}"'}, report)
     if cfg.adopted:  # ADR-0029: what the project had is recorded once, like `src`
         own = {"own_ci": cfg.own_ci, "own_infra": cfg.own_infra}
         _add_rumbo_keys(pyproject, {k: "true" if v else "false" for k, v in own.items()}, report)
@@ -1437,33 +1444,6 @@ def check_steps(cfg: Config) -> list[str]:
     return list(_rendered_checks(_content(plan_files(cfg)["pyproject.toml"])))
 
 
-def _add_missing_steps(pyproject: Path, template: str, report: Report) -> None:
-    """Appends to ``[tool.rumbo.checks]`` the steps of the current rigor it lacks (ADR-0011).
-
-    A rigor raised by hand (or by `rumbo promote`) brings new steps; they go at the end of the
-    table in template order, with the template's command. Existing steps are never replaced
-    or removed: the table stays in the human's hands.
-    """
-    current = read_utf8(pyproject, "pyproject.toml")
-    try:
-        rumbo = tomllib.loads(current).get("tool", {}).get("rumbo")
-    except tomllib.TOMLDecodeError:
-        return
-    header = _CHECKS_HEADER_RE.search(current)
-    if not isinstance(rumbo, dict) or not isinstance(rumbo.get("checks"), dict) or header is None:
-        return
-    wanted = _rendered_checks(template)
-    missing = [key for key in wanted if key not in rumbo["checks"]]
-    if not missing:
-        return
-    head, body, tail = _table_block(current, header)
-    added = "".join(f"{key} = {json.dumps(wanted[key])}\n" for key in missing)
-    merged = head + body + added + ("\n" + tail if tail else "")
-    tomllib.loads(merged)  # raises if the result is not valid TOML
-    _write_text(pyproject, merged)
-    report.merged.append(f"pyproject.toml (+checks: {', '.join(missing)})")
-
-
 _RUMBO_HEADER = re.compile(r"(?m)^\[tool\.rumbo\][ \t]*(?:#[^\n]*)?\n")
 
 
@@ -1503,23 +1483,6 @@ def _add_axes_keys(pyproject: Path, cfg: Config, report: Report) -> None:
     _add_rumbo_keys(pyproject, wanted, report)
 
 
-def _add_python_key(pyproject: Path, cfg: Config, report: Report) -> None:
-    """Writes the `python` key a project generated before ADR-0014 lacks.
-
-    `Project.load` defaulted it to 3.11; writing it makes the promise explicit.
-    """
-    _add_rumbo_keys(pyproject, {"python": f'"{cfg.python}"'}, report)
-
-
-def _add_src_key(pyproject: Path, cfg: Config, report: Report) -> None:
-    """Writes the `src` key a project generated before ADR-0020 lacks.
-
-    `Project.load` defaulted it to "src"; `config_for` looked once at where an adopted
-    project keeps its package. Writing it makes that the stored fact.
-    """
-    _add_rumbo_keys(pyproject, {"src": f'"{cfg.src}"'}, report)
-
-
 def _rumbo_table(pyproject: Path) -> dict[str, object]:
     """The `[tool.rumbo]` table of a pyproject; empty when missing or unreadable."""
     try:
@@ -1552,20 +1515,26 @@ def config_for(project: Project, dest: Path) -> Config:
     return with_adoption_state(cfg, dest)
 
 
-def _add_rumbo_keys(pyproject: Path, wanted: dict[str, str], report: Report) -> None:
-    """Appends the `[tool.rumbo]` keys of `wanted` (name -> TOML value) that are missing.
+def _add_rumbo_keys(
+    pyproject: Path, wanted: dict[str, str], report: Report, checks: bool = False
+) -> None:
+    """Appends the keys of `wanted` (name -> TOML value) that `[tool.rumbo]`, or with `checks`
+    its `[tool.rumbo.checks]`, lacks, at the end of that table and in the order of `wanted`.
 
-    Keys that exist are never touched; nothing is written when none is missing.
+    Keys that exist are never replaced or removed: the table stays in the human's hands.
+    Nothing is written when none is missing.
     """
     current = read_utf8(pyproject, "pyproject.toml")
     try:
-        rumbo = tomllib.loads(current).get("tool", {}).get("rumbo")
+        table = tomllib.loads(current).get("tool", {}).get("rumbo")
     except tomllib.TOMLDecodeError:
         return
-    header = _RUMBO_HEADER.search(current)
-    if not isinstance(rumbo, dict) or header is None:
+    if checks and isinstance(table, dict):
+        table = table.get("checks")
+    header = (_CHECKS_HEADER_RE if checks else _RUMBO_HEADER).search(current)
+    if not isinstance(table, dict) or header is None:
         return
-    missing = [key for key in wanted if key not in rumbo]
+    missing = [key for key in wanted if key not in table]
     if not missing:
         return
     head, body, tail = _table_block(current, header)
@@ -1573,7 +1542,7 @@ def _add_rumbo_keys(pyproject: Path, wanted: dict[str, str], report: Report) -> 
     merged = head + body + added + ("\n" + tail if tail else "")
     tomllib.loads(merged)  # raises if the result is not valid TOML
     _write_text(pyproject, merged)
-    report.merged.append(f"pyproject.toml (+{', '.join(missing)})")
+    report.merged.append(f"pyproject.toml (+{'checks: ' if checks else ''}{', '.join(missing)})")
 
 
 def update_diff(project: Project, dest: Path) -> str:
@@ -2100,15 +2069,7 @@ def git_prefix(root: Path) -> str | None:
     repository is in one too (ADR-0029).
     """
     try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "--is-inside-work-tree", "--show-prefix"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        proc = run_git(["rev-parse", "--is-inside-work-tree", "--show-prefix"], root)
     except OSError:  # no git, or `root` is not a directory
         return None
     lines = proc.stdout.splitlines()

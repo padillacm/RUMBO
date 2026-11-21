@@ -978,6 +978,29 @@ def test_an_unparseable_or_new_pyproject_is_a_protected_change(
     assert guard.pyproject_change(repo, staged=True) == []
 
 
+# Covers F-0001.R4, F-0001.R7 and F-0001.R9 (specs/0001-the-agent-cannot-cheat-its-way-to-green.md).
+def test_a_pyproject_with_a_byte_order_mark_is_read_like_any_other(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PowerShell 5 writes UTF-8 with a byte order mark, which tomllib refuses: the runner
+    accepts it, and so must the guard, or `uv add` would read as a protected change."""
+    bom = "﻿"
+    assert guard._pyproject_tables(bom + PYPROJECT_HEAD, bom + UV_ADD) == []
+    pyproject = _commit_pyproject(repo, bom + PYPROJECT_HEAD)
+    pyproject.write_text(bom + UV_ADD, encoding="utf-8")
+    assert guard.pyproject_change(repo, staged=False) == []
+    assert guard.check_post_bash(repo) is None
+    monkeypatch.setenv("CLAUDECODE", "1")
+    _git(repo, "add", "-A")
+    assert guard.pyproject_change(repo, staged=True) == []
+    assert guard.check_pre_commit(repo) is None
+    old, new = OUTSIDE["tool.ruff"]
+    pyproject.write_text(bom + UV_ADD.replace(old, new), encoding="utf-8")
+    assert guard.pyproject_change(repo, staged=False) == ["tool.ruff"]
+    _commit_pyproject(repo, bom + '[tool.rumbo]\nagent_env = ["MY_AGENT"]\n')
+    assert guard.agent_env_names(repo) == ("MY_AGENT",)
+
+
 # ------------------------------------------- the audit before v0.4.1 (G1..G16, V6, P2)
 def _hook(
     monkeypatch: pytest.MonkeyPatch,

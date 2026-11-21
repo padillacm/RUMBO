@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -237,6 +239,35 @@ class Project:
         """The pure layer (strict types, mutation target, purity contract); '' when flat."""
         names = self.layer_names
         return names[-1] if names else ""
+
+
+def normalize_name(name: str) -> str:
+    """PEP 503 normalisation: lowercase, runs of `-`, `_` and `.` collapsed to one dash."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+class GitMissing(RuntimeError):
+    """git could not be started (not installed, or not on PATH): one line for the human."""
+
+    def __init__(self, exc: OSError) -> None:
+        super().__init__(f"cannot run git ({exc.strerror or exc}); is it installed and on PATH?")
+
+
+def run_git(args: Sequence[str], root: Path) -> subprocess.CompletedProcess[str]:
+    """`git <args>` in `root`, its output as text (UTF-8, what does not decode is replaced).
+
+    A failing git is a return code, never an exception; a missing git (or a `root` that is not
+    a directory) raises OSError, and each caller decides what that means.
+    """
+    return subprocess.run(  # noqa: S603 - fixed program, arguments from the callers' code
+        ["git", *args],  # noqa: S607 - git from PATH, as every git hook and the sensors do
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
 
 def tests_dir(root: Path) -> str:

@@ -315,15 +315,8 @@ def resolve_base(explicit: str | None, root: Path) -> str:
     if explicit:
         return explicit
     for candidate in DEFAULT_BASES:
-        try:
-            probe = subprocess.run(
-                ["git", "rev-parse", "--verify", "-q", f"{candidate}^{{commit}}"],
-                cwd=root,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                check=False,
-            )
-        except OSError:
+        probe = _git(["rev-parse", "--verify", "-q", f"{candidate}^{{commit}}"], root)
+        if probe is None:
             break
         if probe.returncode == 0:
             return candidate
@@ -336,15 +329,20 @@ class Changed:
     note: str = ""  # "no git base: whole tree" when git could not tell
 
 
-def _git_paths(args: list[str], root: Path) -> list[str] | None:
-    """NUL-separated paths printed by ``git <args>`` in ``root``; None when git fails."""
+def _git(args: list[str], root: Path) -> subprocess.CompletedProcess[bytes] | None:
+    """``git <args>`` in ``root``, its output as bytes; None when git cannot be started."""
     try:
-        done = subprocess.run(
+        return subprocess.run(
             ["git", *args], cwd=root, stdin=subprocess.DEVNULL, capture_output=True, check=False
         )
     except OSError:
         return None
-    if done.returncode != 0:
+
+
+def _git_paths(args: list[str], root: Path) -> list[str] | None:
+    """NUL-separated paths printed by ``git <args>`` in ``root``; None when git fails."""
+    done = _git(args, root)
+    if done is None or done.returncode != 0:
         return None
     return [os.fsdecode(raw) for raw in done.stdout.split(b"\0") if raw]
 
@@ -359,17 +357,8 @@ def resolve_changed(base: str, root: Path, full: bool) -> Changed:
     if full:
         return Changed([WHOLE_TREE])
     fallback = Changed([WHOLE_TREE], "no git base: whole tree")
-    try:
-        merge_base = subprocess.run(
-            ["git", "merge-base", base, "HEAD"],
-            cwd=root,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            check=False,
-        )
-    except OSError:
-        return fallback
-    if merge_base.returncode != 0:
+    merge_base = _git(["merge-base", base, "HEAD"], root)
+    if merge_base is None or merge_base.returncode != 0:
         return fallback
     diff = ["diff", "-z", "--relative", "--name-only", "--diff-filter=ACMR"]
     queries = [
@@ -719,7 +708,7 @@ def _env_exit(argv: list[str], code: int) -> str | None:
     prefix, tool = _split_tool(argv)
     if tool is None:
         return None
-    name = Path(tool).name.lower().removesuffix(".exe")
+    name = _launcher_name(tool)
     arguments = argv[len(prefix) + 1 :]
     keys = [f"{name} {arguments[0]}", name] if arguments else [name]
     return next((ENV_EXITS[key][code] for key in keys if code in ENV_EXITS.get(key, {})), None)

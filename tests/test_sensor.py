@@ -2418,6 +2418,20 @@ def test_an_agent_identity_of_the_base_cannot_be_dropped_by_the_change(
     assert sensor.agent_authors(repo, base)[-2:] == ("devin@bots", "robo")
 
 
+# Covers F-0003.R1 and F-0003.R13 (specs/0003-tests-cannot-be-weakened-unnoticed.md).
+def test_a_pyproject_with_a_byte_order_mark_is_read_like_any_other(repo: Path) -> None:
+    """PowerShell 5 writes UTF-8 with a byte order mark, which tomllib refuses: the settings of
+    such a file are read, from the base and from the working tree, not silently dropped."""
+    bom = "﻿"
+    assert sensor._setting(bom + PYPROJECT + 'tests = "spec"\n', "tests") == "spec"
+    listed = bom + PYPROJECT + 'tests = "spec"\nagent_authors = ["devin@bots"]\n'
+    base = _snapshot(repo, {"pyproject.toml": listed, "spec/test_x.py": STRONG})
+    assert sensor.tests_directory(repo) == "spec"
+    assert sensor.tests_directories(repo, base) == ["spec"]
+    assert sensor.agent_authors(repo)[-1] == "devin@bots"
+    assert sensor.agent_authors(repo, base)[-1] == "devin@bots"
+
+
 # Covers F-0003.R7 (specs/0003-tests-cannot-be-weakened-unnoticed.md).
 def test_a_conftest_above_the_tests_directory_is_inventoried(
     repo: Path, capsys: pytest.CaptureFixture[str]

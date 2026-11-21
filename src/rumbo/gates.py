@@ -21,14 +21,18 @@ from rumbo.metrics import dataset_cases
 from rumbo.project import (
     NOT_UTF8,
     SUPPORTED_PYTHONS,
+    GitMissing,
     NotUTF8,
     Project,
     is_template,
     normalise_tests_dir,
+    normalize_name,
     numbered_documents,
     prose,
+    run_git,
     section,
 )
+from rumbo.sensors.check import DEFAULT_BASES
 from rumbo.trace import trace, uncovered
 
 MAX_DIFF_LINES = 300
@@ -36,8 +40,7 @@ FIX_MAX_DIFF_LINES = 150  # ADR-0009: the fix lane allows half the normal diff
 # ADR-0009: a PR is in the fix lane when every commit since the merge base has one of these
 # types and none carries the breaking marker `!` before the colon.
 FIX_TYPES = re.compile(r"^(fix|test|refactor|chore|docs|ci|perf|style|build)(\([^)]*\))?:")
-# The candidates of the runner and of the anti-cheat sensor (their DEFAULT_BASES), in order.
-BASES = ("origin/main", "origin/master", "origin/HEAD", "main", "master")
+BASES = DEFAULT_BASES  # the base candidates of the runner and of the anti-cheat sensor
 CHECK_ENV = 3  # scripts/rumbo_check.py: the verification environment is broken (ADR-0006)
 TAIL_LINES = 20  # of the output of the runner and of the sensor, in the detail of a G4 check
 TAIL_STDOUT = 15  # of them, the end of standard output: where the verdict is
@@ -75,6 +78,11 @@ class Result:
     description: str
     ok: bool | None
     detail: str = ""
+
+
+def _required(ok: bool, required: bool) -> bool | None:
+    """A check that is not required where the project stands is a warning (None), not a fail."""
+    return ok if required else (ok or None)
 
 
 Check = Callable[[Project, bool], list[Result]]
@@ -124,16 +132,16 @@ def _read(p: Project, rel: str) -> tuple[str | None, str]:
 def _doc(p: Project, rel: str, label: str, required: bool = True) -> Result:
     text, problem = _read(p, rel)
     if problem:
-        return Result(f"{label} complete", False if required else None, problem)
+        return Result(f"{label} complete", _required(False, required), problem)
     if text is None:
-        return Result(f"{label} exists", False if required else None, f"missing {rel}")
+        return Result(f"{label} exists", _required(False, required), f"missing {rel}")
     detail = ""
     if not text.strip():
         detail = f"{rel} is empty"
     elif is_template(text):
         detail = f"{rel} still has the template mark on its first line"
     complete = not detail
-    return Result(f"{label} complete", complete if required else (complete or None), detail)
+    return Result(f"{label} complete", _required(complete, required), detail)
 
 
 # ------------------------------------------------- what the human wrote, what the template had
@@ -265,7 +273,7 @@ def _g2(p: Project, _run: bool) -> list[Result]:
         results.append(
             Result(
                 f"{rel}: data contracts and file ownership",
-                contracts if p.at_least("production") else (contracts or None),
+                _required(contracts, p.at_least("production")),
                 "fill 'Data contracts and ownership' (types, signatures, owned files) before "
                 "splitting the work across sessions",
             )
@@ -380,7 +388,7 @@ def _g3(p: Project, _run: bool) -> list[Result]:
         results.append(
             Result(
                 f"{rel}: fitness function",
-                has_fitness if p.at_least("production") else (has_fitness or None),
+                _required(has_fitness, p.at_least("production")),
                 "section is empty (required in production; recommended before)",
             )
         )
@@ -392,7 +400,7 @@ def _g3(p: Project, _run: bool) -> list[Result]:
         results.append(
             Result(
                 "ADR 'workflow vs. agent'",
-                workflow_adr if p.at_least("mvp") else (workflow_adr or None),
+                _required(workflow_adr, p.at_least("mvp")),
                 "no ADR whose title mentions both 'workflow' and 'agent'",
             )
         )
@@ -403,7 +411,7 @@ def _g3(p: Project, _run: bool) -> list[Result]:
     results.append(
         Result(
             "threat model: lethal trifecta assessed",
-            trifecta if tm_required else (trifecta or None),
+            _required(trifecta, tm_required),
             detail,
         )
     )
@@ -412,7 +420,7 @@ def _g3(p: Project, _run: bool) -> list[Result]:
         results.append(
             Result(
                 "threat model: OWASP LLM/Agentic checklist filled",
-                owasp if tm_required else (owasp or None),
+                _required(owasp, tm_required),
                 detail,
             )
         )
@@ -427,7 +435,7 @@ def _g3(p: Project, _run: bool) -> list[Result]:
     results.append(
         Result(
             "C4 has Mermaid diagrams",
-            drawn if tm_required else (drawn or None),
+            _required(drawn, tm_required),
             problem
             or "two diagrams, with at least one line that is not the template's, in a document "
             "whose template mark was removed",
@@ -501,15 +509,10 @@ def _check_command(root: Path) -> list[str]:
 
 
 def _git(args: list[str], root: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-c", "core.quotepath=off", *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    try:
+        return run_git(["-c", "core.quotepath=off", *args], root)
+    except OSError as exc:
+        raise GitMissing(exc) from exc
 
 
 def _find_base(root: Path) -> tuple[str | None, str, bool]:
@@ -631,7 +634,7 @@ def _dependency_names(pyproject: str) -> set[str] | None:
     for dep in deps:
         match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", str(dep))
         if match:
-            names.add(re.sub(r"[-_.]+", "-", match.group(1)).lower())
+            names.add(normalize_name(match.group(1)))
     return names
 
 
@@ -699,7 +702,7 @@ def _coverage(p: Project) -> list[Result]:
     return [
         Result(
             "every spec requirement is referenced by a test or eval case",
-            (not missing) if p.at_least("production") else ((not missing) or None),
+            _required(not missing, p.at_least("production")),
             "; ".join(parts) + " (see 'rumbo trace')",
         )
     ]
@@ -767,7 +770,7 @@ def _dependency_updates(p: Project, ops: bool) -> Result:
     ).exists()
     return Result(
         "automatic dependency updates",
-        dependabot if ops else (dependabot or None),
+        _required(dependabot, ops),
         "no .github/dependabot.yml or renovate.json (not generated for prototype)",
     )
 
@@ -814,12 +817,12 @@ def _python_versions(p: Project, workflows: Workflows, ops: bool) -> Result:
         found = bool(workflows.texts)
         return Result(
             f"CI runs on Python {p.python}, the newest supported (one version is enough)",
-            found if ops else (found or None),
+            _required(found, ops),
             workflows.missing("runs on any Python"),
         )
     return Result(
         "CI runs on at least two Python versions",
-        (versions >= 2) if ops else ((versions >= 2) or None),
+        _required(versions >= 2, ops),
         f"found a matrix with {versions} 'python' entries in {best or WORKFLOWS + '/'}",
     )
 
@@ -831,7 +834,7 @@ def _g5_release(p: Project, ops: bool, workflows: Workflows) -> list[Result]:
     results = [
         Result(
             "CHANGELOG.md with an 'Unreleased' section",
-            unreleased if ops else (unreleased or None),
+            _required(unreleased, ops),
             problem
             or ("missing CHANGELOG.md" if changelog is None else "no '## [Unreleased]' heading"),
         )
@@ -842,7 +845,7 @@ def _g5_release(p: Project, ops: bool, workflows: Workflows) -> list[Result]:
     results.append(
         Result(
             "release workflow publishes with Trusted Publishing (no PyPI token secret)",
-            (trusted and no_secret) if ops else ((trusted and no_secret) or None),
+            _required(trusted and no_secret, ops),
             problem
             or (
                 "missing .github/workflows/release.yml"
@@ -869,16 +872,14 @@ def _g5(p: Project, _run: bool) -> list[Result]:
             results.append(_doc(p, "docs/ops/slos.md", "SLOs", required=ops))
         dockerfile = (p.root / "infra" / "Dockerfile").exists()
         # Recommended, never required, for a pipeline: it may run where no image is built.
-        results.append(
-            Result("Dockerfile in infra/", (dockerfile or None) if p.kind == "data" else dockerfile)
-        )
+        results.append(Result("Dockerfile in infra/", _required(dockerfile, p.kind != "data")))
     results.append(_dependency_updates(p, ops))
     if p.kind == "data":
         n, unreadable = _datasets(p)
         results.append(
             Result(
                 "datasets present in evals/datasets/",
-                (n > 0) if ops else ((n > 0) or None),
+                _required(n > 0, ops),
                 "no case beyond the examples (a case is an object with an 'input'; cases tagged "
                 f"'example' do not count){unreadable}",
             )
@@ -891,7 +892,7 @@ def _g5(p: Project, _run: bool) -> list[Result]:
         results.append(
             Result(
                 "per-request budget and GenAI telemetry wired into the entry point",
-                (instrumented and wired) if ops else ((instrumented and wired) or None),
+                _required(instrumented and wired, ops),
                 "app/budget.py + app/telemetry.py must exist and entrypoint.answer must open a "
                 "span and a Meter (see /rumbo-o)",
             )

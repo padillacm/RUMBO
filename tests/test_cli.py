@@ -2299,3 +2299,23 @@ def test_promote_says_what_differs_from_a_fresh_project_of_the_level(
     assert "--cov" in out and "security" in out.split("differs from the template: test")[1]
     assert _checks(simple_project)["test"] == "uv run pytest"
     assert (simple_project / "Makefile").read_bytes() == makefile
+
+
+# Covers F-0006.R2 (specs/0006-guided-review-of-a-change.md).
+def test_gate_and_tour_without_git_fail_with_one_line(
+    simple_project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A machine without the git executable: one `Error:` line and exit 2, never a traceback."""
+    real_run = subprocess.run
+
+    def no_git(cmd: list[str], *args: Any, **kwargs: Any) -> Any:
+        if cmd[0] == "git":
+            raise FileNotFoundError(2, "No such file or directory", "git")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", no_git)
+    root = str(simple_project)
+    for argv in (["gate", "G4", "--no-run"], ["tour"], ["tour", "main", "--head", "HEAD"]):
+        assert main([*argv, "--dir", root]) == 2, argv
+        err = capsys.readouterr().err
+        assert err.startswith("Error: ") and "git" in err and err.count("\n") == 1, (argv, err)

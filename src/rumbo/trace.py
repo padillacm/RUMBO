@@ -17,8 +17,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rumbo.project import NOT_UTF8, NotUTF8, numbered_documents, prose, read_utf8
-from rumbo.project import tests_dir as project_tests_dir
+from rumbo.project import NOT_UTF8, NotUTF8, numbered_documents, prose, read_utf8, tests_dir
 
 # `- R1 (event): text` or `- R1: text`; nested items such as `R1.1` are not requirements. The
 # parenthetical may contain colons and one level of parentheses; the bullet may be `*` or `+`
@@ -40,7 +39,6 @@ REQ_START = re.compile(_BULLET + r"(R\d+)(?!\w|\.\d)")
 HEADING = re.compile(r"^##\s+(.*)$")
 # One pattern for every mention: `F-0001.R10` is not a mention of `F-0001.R1`.
 MENTION = re.compile(r"(?<!\w)F-\d{4}\.R\d+(?!\w)")
-DEFAULT_TESTS_DIR = "tests"
 EVAL_GLOB = "evals/datasets/*.jsonl"
 MAX_PLACES_PER_FILE = 3
 NO_REQUIREMENTS = (
@@ -98,11 +96,6 @@ def requirements(spec: Path, name: str = "") -> list[Requirement]:
         elif start := REQ_START.match(line):
             found.append(Requirement(sid, start.group(1), line.strip(), [], True, where))
     return found
-
-
-def tests_dir(root: Path) -> str:
-    """`[tool.rumbo].tests` of the project in `root`; `tests` when its state cannot be read."""
-    return project_tests_dir(root)
 
 
 def trace(root: Path, tests: str | None = None) -> list[Requirement]:
