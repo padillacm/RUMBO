@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0027: What counts as a test that runs
 Status: proposed    Date: 2026-11-21
 

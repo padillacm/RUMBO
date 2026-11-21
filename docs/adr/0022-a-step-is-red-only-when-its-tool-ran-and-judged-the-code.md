@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0022: A step is red only when its tool ran and judged the code
 Status: proposed    Date: 2026-11-21
 

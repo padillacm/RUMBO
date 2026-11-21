@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0028: `verify-dep` treats every answer as untrusted and sends credentials only to the index it was given
 Status: proposed    Date: 2026-11-16
 

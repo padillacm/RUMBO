@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0026: Harness settings are read from the base, not from the tree under test
 Status: proposed    Date: 2026-11-16
 

@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0029: Adoption respects what the project already has, and never destroys what the human wrote
 Status: proposed    Date: 2026-11-20
 

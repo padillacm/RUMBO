@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0032: G3 and G5 read the project's workflows, and one supported Python is enough when it is the newest
 Status: proposed    Date: 2026-11-16
 

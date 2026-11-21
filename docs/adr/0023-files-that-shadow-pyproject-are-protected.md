@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0023: The files that shadow `pyproject.toml` and the Makefile are protected, and so is `.git/`
 Status: proposed    Date: 2026-11-16
 

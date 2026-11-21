@@ -1,4 +1,3 @@
-<!-- rumbo:template — delete this line when the document is complete. Only the HUMAN removes it; `rumbo gate` checks it. -->
 # ADR-0024: The guard remembers HEAD: a commit that skipped the hook is judged afterwards, and Stop verifies committed code
 Status: proposed    Date: 2026-11-16
 
