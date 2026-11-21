@@ -484,6 +484,46 @@ def test_verification_commands_use_the_runner_never_make() -> None:
         assert "make" not in guide
 
 
+# Covers F-0006.R7 (specs/0006-guided-review-of-a-change.md).
+def test_a_merge_commit_is_reverted_against_its_first_parent(tmp_path: Path) -> None:
+    """git refuses `git revert` of a merge without `-m`: the guide gave a command that failed."""
+    merge = _commit("Merge branch 'feature'", [CODE])
+    merge.merge = True
+    assert _verify(merge)[-1] == (
+        f"git revert --no-commit -m 1 {SHORT} && uv run python scripts/rumbo_check.py test; "
+        "git revert --abort"
+    )
+    # Read from git: a merge commit is known as one, an ordinary commit is not.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["config", "commit.gpgsign", "false"],
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True)
+    (repo / "a.py").write_text("a = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "chore: base"], cwd=repo, check=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "-qb", "feature"], cwd=repo, check=True)
+    (repo / "b.py").write_text("b = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "feat: b"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    (repo / "c.py").write_text("c = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "feat: c"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "-m", "Merge feature", "feature"], cwd=repo, check=True
+    )
+    loaded = {c.subject: c.merge for c in load_commits(base, "HEAD", repo)}
+    assert loaded == {"feat: b": False, "feat: c": False, "Merge feature": True}
+
+
 # Covers F-0006.R3 and F-0006.R7 (specs/0006-guided-review-of-a-change.md).
 def test_paths_and_refs_are_quoted_in_the_commands_the_reviewer_will_paste() -> None:
     """A file name is data from the branch under review: in a command it is one quoted word,

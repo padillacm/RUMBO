@@ -105,6 +105,7 @@ class Commit:
     author: str
     files: list[FileChange] = field(default_factory=list)
     weakening_hunks: list[str] = field(default_factory=list)
+    merge: bool = False  # more than one parent: reverted, like diffed, against the first
 
     @property
     def short(self) -> str:
@@ -250,9 +251,9 @@ def _weakened(patch: str, tests: set[str]) -> list[str]:
 
 
 def load_commits(base: str, head: str, root: Path) -> list[Commit]:
-    # Four fields per commit, each ended by NUL: no message can contain one, so no message
+    # Five fields per commit, each ended by NUL: no message can contain one, so no message
     # can hide its commit or shift the fields.
-    log = _git([*LOG, "--format=%H%x00%s%x00%b%x00%an%x00", f"{base}..{head}"], root)
+    log = _git([*LOG, "--format=%H%x00%s%x00%b%x00%an%x00%P%x00", f"{base}..{head}"], root)
     parts = log.split("\0")
     # The tests directory is the project's, seen from the top of the repository: the paths of
     # `git show` start there, and the project may be one directory of it.
@@ -260,9 +261,9 @@ def load_commits(base: str, head: str, root: Path) -> list[Commit]:
     tests_dir = prefix + project_tests_dir(root)
     commits: list[Commit] = []
     show = [*SHOW, *DIFF]
-    for i in range(0, len(parts) - 3, 4):
-        sha, subject, body, author = (part.strip() for part in parts[i : i + 4])
-        commit = Commit(sha, subject, body, author)
+    for i in range(0, len(parts) - 4, 5):
+        sha, subject, body, author, parents = (part.strip() for part in parts[i : i + 5])
+        commit = Commit(sha, subject, body, author, merge=len(parents.split()) > 1)
         named = _git([*show, "--name-status", "-z", sha], root).split("\0")
         pairs = zip(named[0::2], named[1::2], strict=False)  # status, path, …, and a last ""
         statuses = {path: status.strip()[:1] for status, path in pairs}
@@ -296,9 +297,11 @@ def _verify_commands(commit: Commit) -> list[str]:
     if commit.kind in ("behavioral", "structural", "mechanical"):
         cmds.append("uv run python scripts/rumbo_check.py")
     if commit.kind == "behavioral":
+        # git refuses to revert a merge without naming the parent it keeps (`-m 1`).
+        mainline = "-m 1 " if commit.merge else ""
         cmds.append(
-            f"git revert --no-commit {sha} && uv run python scripts/rumbo_check.py test; "
-            "git revert --abort"
+            f"git revert --no-commit {mainline}{sha} && uv run python scripts/rumbo_check.py "
+            "test; git revert --abort"
         )
     return cmds
 
