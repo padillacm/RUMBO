@@ -849,8 +849,9 @@ def _collect(
         tests[qualname] = TestInfo(asserts, constant, skips + skip_calls, cases, decorators)
 
     for stmt in module.tree.body:
-        is_function = isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef)
-        if is_function and stmt.name.startswith(TEST_PREFIX):
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef) and stmt.name.startswith(
+            TEST_PREFIX
+        ):
             add(stmt.name, module, stmt, None)
     for qualname, node in _collected_classes(module, resolver):
         owner = _Class(module, node)
@@ -942,11 +943,11 @@ def _review_flags(module: _Module, resolver: _Resolver) -> Counter[str]:
             and stmt.name.startswith(TEST_PREFIX)
         }
         flags.update(_scope_flags(node.body, own, set()))
-    for node in ast.walk(module.tree):
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
+    for walked in ast.walk(module.tree):
+        if isinstance(walked, ast.Assign):
+            targets, value = walked.targets, walked.value
+        elif isinstance(walked, ast.AnnAssign) and walked.value is not None:
+            targets, value = [walked.target], walked.value
         else:
             continue
         if isinstance(value, ast.Dict) or (isinstance(value, ast.Constant) and value.value):
