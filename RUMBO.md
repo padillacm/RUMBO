@@ -20,6 +20,10 @@
 > Guiding principle: AI amplifies the discipline that already exists; it does not replace it.
 > That is why the focus is on **executable verifiers** (tests, properties, types, architecture
 > contracts, evals) and not on prompts.
+>
+> ADR-NNNN numbers in this manual refer to RUMBO's own decisions, at
+> https://github.com/padillacm/RUMBO/tree/main/docs/adr; this project's ADRs are in its own
+> `docs/adr/`.
 
 ---
 
@@ -113,7 +117,7 @@ commit touches protected files, so the **human** makes it; from then on the hook
 ├── .github/dependabot.yml            # rigor mvp or production
 ├── .github/pull_request_template.md  # the G4 checklist, ticked by the human
 ├── .github/CODEOWNERS                # humans who review the harness files (placeholder handles)
-├── .claude/commands/rumbo-*.md       # /rumbo-r, -u, -m, -ancla, -review, -o, -gate, -tour
+├── .claude/commands/rumbo-*.md       # /rumbo-r, -u, -m, -ancla, -fix, -review, -o, -gate, -tour
 ├── .claude/settings.json             # permissions + hooks (scripts/rumbo_guard.py)
 ├── docs/
 │   ├── product/brief.md
@@ -244,7 +248,7 @@ format   = "uv run ruff format --check ."
 types    = "uv run pyright"
 test     = "uv run pytest --cov --cov-report=term-missing:skip-covered"   # no --cov in prototype
 arch     = "uv run lint-imports"
-security = "uv run bandit -q -r src evals"
+security = "uv run bandit -c pyproject.toml -q -r src evals"
 security-scripts = "uv run bandit -q -r scripts -s B404,B603,B607"
 audit    = "uv run pip-audit --skip-editable"
 evals    = "uv run python evals/run_evals.py --suite smoke"   # LLM products and data pipelines, offline
@@ -252,7 +256,7 @@ sensor   = "uv run python scripts/check_tests_not_weakened.py --base {base}"
 ```
 
 Steps run in this order: `lint`, `format`, `types`, `test`, `arch`, `security`,
-`security-scripts`, `audit`, `evals` (LLM products only), `sensor`. `uv run python
+`security-scripts`, `audit`, `evals` (LLM products and data pipelines), `sensor`. `uv run python
 scripts/rumbo_check.py` runs them all and stops at the first failure; `--keep-going` runs them
 all; a subset runs with `uv run python scripts/rumbo_check.py lint types`; `--brief` writes the
 output to `.rumbo-check.log` and prints one line, or only the failing tail (this is what the
@@ -279,7 +283,7 @@ and does not need `make`.
 **The check is offline**: it never needs a model credential. The model is reachable only when
 `RUMBO_EVALS_LIVE=1` (`make evals-live`, which loads `.env` when the file exists) or
 `RUMBO_LIVE=1` (the production switch, set in the service image; ADR-0031) is in the
-environment. Prototypes drop the security steps.
+environment. Prototypes drop the security and audit steps.
 
 ### A4. pre-commit
 
@@ -369,9 +373,9 @@ is the human's act, so the agent proposes the text and the human runs the comman
 The same script is also a **git hook** (ADR-0008), installed by `rumbo init` through
 pre-commit (`pre-commit` and `commit-msg`), so an agent running in Cursor, Codex, Cline or
 Roo Code meets the same rules when it commits. The actor is an agent when one of the
-environment markers in `[tool.rumbo].agent_env`, as committed in `HEAD` (ADR-0026), is set (default: `CLAUDECODE`, `GEMINI_CLI`,
-`CURSOR_AGENT`, `CODEX_SANDBOX_NETWORK_DISABLED`, `CODEX_THREAD_ID`, `CODEX_CI`, `ROO_ACTIVE`,
-`CLINE_ACTIVE`; each confirmed in the tool's source or documentation, ADR-0021), the human when `git config rumbo.human` is
+environment markers in `[tool.rumbo].agent_env`, as committed in `HEAD` (ADR-0026), is set (the
+default list covers Claude Code, Gemini CLI, Cursor, Codex, Roo Code and Cline, each marker
+confirmed in the tool's source or documentation, ADR-0021), the human when `git config rumbo.human` is
 `true` in the clone (`rumbo init` sets it only for a human at a terminal, never when an agent runs it; `rumbo doctor` warns when it is missing), and
 unknown otherwise, which counts as an agent. For an agent the hooks refuse a staged protected
 file, a staged document whose template mark is gone, and a commit message carrying
@@ -388,7 +392,7 @@ through the shell is reported after the command together with any removed mark, 
 hook refuses it. New documents and documents still under the mark stay editable; to change a
 signed one, propose it to the human or write a document that supersedes it.
 
-### A7. Evals skeleton (LLM products only)
+### A7. Evals skeleton (LLM products and data pipelines)
 
 `evals/run_evals.py`:
 
@@ -445,7 +449,7 @@ LLM flag; the generated file also has a "Commands" and a "Human compass" section
 - Architecture decisions: docs/adr/  (read them before any structural decision)
 - Layers: src/<pkg>/{domain,app,adapters,api}; contracts in pyproject.toml [tool.importlinter]
 - Security: docs/security/threat-model.md
-- Evals: evals/ (LLM products only)
+- Evals: evals/ (LLM products and data pipelines)
 
 ## Before declaring a task done
 uv run python scripts/rumbo_check.py   # must be green; paste the summarized output
@@ -478,7 +482,8 @@ Keep the file under ~100 lines (`rumbo doctor` checks it). It is a map, not a ma
 ## PART C — The RUMBO cycle (how we work after the harness)
 
 When the human says **"phase R"**, **"phase U"**, etc. (or uses `/rumbo-r`, `/rumbo-u`,
-`/rumbo-m`, `/rumbo-ancla`, `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`, `/rumbo-tour`), follow
+`/rumbo-m`, `/rumbo-ancla`, `/rumbo-fix`, `/rumbo-review`, `/rumbo-o`, `/rumbo-gate`,
+`/rumbo-tour`), follow
 the matching section. Every gate is evaluated with `rumbo gate G1..G5` (automatic checks scaled
 to the rigor + a checklist the human signs; the exit code never means "signed").
 

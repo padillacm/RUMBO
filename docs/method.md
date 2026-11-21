@@ -167,8 +167,8 @@ lint rule, contract) or a guide, in addition to fixing the code.
 
 **Rules are prose until a hook enforces them.** AGENTS.md says "never touch the Makefile" and
 "never remove the template mark"; nothing in a prompt guarantees it. RUMBO wires
-`scripts/rumbo_guard.py` (the guard hook) as Claude Code `PreToolUse` and `Stop` hooks
-(`RUMBO.md`, Part A, step A6): a blocked call returns the reason to the agent, which has to ask
+`scripts/rumbo_guard.py` (the guard hook) as Claude Code `PreToolUse`, `PostToolUse` and
+`Stop` hooks (`RUMBO.md`, Part A, step A6): a blocked call returns the reason to the agent, which has to ask
 the human. The hook never binds the human, who edits by hand or overrides it locally. The same
 script runs as git `pre-commit` and `commit-msg` hooks for any other agent (ADR-0008), deciding
 the actor from environment markers and a per-clone `rumbo.human` declaration. This is

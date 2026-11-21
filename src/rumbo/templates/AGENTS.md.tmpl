@@ -38,7 +38,7 @@ The full cycle (phases R·U·M·B·O, gates, templates) is in `RUMBO.md`.
 uv run python scripts/rumbo_check.py         # the WHOLE harness, offline: lint, types, tests{{#arch}}, architecture{{/arch}}{{#mvp_or_more}}, security{{/mvp_or_more}}{{#evals}}, smoke evals{{/evals}}
 uv run python scripts/rumbo_check.py --brief # same, but prints only the failing tail (keeps your context small); full log in .rumbo-check.log
 uv run python scripts/rumbo_check.py lint types   # a subset of the steps in [tool.rumbo.checks]
-uv run python scripts/rumbo_check.py sensor  # did I weaken any test relative to origin/main?
+uv run python scripts/rumbo_check.py sensor  # did I weaken any test? (vs origin/main, else origin/master, origin/HEAD, main, master)
 {{#adopted}}
 uv run python scripts/rumbo_check.py --full   # whole tree (legacy debt); CI and the hook check only what you changed
 {{/adopted}}
