@@ -659,6 +659,7 @@ HTTP_DEADLINE = 60.0  # seconds one whole request may take: connection, redirect
 MAX_BODY = 32 * 1024 * 1024  # bytes of one answer; the largest PyPI documents are a few MB
 SHOWN_MAX = 200  # characters of one piece of network text in a printed line
 _CHUNK = 64 * 1024
+_JOIN_SLICE = 0.2  # seconds the main thread waits at a time, so that Ctrl+C is not held back
 # C0, DEL and C1 controls (ESC, CR and LF among them), bidi marks and overrides, line and
 # paragraph separators, the BOM and lone surrogates (which `print` cannot encode).
 _UNPRINTABLE_RE = re.compile(
@@ -691,20 +692,45 @@ def _show(value: object, limit: int = SHOWN_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+_ODD_AUTHORITY_RE = re.compile(r"[@\\%\s\x00-\x1f\x7f]")
+
+
+def _host_port(parts: urllib.parse.SplitResult) -> str:
+    """`host[:port]` of a split URL, without user info; an IPv6 literal back in its brackets."""
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        port = ""
+    return f"{host}{port}"
+
+
 def _origin(url: str) -> tuple[str, str, int | None]:
-    """Scheme, host and port (the default one when none is written) of a URL."""
+    """Scheme, host and port (the default one when none is written) of a URL.
+
+    ValueError when the authority is not plainly `host[:port]`: user info, a backslash or a
+    percent escape there is where two readers of one URL stop agreeing on the host.
+    """
     parts = urllib.parse.urlsplit(url)
+    if not parts.hostname or _ODD_AUTHORITY_RE.search(parts.netloc):
+        raise ValueError("not a plain scheme://host[:port] URL")
     scheme = parts.scheme.lower()
     port = parts.port or {"http": 80, "https": 443}.get(scheme)
-    return scheme, (parts.hostname or "").lower(), port
+    return scheme, parts.hostname.lower(), port
 
 
 class _Redirects(urllib.request.HTTPRedirectHandler):
-    """Follows a redirect only where it cannot leak (ADR-0028).
+    """Follows a redirect, and lets the credentials go no further than their index (ADR-0028).
 
-    A request that carries credentials is redirected only inside its own scheme, host and port;
-    https is never left for plain http, credentials or not. urllib's own handler copies every
-    header to wherever the answer points. The messages are fixed text: the target is untrusted.
+    Indexes redirect by design (GitLab forwards a package it does not hold to pypi.org), so a
+    redirect to another scheme, host or port is followed, without the `Authorization` header:
+    urllib's own handler would copy it to wherever the answer points. It is put back only for a
+    redirect inside the same scheme, host and port, so once dropped it stays dropped, even when
+    a later hop returns to the index. Never followed, credentials or not: https to plain http,
+    a scheme that is not http(s), a target that cannot be read as `scheme://host[:port]`. The
+    messages are fixed text: the target is untrusted.
     """
 
     def redirect_request(
@@ -717,19 +743,21 @@ class _Redirects(urllib.request.HTTPRedirectHandler):
         newurl: str,
     ) -> urllib.request.Request | None:
         authorization = req.get_header("Authorization")
-        old = _origin(req.full_url)
         try:
-            new = _origin(newurl)
+            old, new = _origin(req.full_url), _origin(newurl)
         except ValueError:
-            new = ("", "", None)
-        if authorization is not None and new != old:
-            raise ValueError(
-                "the index redirected to another host (or to plain http); credentials not sent"
-            )
+            raise ValueError("redirected to a URL that cannot be parsed; not followed") from None
         if new[0] not in ("http", "https") or (old[0] == "https" and new[0] != "https"):
-            raise ValueError("redirected to plain http or to another scheme; not followed")
+            raise ValueError(
+                "redirected from https to plain http, or to another scheme; not followed"
+            )
         followed = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if followed is not None and authorization is not None:
+        if followed is None:
+            return None
+        # The credentials of a proxy are an ordinary header for urllib, copied like the others:
+        # `ProxyHandler` writes it again when the new request really goes through the proxy.
+        followed.headers.pop("Proxy-authorization", None)
+        if authorization is not None and new == old:
             followed.add_unredirected_header("Authorization", authorization)
         return followed
 
@@ -760,11 +788,12 @@ def _open(request: urllib.request.Request, timeout: float, direct: bool = False)
 
 
 class _Answer(NamedTuple):
-    """The body of a 200 answer and what its headers say it is."""
+    """The body of a 200 answer, what its headers say it is and the URL that answered."""
 
     content_type: str
     charset: str | None
     body: bytes
+    url: str  # of the last request: not the one that was asked when a redirect was followed
 
     def text(self) -> str:
         """The body as text; a charset Python does not know, or cannot use, is read as UTF-8."""
@@ -801,7 +830,8 @@ def _fetch(request: urllib.request.Request, direct: bool = False) -> _Answer:
     The body is read in pieces against the deadline. What comes before it (name resolution, the
     connection, TLS, redirects, the headers) is only bounded per socket operation by urllib, and
     a server that sends one byte at a time resets that clock: so the request runs in a daemon
-    thread and is abandoned when the deadline passes.
+    thread and is abandoned when the deadline passes. The wait is cut in short slices: one long
+    `join` is not interrupted by Ctrl+C on Windows, which would then wait for the deadline.
     """
     seconds = HTTP_DEADLINE
     deadline = time.monotonic() + seconds
@@ -813,13 +843,15 @@ def _fetch(request: urllib.request.Request, direct: bool = False) -> _Answer:
                 headers = resp.headers
                 body = _read_body(resp, deadline, seconds)
                 content_type = str(headers.get_content_type())
-                outcome.append(_Answer(content_type, headers.get_content_charset(), body))
+                final = str(getattr(resp, "url", None) or request.full_url)
+                outcome.append(_Answer(content_type, headers.get_content_charset(), body, final))
         except BaseException as exc:  # raised again below, in the thread of the caller
             outcome.append(exc)
 
     worker = threading.Thread(target=work, name="rumbo-verify-dep", daemon=True)
     worker.start()
-    worker.join(seconds)
+    while worker.is_alive() and (left := deadline - time.monotonic()) > 0:
+        worker.join(min(left, _JOIN_SLICE))  # a KeyboardInterrupt surfaces between two slices
     if not outcome:
         raise _late(seconds)
     result = outcome[0]
@@ -894,16 +926,29 @@ _NAME = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
 _REQUIREMENT_RE = re.compile(
     rf"[ \t]*(?P<name>{_NAME})[ \t]*"
     rf"(?:\[[ \t]*(?:{_NAME}(?:[ \t]*,[ \t]*{_NAME})*)?[ \t]*\])?[ \t]*"
-    r"(?:\(?[ \t]*(?:===|==|~=|!=|<=|>=|<|>)[A-Za-z0-9.*+!,<>=~ \t-]*\)?)?[ \t]*"
+    r"(?:\(?[ \t]*(?:===|==|~=|!=|<=|>=|<|>)[A-Za-z0-9.*+!,<>=~ \t_-]*\)?)?[ \t]*"
     r"(?:;[\x20-\x7e]*)?",
     re.ASCII,
 )
+# The two refusals of an index value. Fixed text: no part of the value is ever echoed, because
+# in a value that is not `http(s)://host...` nothing says where the credentials are.
+INDEX_NOT_HTTP = (
+    "the index URL must be http(s): it has to start with http:// or https:// "
+    "(value not shown: it may hold credentials)"
+)
+INDEX_UNPARSABLE = "the index URL cannot be parsed (check the host and the port)"
+# What stands before an `@`, back to the previous `/`, space or quote: the user info of a URL,
+# or the end of a password whose `/` was not percent-encoded and so fell into the path.
+_BEFORE_AT_RE = re.compile(r"[^\s/'\"<>()]*@")
 
 
 def resolve_index(flag: str | None, env: Mapping[str, str]) -> str | None:
     """The private index to verify against: `--index`, else the first set `INDEX_ENV_VARS` entry.
 
     None when nothing is set or the index is pypi.org itself: today's PyPI-only behaviour.
+    ValueError, in fixed text, for a value that is not `http(s)://host...`: a forgotten or
+    misspelled scheme moves the credentials into what would be printed as scheme or path
+    (`alice:PASSWORD@host/simple/` reads as scheme `alice`).
     """
     url = flag or next((env[key] for key in INDEX_ENV_VARS if env.get(key)), None)
     if not url:
@@ -912,59 +957,88 @@ def resolve_index(flag: str | None, env: Mapping[str, str]) -> str | None:
         parts = urllib.parse.urlsplit(url)
         _ = parts.port  # a port that is not a number raises here, not later in a request
     except ValueError:
-        # Never echo the value: it may carry credentials.
-        raise ValueError("the index URL cannot be parsed (check the host and the port)") from None
-    host = (parts.hostname or "").lower()
-    return None if host in ("pypi.org", "www.pypi.org") else url
+        raise ValueError(INDEX_UNPARSABLE) from None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(INDEX_NOT_HTTP)
+    return None if parts.hostname.lower() in ("pypi.org", "www.pypi.org") else url
+
+
+def _index_base(url: str) -> str:
+    """`scheme://host[:port]/path` of an index URL: where its requests go, user info left out."""
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{_host_port(parts)}{parts.path}"
 
 
 def sanitize_index(url: str) -> str:
     """`scheme://host[:port]/path` without user info: the only form of an index URL ever printed.
 
-    The user info is the one part treated as a secret. A token written as a path segment cannot
-    be told from a repository name, so the path is printed as it is (ADR-0028): no guessing.
+    The user info is the part treated as a secret. A token written as a path segment cannot be
+    told from a repository name, so the path is printed as it is (ADR-0028): no guessing. One
+    exception: what stands before an `@` inside the path is masked, because a password whose `/`
+    was not percent-encoded ends there (`https://user:pass/word@host/` has the host `user`).
     """
     parts = urllib.parse.urlsplit(url)
-    host = parts.hostname or ""
-    if ":" in host:  # IPv6 literal
-        host = f"[{host}]"
-    try:
-        port = f":{parts.port}" if parts.port else ""
-    except ValueError:
-        port = ""
-    return f"{parts.scheme}://{host}{port}{parts.path}"
+    return f"{parts.scheme}://{_host_port(parts)}{_BEFORE_AT_RE.sub('***@', parts.path)}"
 
 
 def _redact(text: str, index: str) -> str:
-    """An error message with every raw form of the index URL replaced by the sanitised one."""
+    """An error message with every raw form of the index URL replaced by the sanitised one,
+    and with whatever else stands before an `@` masked (the path of the request, a proxy URL)."""
     parts = urllib.parse.urlsplit(index)
     clean = sanitize_index(index)
-    text = text.replace(index, clean)
+    text = text.replace(index, clean).replace(_index_base(index), clean)
     if parts.netloc:
         text = text.replace(parts.netloc, urllib.parse.urlsplit(clean).netloc)
     if parts.password:
         text = text.replace(parts.password, "***")
-    return text
+    if parts.username and len(parts.username) >= 4:  # a token as the user; shorter is no secret
+        text = text.replace(parts.username, "***")
+    return _BEFORE_AT_RE.sub("***@", text)
+
+
+_CUT_MARK = "..>"  # how nginx's autoindex and Apache's FancyIndexing end a link text they cut
+
+
+def _anchor_file(text: str, href: str | None) -> str:
+    """The file an anchor of a project page stands for: its text (PEP 503).
+
+    A plain web server that lists a directory cuts a long name (`mycompany_toolkit-1.4.0..>`);
+    the whole name is then the last segment of the href, percent-decoded, without query or
+    fragment. It is taken from the href only when the text is the beginning of that name: any
+    other link that points at an archive (`Download the app` on a login page) names no file of
+    a project, and reading it as one would make that page a package page.
+    """
+    if not href or not text.endswith(_CUT_MARK) or _version_from_filename(text):
+        return text
+    try:
+        path = urllib.parse.urlsplit(href).path
+    except ValueError:
+        return text
+    name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+    stem = text[: -len(_CUT_MARK)]
+    return name if stem and name.startswith(stem) else text
 
 
 class _Anchors(HTMLParser):
-    """Collects every `<a>` of a PEP 503 project page: its text, a file name, and whether it
-    carries `data-yanked` (PEP 592)."""
+    """Collects every `<a>` of a PEP 503 project page: the file it stands for (`_anchor_file`)
+    and whether it carries `data-yanked` (PEP 592)."""
 
     def __init__(self) -> None:
         super().__init__()
         self.files: list[tuple[str, bool]] = []
         self._text: str | None = None
+        self._href: str | None = None
         self._yanked = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "a":
             self._text = ""
+            self._href = next((value for key, value in attrs if key == "href"), None)
             self._yanked = any(key == "data-yanked" for key, _ in attrs)
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "a" and self._text is not None:
-            self.files.append((self._text.strip(), self._yanked))
+            self.files.append((_anchor_file(self._text.strip(), self._href), self._yanked))
             self._text = None
 
     def handle_data(self, data: str) -> None:
@@ -985,10 +1059,15 @@ def _version_from_filename(filename: str) -> str | None:
 
 
 class SimplePage(NamedTuple):
-    """A simple-API project page: its versions, and those of them whose every file is yanked."""
+    """A simple-API project page: its versions, and those of them whose every file is yanked.
+
+    `answered_by` is the `host[:port]` that served it when that is not the index that was asked
+    (a redirect was followed); None otherwise.
+    """
 
     versions: list[str]
     yanked: frozenset[str]
+    answered_by: str | None = None
 
 
 def _page_from_files(
@@ -1031,6 +1110,12 @@ def _version_key(version: str) -> tuple[Any, ...]:
     return (1, int(match["epoch"] or 0), tuple(release), pre, post, dev, local, "")
 
 
+def _is_prerelease(version: str) -> bool:
+    """A PEP 440 pre-release or development release: what an installer skips unless asked."""
+    match = _VERSION_RE.fullmatch(version.strip()) if len(version) <= _VERSION_MAX else None
+    return match is not None and (match["pre"] is not None or match["dev"] is not None)
+
+
 def latest_version(versions: list[str], yanked: Collection[str] = ()) -> str | None:
     """The highest version in PEP 440 order, among those not yanked when there is one."""
     candidates = [v for v in versions if v not in yanked] or versions
@@ -1041,9 +1126,10 @@ def simple_page(body: str, content_type: str) -> SimplePage | None:
     """The project page in a 200 answer of a simple-API index; None when the answer is not one.
 
     A PEP 691 document is a JSON object with a `files` list (or a `versions` list); a PEP 503
-    page has at least one anchor whose text is a distribution file name with a PEP 440 version.
-    The login page of an index behind SSO and `{"error": ...}` are neither (ADR-0028). A PEP
-    503 page without a single file cannot be told from them, so it is not a page either.
+    page has at least one anchor that stands for a distribution file with a PEP 440 version
+    (`_anchor_file`: its text, or its href when a web server cut the text). The login page of
+    an index behind SSO and `{"error": ...}` are neither (ADR-0028). A PEP 503 page without a
+    single file cannot be told from them, so it is not a page either.
     """
     data: Any = None
     if content_type != "text/html":
@@ -1096,16 +1182,18 @@ def index_page(index: str, name: str) -> SimplePage | None:
     `http` they are not sent at all, unless the index is on this machine (loopback): Basic is
     not encryption, and the network between here and the index could read them. A loopback
     index is reached without the proxies of the environment, and the header is not copied to a
-    redirect: `_Redirects` puts it back only inside the same scheme, host and port (ADR-0028).
-    A 200 answer that is not a project page raises ValueError: it confirms nothing.
+    redirect: `_Redirects` puts it back only inside the same scheme, host and port (ADR-0028),
+    so a page that another host served after a redirect was asked for without credentials;
+    `answered_by` names that host. A 200 answer that is not a project page raises ValueError:
+    it confirms nothing.
     """
     parts = urllib.parse.urlsplit(index)
-    if parts.scheme not in ("http", "https"):
-        raise ValueError(f"the index URL must be http(s), got {sanitize_index(index)!r}")
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(INDEX_NOT_HTTP)
     if parts.username is not None and parts.scheme == "http" and not _is_loopback(parts.hostname):
         raise ValueError("refusing to send the index credentials over plain http; use https")
     segment = urllib.parse.quote(_normalize(name), safe="")
-    url = sanitize_index(index).rstrip("/") + "/" + segment + "/"
+    url = _index_base(index).rstrip("/") + "/" + segment + "/"
     request = urllib.request.Request(  # noqa: S310 - http(s), checked above
         url, headers={"Accept": f"{SIMPLE_JSON}, text/html;q=0.1"}
     )
@@ -1124,6 +1212,9 @@ def index_page(index: str, name: str) -> SimplePage | None:
     page = simple_page(answer.text(), answer.content_type)
     if page is None:
         raise ValueError("the index answered, but not with a package page")
+    with contextlib.suppress(ValueError):  # a final URL `_Redirects` let through parses
+        if _origin(answer.url) != _origin(url):
+            return page._replace(answered_by=_host_port(urllib.parse.urlsplit(answer.url)))
     return page
 
 
@@ -1153,8 +1244,9 @@ def _lookalikes(name: str) -> list[str]:
 
 def _verify_on_index(name: str, index: str) -> int:
     """Existence and versions on the project's own index (ADR-0014); prints only sanitised URLs."""
+    parts = urllib.parse.urlsplit(index)
     shown = _show(sanitize_index(index))
-    host = _show(urllib.parse.urlsplit(sanitize_index(index)).netloc)
+    host = _show(_host_port(parts))
     print(f"📦 {name}")
     print(f"   index: {shown}")
     try:
@@ -1165,14 +1257,23 @@ def _verify_on_index(name: str, index: str) -> int:
     if page is None:
         print(f"   ❌ exists on {host}: no. Hallucinated name? (slopsquatting)")
         return 1
+    via = ""
+    if page.answered_by:
+        # The user is told whose page was read (ADR-0028): the index sent us somewhere else.
+        unsent = "; the credentials were not sent there" if parts.username is not None else ""
+        via = f" (answered by {_show(page.answered_by, 80)} after a redirect{unsent})"
     if not page.versions:
         # A real page with nothing to install: not a hallucination, not a clean pass either.
-        print(f"   ⚠️  exists on {host}: yes, no files")
+        print(f"   ⚠️  exists on {host}: yes, no files{via}")
         return 1
-    latest = _show(latest_version(page.versions, page.yanked), 60)
-    yanked = ", every file yanked" if page.yanked.issuperset(page.versions) else ""
-    print(f"   exists on {host}: yes")
-    print(f"   versions on {host}: {len(page.versions)} (latest {latest}{yanked})")
+    newest = latest_version(page.versions, page.yanked) or ""
+    latest = _show(newest, 60)
+    if _is_prerelease(newest):  # the highest version, not what an installer picks by default
+        latest += ", a pre-release"
+    if page.yanked.issuperset(page.versions):
+        latest += ", every file yanked"
+    print(f"   exists on {host}: yes{via}")
+    print(f"   versions on {host}: {len(page.versions)} (latest {latest})")
     return 0
 
 

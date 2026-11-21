@@ -58,38 +58,57 @@ is not a public contract; (c) (a) plus a daemon thread that abandons the request
 place an opener is built. It has handlers for `http` and `https` and nothing else (no `file`,
 `ftp` or `data`), and no state shared between requests. `urlopen` is no longer called.
 
-**Redirects.** A redirect is followed when the request carries no credentials, or when the new
-URL has the same scheme, host and port as the one that was redirected. Otherwise it is refused
-with a fixed message, `the index redirected to another host (or to plain http); credentials
-not sent`, verdict 2: the target is untrusted text and is not printed. Second layer: the
-`Authorization` header is added with `add_unredirected_header`, so that `urllib` itself never
-copies it; the redirect rule puts it back only for a same-origin redirect. Independently of
-credentials, `https` is never left for plain `http` or another scheme, which keeps F-0007.R9
-(PyPI and OSV over `https` only) true after a redirect.
+**Redirects.** Indexes redirect by design: GitLab's package registry forwards every package it
+does not hold to `pypi.org`, and pypiserver does the same. So a redirect is followed, and what
+changes is what travels with it. The `Authorization` header is added with
+`add_unredirected_header`, so that `urllib` never copies it; the redirect rule puts it back
+only when the new URL has the same scheme, host and port as the one that was redirected.
+Anywhere else the request goes on without it, and once dropped it stays dropped, also when a
+later hop returns to the index. When the page that is read was served by another host, the
+output says so: `exists on <host>: yes (answered by <final host> after a redirect; the
+credentials were not sent there)`. Three redirects are refused, credentials or not, with a
+fixed message (the target is untrusted text and is not printed), verdict 2: `https` to plain
+`http`, which keeps F-0007.R9 true after a redirect; a scheme that is not `http(s)`; and a
+target whose authority is not plainly `host[:port]` (user info, a backslash, a percent
+escape: where two readers of one URL stop agreeing on the host). A first version of this
+rule refused every cross-origin redirect of an authenticated request; the second audit showed
+it made the command useless on a GitLab index.
 
 **Proxies.** A loopback index (`localhost`, `127.0.0.0/8`, `::1`) is reached with
 `ProxyHandler({})`: no proxy of the environment, so the exception of F-0007.R7 means what it
 says. Everything else keeps the proxies of the environment; credentials for a remote index
-only travel over `https` (F-0007.R7), that is, inside the tunnel the proxy cannot read.
+only travel over `https` (F-0007.R7), that is, inside the tunnel the proxy cannot read. The
+credentials of the proxy itself (`Proxy-Authorization`, which `urllib` writes as an ordinary
+header) are removed from a redirected request; `ProxyHandler` writes them again when that
+request really goes through the proxy, so a target that `NO_PROXY` reaches directly never
+receives them.
 
 **Deadline and size.** One request, redirects included, has `HTTP_DEADLINE` = 60 s in total
 and its answer `MAX_BODY` = 32 MB; each socket operation keeps the 15 s of F-0007.R8. The body
 is read with `read1` in 64 KiB pieces, checking the clock and the size after each; a body
 shorter than its `Content-Length` is an `IncompleteRead`. The request runs in a daemon thread
 that is abandoned at the deadline: it is the only way, without replacing `urllib`, to bound
-name resolution, the connection, TLS and the headers. Both numbers are constants chosen
+name resolution, the connection, TLS and the headers. The main thread waits for it in slices
+of 0.2 s: one long `join` is not interrupted by Ctrl+C on Windows, and the command would
+then answer the keyboard only when the deadline passed. Both numbers are constants chosen
 without a measurement (the one request to `pypi.org` that would have measured the largest
 JSON documents was not possible from the session that wrote this): 32 MB is several times
 what the largest PyPI projects are known to answer, and 60 s is four times the per-operation
 timeout. Both are to be revisited with numbers.
 
 **A page or not a page.** `simple_page` returns a page or `None`. A PEP 691 answer is a JSON
-object with a `files` list or a `versions` list; a PEP 503 answer has at least one anchor whose
-text is a distribution file name with a PEP 440 version. A 200 answer that is neither is `the
-index answered, but not with a package page`, verdict 2. A page with no version at all is
-`exists on <host>: yes, no files`, verdict 1. A PEP 503 page of a project with no file left
-cannot be told from a login page and is therefore verdict 2: it asks for a look, which is
-the right outcome for both.
+object with a `files` list or a `versions` list; a PEP 503 answer has at least one anchor that
+stands for a distribution file with a PEP 440 version. The file an anchor stands for is its
+text (PEP 503). A plain web server that lists a directory cuts a long text and ends it in
+`..>` (nginx's autoindex, Apache's FancyIndexing); the name is then the last path segment of
+the href, percent-decoded, without query or fragment. The href is used only in that case,
+when the text is the beginning of that name: read for every anchor, it would turn a login
+page with a link such as `<a href="/app-1.2.zip">Download the app</a>` into a package page,
+which is the finding this ADR starts from. A 200 answer that is neither is `the index
+answered, but not with a package page`, verdict 2. A page with no version at all is `exists
+on <host>: yes, no files`, verdict 1. A PEP 503 page of a project with no file left cannot be
+told from a login page and is therefore verdict 2: it asks for a look, which is the right
+outcome for both.
 
 **Arguments.** An argument is a PEP 508 name, alone or followed by extras, a version specifier
 and a marker; the bare name is verified and a note says so. Anything else (a URL, a path, a
@@ -103,18 +122,31 @@ already says of every other OSV failure. A charset that Python does not know is 
 UTF-8. An index URL that cannot be parsed is reported as an index that could not be queried
 (on stdout, verdict 2); PyPI and OSV are still measured and the reminder closes the run.
 
+**The index value.** It comes from `--index` or the environment and is not trusted to be a
+URL. A value whose scheme is not `http(s)`, or that has no host, is refused in fixed text,
+`the index URL must be http(s): it has to start with http:// or https:// (value not shown:
+it may hold credentials)`, and no part of it is echoed: with the scheme forgotten,
+`alice:PASSWORD@host/simple/` reads as scheme `alice` and path `PASSWORD@host/simple/`, and
+the "sanitised" form printed the password. It is handled like a value that cannot be parsed:
+verdict 2 for the index, PyPI and OSV still measured.
+
 **What is printed.** Versions are ordered by a key written from PEP 440 (epoch, release, dev,
 pre-release with numeric counter, post-release, local); a string that is not a version orders
 below every one that is. A release whose every file is yanked (PEP 691 `yanked`, PEP 503
-`data-yanked`) is not "latest" unless all are, and then the line says so. Every string that
-came from the network (summary, version, URLs, canonical name, the reason of an error) goes
-through `_show`: control characters (C0, C1, bidi overrides, lone surrogates) become a space
-and the text is cut at 200 characters.
+`data-yanked`) is not "latest" unless all are, and then the line says so; a latest that is a
+pre-release or a development release is labelled `a pre-release`, because it is the highest
+version and not the one an installer picks by default. Every string that came from the
+network (summary, version, URLs, canonical name, the host that answered after a redirect,
+the reason of an error) goes through `_show`: control characters (C0, C1, bidi overrides,
+lone surrogates) become a space and the text is cut at 200 characters.
 
-**A limit that stays.** `sanitize_index` removes the user-info part of an index URL and
-nothing else. A token written as a path segment (`https://host/TOKEN/simple/`) cannot be told
-from a repository name, so it is printed with the path. The command does not guess; the help
-of `--index` says where credentials go.
+**A limit that stays.** `sanitize_index` removes the user-info part of an index URL. A token
+written as a path segment (`https://host/TOKEN/simple/`) cannot be told from a repository
+name, so it is printed with the path. The command does not guess; the help of `--index` says
+where credentials go. One exception, which is not a guess about tokens: what stands before an
+`@` inside the path is printed as `***`, in the index line and in error messages, because a
+password whose `/` was not percent-encoded ends there (`https://user:pass/word@host/` has the
+host `user` and the path `/word@host/`). The request still goes where the value says.
 
 ## Consequences (+/−)
 + A login page, an error document or a truncated answer no longer confirms a name.
@@ -122,8 +154,14 @@ of `--index` says where credentials go.
   proxy when the index is local.
 + The command ends: at most 60 s per request, three requests per package.
 + The redirect, proxy, deadline and size rules are tested against real local servers.
-− A redirect from an authenticated index to another host (a CDN, a storage bucket) is refused:
-  the integrator points `--index` at the final host, or verifies by hand.
++ An index that forwards to another host (GitLab, pypiserver) is followed, without the
+  credentials, and the output names the host that answered.
+− A page read after a redirect is the page of another host: the note says so, the verdict does
+  not change. A redirect to a private host that wanted the same credentials ends in its 401.
+− A loopback index that redirects to a remote host is followed without the proxies of the
+  environment too: the choice is made once per request, from the index.
+− A link text cut by a web server with another mark than `..>` is not read from the href.
+− A feed whose path holds an `@` (`.../feed@Release/...`) is printed with `***` before it.
 − A PEP 503 page with no file is "not confirmed" instead of "exists".
 − A request abandoned at the deadline leaves a daemon thread and its socket behind until the
   server stops sending or the process exits; the command is short-lived.
@@ -138,11 +176,18 @@ of `--index` says where credentials go.
 `::test_a_loopback_index_is_never_reached_through_the_proxy_of_the_environment`,
 `::test_an_index_elsewhere_is_still_reached_through_the_proxy_of_the_environment`,
 `::test_a_server_that_never_finishes_is_cut_by_the_deadline`,
-`::test_a_body_larger_than_the_cap_is_refused_and_one_cut_short_is_not_a_page`.
+`::test_a_body_larger_than_the_cap_is_refused_and_one_cut_short_is_not_a_page`,
+`::test_a_redirect_away_from_the_index_is_refused_when_credentials_are_set` (its name is older
+than the rule: it asserts that the target receives the request without `Authorization`),
+`::test_the_credentials_of_a_proxy_do_not_follow_a_redirect_past_the_proxy`,
+`::test_ctrl_c_is_not_held_until_the_deadline`.
 On the rules themselves:
 `::test_a_200_answer_that_is_not_a_package_page_does_not_confirm_the_name`,
 `::test_a_package_page_without_files_exists_and_is_flagged_for_review`,
-`::test_a_redirect_away_from_the_index_is_refused_when_credentials_are_set`,
+`::test_a_redirect_away_from_the_index_drops_the_credentials_for_good`,
+`::test_the_listing_of_a_plain_web_server_is_a_package_page`,
+`::test_the_file_name_comes_from_the_href_only_when_the_text_is_that_name_cut_short`,
+`::test_no_shape_of_an_index_value_prints_its_password`,
 `::test_an_argument_that_is_not_a_package_name_is_refused_and_the_others_go_on`,
 `::test_latest_follows_the_order_of_pep_440`,
 `::test_text_from_the_network_is_printed_without_control_characters_and_bounded`, and

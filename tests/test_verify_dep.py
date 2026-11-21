@@ -7,6 +7,7 @@ request it was not told about. The tests that take the `serve` fixture go throug
 on 127.0.0.1, with PyPI and OSV stubbed.
 """
 
+import _thread
 import ast
 import base64
 import contextlib
@@ -63,6 +64,8 @@ class _Network:
         self.timeouts: list[float | None] = []
         self.direct: list[bool] = []
         self.real: Callable[..., Any] = cli._open
+        # The answer for a URL no test spelled out; without it such a request fails the test.
+        self.fallback: Callable[[urllib.request.Request], Answer] | None = None
 
     def open(
         self, request: urllib.request.Request, timeout: float | None = None, direct: bool = False
@@ -71,6 +74,8 @@ class _Network:
         self.timeouts.append(timeout)
         self.direct.append(direct)
         answer = self.answers.get(request.full_url)
+        if answer is None and self.fallback is not None:
+            answer = self.fallback(request)
         if answer is None:
             raise AssertionError(f"unexpected request to {request.full_url}")
         if isinstance(answer, BaseException):
@@ -113,12 +118,14 @@ class _Server:
 
     def __init__(self, respond: Respond) -> None:
         self.seen: list[tuple[str, str | None]] = []
+        self.raw: list[str] = []  # the request line and every header, as they arrived
         self.stop = threading.Event()
-        seen, stop = self.seen, self.stop
+        seen, raw, stop = self.seen, self.raw, self.stop
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 seen.append((self.path, self.headers.get("Authorization")))
+                raw.append(f"{self.requestline}\n{self.headers}")
                 with contextlib.suppress(OSError):  # the client hung up: that is the test
                     respond(self, stop)
 
@@ -544,6 +551,7 @@ def test_an_index_url_that_is_not_http_is_refused_without_a_request(
     out = capsys.readouterr().out
     assert "the index URL must be http(s)" in out and "Verify by hand." in out
     assert net.urls == [PYPI.format("demo-pkg"), OSV]
+    assert "passwd" not in out  # second audit, A3: no part of such a value is echoed
 
 
 # Covers F-0007.R8 and F-0007.R9 (specs/0007-dependencies-verified-before-they-are-added.md).
@@ -665,6 +673,7 @@ def _with_credentials(url: str) -> str:
         ("text/html", '<a href="a">README.txt</a> <a href="b">demo-pkg-latest.tar.gz</a>'),
         (cli.SIMPLE_JSON, "[" * 100_000 + "]" * 100_000),
         ("text/html", ""),
+        ("text/html", '<form action="/login"><a href="/app-1.2.zip">Download the app</a></form>'),
     ],
     ids=[
         "sso-login",
@@ -674,6 +683,7 @@ def _with_credentials(url: str) -> str:
         "html-without-files",
         "deep-json",
         "empty",
+        "login-page-linking-an-archive",
     ],
 )
 def test_a_200_answer_that_is_not_a_package_page_does_not_confirm_the_name(
@@ -745,27 +755,72 @@ def _redirected(
     )
 
 
-# Covers F-0007.R7 (specs/0007-dependencies-verified-before-they-are-added.md).
+# Covers F-0007.R6 and F-0007.R7 (specs/0007-dependencies-verified-before-they-are-added.md).
 @pytest.mark.parametrize(
-    "to",
+    ("code", "location"),
     [
-        "https://evil.example/simple/demo-pkg/",
-        "https://index.example.evil.example/simple/demo-pkg/",
-        "https://index.example:8443/simple/demo-pkg/",
-        "http://index.example/simple/demo-pkg/",
-        "https://index.example@evil.example/simple/demo-pkg/",
-        "https://[not-an-address/simple/",
+        (301, "http://127.0.0.1:{port}/simple/demo-pkg/"),
+        (302, "http://127.0.0.1:{port}/simple/demo-pkg/"),
+        (303, "http://127.0.0.1:{port}/simple/demo-pkg/"),
+        (307, "http://127.0.0.1:{port}/simple/demo-pkg/"),
+        (308, "http://127.0.0.1:{port}/simple/demo-pkg/"),
+        (302, "//127.0.0.1:{port}/simple/demo-pkg/"),
     ],
-    ids=["other-host", "suffix-host", "other-port", "plain-http", "userinfo-trick", "unparsable"],
+    ids=["301", "302", "303", "307", "308", "scheme-relative"],
 )
-def test_a_redirect_away_from_the_index_is_refused_when_credentials_are_set(to: str) -> None:
-    """Audit V2: urllib copies the headers of a request to wherever a redirect points."""
-    with pytest.raises(ValueError, match="credentials not sent") as refused:
-        _redirected(INDEX + "demo-pkg/", to)
-    # The message is fixed text: neither the target (untrusted) nor the credentials.
-    assert str(refused.value) == (
-        "the index redirected to another host (or to plain http); credentials not sent"
+def test_a_redirect_away_from_the_index_is_refused_when_credentials_are_set(
+    serve: Callable[[Respond], _Server],
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+    location: str,
+) -> None:
+    """Audit V2, then the second audit (A1). urllib copies the headers of a request to wherever
+    a redirect points; the first fix refused such a redirect outright, and real indexes redirect
+    by design (GitLab forwards every package it does not hold to pypi.org). The rule since: the
+    redirect is followed, and the target receives the request without the credentials. The name
+    of this test is older than the rule (renaming a test is the human's call)."""
+    target = serve(_answers(PAGE))
+    index = serve(_answers("", status=code, location=location.format(port=target.port)))
+    assert main(["verify-dep", "--index", _with_credentials(index.url), "demo-pkg"]) == 0
+    captured = capsys.readouterr()
+    assert index.seen == [("/simple/demo-pkg/", BASIC)]
+    assert target.seen == [("/simple/demo-pkg/", None)]  # the request, and no Authorization
+    assert not any(secret in target.raw[0] for secret in ("s3cret-t0ken", BASIC.split()[1]))
+    # The user is told whose page was read.
+    assert (
+        f"   exists on 127.0.0.1:{index.port}: yes (answered by 127.0.0.1:{target.port} after a "
+        "redirect; the credentials were not sent there)\n"
+    ) in captured.out
+    assert "s3cret-t0ken" not in captured.out + captured.err
+
+
+# Covers F-0007.R7 and F-0007.R9 (specs/0007-dependencies-verified-before-they-are-added.md).
+def test_a_redirect_away_from_the_index_drops_the_credentials_for_good() -> None:
+    """A1, on the rule itself (https cannot be served by a local test server)."""
+    away = _redirected(INDEX + "demo-pkg/", "https://pypi.org/simple/demo-pkg/")
+    assert away is not None and away.full_url == "https://pypi.org/simple/demo-pkg/"
+    assert not away.has_header("Authorization") and away.unredirected_hdrs == {}
+    # Not even when a later hop comes back to the index.
+    back = cli._Redirects().redirect_request(
+        away, io.BytesIO(), 302, "Found", http.client.HTTPMessage(), INDEX + "demo-pkg/"
     )
+    assert back is not None and back.full_url == INDEX + "demo-pkg/"
+    assert not back.has_header("Authorization") and back.unredirected_hdrs == {}
+    # Still refused, with or without credentials, and in fixed text (the target is untrusted):
+    # https to plain http, another scheme, and a target that cannot be read as scheme://host.
+    for to in (
+        "http://index.example/simple/demo-pkg/",
+        "http://evil.example/simple/demo-pkg/",
+        "ftp://index.example/simple/demo-pkg/",
+        "https://[not-an-address/simple/",
+        "https://index.example@evil.example/simple/demo-pkg/",
+        "https://index.example\\@evil.example/simple/demo-pkg/",
+        "https://index.example:8443%40evil.example/simple/",
+    ):
+        for authorization in (BASIC, None):
+            with pytest.raises(ValueError, match=r"not followed$") as refused:
+                _redirected(INDEX + "demo-pkg/", to, authorization)
+            assert "example" not in str(refused.value)
 
 
 # Covers F-0007.R7 and F-0007.R9 (specs/0007-dependencies-verified-before-they-are-added.md).
@@ -807,17 +862,39 @@ def test_credentials_are_an_unredirected_header_and_only_a_loopback_index_skips_
 def test_a_redirect_to_another_port_never_receives_the_credentials(
     serve: Callable[[Respond], _Server], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Audit V2 and D7, through the real urllib: the other server must see no request at all."""
-    elsewhere = serve(_answers(PAGE))
-    index = serve(_answers("", status=302, location=elsewhere.url + "demo-pkg/"))
-    assert main(["verify-dep", "--index", _with_credentials(index.url), "demo-pkg"]) == 2
+    """Audit V2 and D7, through the real urllib, on the two chains of the second audit (A1).
+    Away and back: once the credentials are dropped they are not put back, not even for the
+    index itself. Inside the index and then away: they stop where the index stops."""
+    hops: dict[str, str] = {}
+
+    def index_then_back(handler: BaseHTTPRequestHandler, stop: threading.Event) -> None:
+        if handler.path == "/simple/demo-pkg/":
+            _answers("", status=302, location=hops["away"])(handler, stop)
+        else:
+            _answers(PAGE)(handler, stop)
+
+    index = serve(index_then_back)
+    elsewhere = serve(_answers("", status=307, location=index.url + "final/"))
+    hops["away"] = elsewhere.url + "x/"
+    assert main(["verify-dep", "--index", _with_credentials(index.url), "demo-pkg"]) == 0
     captured = capsys.readouterr()
-    reason = "the index redirected to another host (or to plain http); credentials not sent"
-    assert f"could not query 127.0.0.1:{index.port} ({reason}). Verify by hand." in captured.out
-    assert index.seen == [("/simple/demo-pkg/", BASIC)]
-    assert elsewhere.seen == []
+    assert f"versions on 127.0.0.1:{index.port}: 1 (latest 1.0)" in captured.out
+    assert index.seen == [("/simple/demo-pkg/", BASIC), ("/simple/final/", None)]
+    assert elsewhere.seen == [("/simple/x/", None)]
     assert "s3cret-t0ken" not in captured.out + captured.err
     assert "alice" not in captured.out + captured.err
+
+    def inside_then_away(handler: BaseHTTPRequestHandler, stop: threading.Event) -> None:
+        to = "/pkgs/demo-pkg/" if handler.path == "/simple/demo-pkg/" else hops["out"]
+        _answers("", status=301, location=to)(handler, stop)
+
+    second = serve(inside_then_away)
+    target = serve(_answers(PAGE))
+    hops["out"] = target.url + "demo-pkg/"
+    assert main(["verify-dep", "--index", _with_credentials(second.url), "demo-pkg"]) == 0
+    assert second.seen == [("/simple/demo-pkg/", BASIC), ("/pkgs/demo-pkg/", BASIC)]
+    assert target.seen == [("/simple/demo-pkg/", None)]
+    assert f"(answered by 127.0.0.1:{target.port} after a redirect" in capsys.readouterr().out
 
 
 # Covers F-0007.R6 and F-0007.R7 (specs/0007-dependencies-verified-before-they-are-added.md).
@@ -868,6 +945,25 @@ def test_an_index_elsewhere_is_still_reached_through_the_proxy_of_the_environmen
         monkeypatch.setenv(key, f"http://127.0.0.1:{proxy.port}")
     assert main(["verify-dep", "--index", "http://index.invalid/simple/", "demo-pkg"]) == 0
     assert proxy.seen == [("http://index.invalid/simple/demo-pkg/", None)]
+
+
+# Covers F-0007.R7 (specs/0007-dependencies-verified-before-they-are-added.md).
+def test_the_credentials_of_a_proxy_do_not_follow_a_redirect_past_the_proxy(
+    serve: Callable[[Respond], _Server], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second audit (its `a3_misc.py`): urllib writes `Proxy-Authorization` as an ordinary
+    header of the request, and copies it to a redirect target that `NO_PROXY` reaches directly."""
+    target = serve(_answers(PAGE))
+    proxy = serve(_answers("", status=302, location=target.url + "demo-pkg/"))
+    for key in ("HTTP_PROXY", "http_proxy"):
+        monkeypatch.setenv(key, f"http://proxyuser:pr0xy-pw@127.0.0.1:{proxy.port}")
+    for key in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(key, "127.0.0.1")
+    assert main(["verify-dep", "--index", "http://index.invalid/simple/", "demo-pkg"]) == 0
+    sent = base64.b64encode(b"proxyuser:pr0xy-pw").decode()
+    assert len(proxy.raw) == 1 and sent in proxy.raw[0]  # the proxy is still given its own
+    assert target.seen == [("/simple/demo-pkg/", None)]
+    assert sent not in target.raw[0] and "proxy-authorization" not in target.raw[0].lower()
 
 
 def _drips(handler: BaseHTTPRequestHandler, stop: threading.Event) -> None:
@@ -968,6 +1064,11 @@ def test_extras_and_a_version_specifier_are_split_off_and_the_bare_name_is_verif
     assert "note: only the name 'Demo_Pkg' is verified" in out
     assert main(["verify-dep", "--index", INDEX, "Demo_Pkg"]) == 0
     assert "note:" not in capsys.readouterr().out
+    # Second audit: every character a version can hold (`_`, and anything after `===`).
+    for specifier in ("===1.0-anything_here", ">=1.0_post1", "==1!2.0+local.1", " (>=1.0, <2)"):
+        assert main(["verify-dep", "--index", INDEX, "Demo_Pkg" + specifier]) == 0, specifier
+        assert "note: only the name 'Demo_Pkg' is verified" in capsys.readouterr().out
+    assert set(net.urls) == {INDEX + "demo-pkg/", PYPI.format("Demo_Pkg"), OSV}
 
 
 # Covers F-0007.R9 and F-0007.R10 (specs/0007-dependencies-verified-before-they-are-added.md).
@@ -1162,3 +1263,205 @@ def test_the_help_says_where_the_credentials_of_an_index_go(
     # What the help promises: the user info is removed, the path is printed as it is.
     shown = cli.sanitize_index("https://alice:s3cret-t0ken@index.example/TOKEN123/simple/?t=abc")
     assert shown == "https://index.example/TOKEN123/simple/"
+
+
+# ------------------------------------------------- second audit of ADR-0028 (A2, A3, A4)
+# The two listings below are reconstructed from the listing format of the two servers (nginx
+# cuts the text of a link at 50 characters, Apache's FancyIndexing at 23, both ending in `..>`);
+# they were not captured from a running nginx or Apache.
+NGINX_AUTOINDEX = """<html>
+<head><title>Index of /simple/mycompany-internal-toolkit/</title></head>
+<body>
+<h1>Index of /simple/mycompany-internal-toolkit/</h1><hr><pre><a href="../">../</a>
+<a href="mycompany_internal_toolkit-1.4.0-cp312-cp312-manylinux_2_17_x86_64.whl">mycompany_internal_toolkit-1.4.0-cp312-cp312-ma..&gt;</a> 12-Nov-2026 10:01    48211
+<a href="mycompany_internal_toolkit-1.4.0-cp312-cp312-win_amd64.whl">mycompany_internal_toolkit-1.4.0-cp312-cp312-wi..&gt;</a> 12-Nov-2026 10:01    48211
+</pre><hr></body>
+</html>"""  # noqa: E501
+APACHE_AUTOINDEX = """<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 3.2 Final//EN">
+<html>
+ <head>
+  <title>Index of /simple/mycompany-toolkit</title>
+ </head>
+ <body>
+<h1>Index of /simple/mycompany-toolkit</h1>
+<pre><img src="/icons/blank.gif" alt="Icon "> <a href="?C=N;O=D">Name</a>                    <a href="?C=M;O=A">Last modified</a>      <a href="?C=S;O=A">Size</a>  <a href="?C=D;O=A">Description</a><hr><img src="/icons/back.gif" alt="[PARENTDIR]"> <a href="/simple/">Parent Directory</a>                             -
+<img src="/icons/unknown.gif" alt="[   ]"> <a href="mycompany_toolkit-1.4.0-py3-none-any.whl">mycompany_toolkit-1.4.0..&gt;</a> 2026-11-12 10:01   48K
+<img src="/icons/compressed.gif" alt="[   ]"> <a href="mycompany_toolkit-1.4.0.tar.gz">mycompany_toolkit-1.4.0..&gt;</a> 2026-11-12 10:01   41K
+<img src="/icons/compressed.gif" alt="[   ]"> <a href="mycompany_toolkit-1.3.2.tar.gz">mycompany_toolkit-1.3.2..&gt;</a> 2026-10-02 09:30   40K
+<hr></pre>
+</body></html>"""  # noqa: E501
+# What `python -m http.server` writes (`http.server.SimpleHTTPRequestHandler.list_directory`):
+# the href is percent-encoded, the text is the name.
+HTTP_SERVER_LISTING = """<!DOCTYPE HTML>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Directory listing for /simple/demo-pkg/</title>
+</head>
+<body>
+<h1>Directory listing for /simple/demo-pkg/</h1>
+<hr>
+<ul>
+<li><a href="demo_pkg-1.0%2Blocal.1-py3-none-any.whl">demo_pkg-1.0+local.1-py3-none-any.whl</a></li>
+<li><a href="demo_pkg-0.9.tar.gz">demo_pkg-0.9.tar.gz</a></li>
+</ul>
+<hr>
+</body>
+</html>"""
+
+
+# Covers F-0007.R6 (specs/0007-dependencies-verified-before-they-are-added.md).
+@pytest.mark.parametrize(
+    ("name", "body", "versions"),
+    [
+        ("mycompany-internal-toolkit", NGINX_AUTOINDEX, "1 (latest 1.4.0)"),
+        ("mycompany-toolkit", APACHE_AUTOINDEX, "2 (latest 1.4.0)"),
+        ("demo-pkg", HTTP_SERVER_LISTING, "2 (latest 1.0+local.1)"),
+    ],
+    ids=["nginx-autoindex", "apache-autoindex", "python-http-server"],
+)
+def test_the_listing_of_a_plain_web_server_is_a_package_page(
+    net: _Network, capsys: pytest.CaptureFixture[str], name: str, body: str, versions: str
+) -> None:
+    """Second audit, A2: nginx and Apache cut the text of a link (`mycompany_toolkit-1.4.0..>`),
+    so no anchor text was a file name and a project served by a plain web server was "not a
+    package page" (exit 2). The file name is in the href."""
+    net.answers[INDEX + f"{name}/"] = _Response(body, "text/html")
+    net.answers[PYPI.format(name)] = _http_error(404)
+    assert main(["verify-dep", "--index", INDEX, name]) == 0
+    out = capsys.readouterr().out
+    assert "exists on index.example: yes" in out
+    assert f"versions on index.example: {versions}" in out
+
+
+# Covers F-0007.R6 (specs/0007-dependencies-verified-before-they-are-added.md).
+def test_the_file_name_comes_from_the_href_only_when_the_text_is_that_name_cut_short() -> None:
+    """A2 without reopening V1: a link of a login page that points at an archive
+    (`<a href="/app-1.2.zip">Download the app</a>`) must not make that page a package page."""
+    cut = '<a href="/f/demo_pkg-1.4.0-py3-none-any.whl?get=1#sha256=abc">demo_pkg-1.4.0..&gt;</a>'
+    assert cli.simple_page(cut, "text/html") == cli.SimplePage(["1.4.0"], frozenset())
+    quoted = '<a href="demo_pkg-2.0%2Blocal.1.tar.gz" data-yanked="x">demo_pkg-2.0+loc..&gt;</a>'
+    assert cli.simple_page(quoted, "text/html") == cli.SimplePage(
+        ["2.0+local.1"], frozenset({"2.0+local.1"})
+    )
+    # A text that is a file name is the file name (PEP 503), whatever the href says.
+    both = '<a href="https://files.example/other-9.9.tar.gz">demo_pkg-1.0.tar.gz</a>'
+    assert cli.simple_page(both, "text/html") == cli.SimplePage(["1.0"], frozenset())
+    for text in ("Download the app", "app", "app-1.2", "app-1.2...", "..&gt;", "x..&gt;", ""):
+        assert cli.simple_page(f'<a href="/app-1.2.zip">{text}</a>', "text/html") is None, text
+    for href in ("http://[bad/app-1.2.zip", "", "?C=N;O=D", "app-1.2.zip/"):
+        assert cli.simple_page(f'<a href="{href}">app-1..&gt;</a>', "text/html") is None, href
+    assert cli.simple_page("<a>app-1..&gt;</a>", "text/html") is None
+
+
+MARKER = "M4RK3R-pw"
+MUST_BE_HTTP = (
+    "the index URL must be http(s): it has to start with http:// or https:// "
+    "(value not shown: it may hold credentials)"
+)
+CANNOT_BE_PARSED = "the index URL cannot be parsed (check the host and the port)"
+
+
+# Covers F-0007.R7 and F-0007.R8 (specs/0007-dependencies-verified-before-they-are-added.md).
+@pytest.mark.parametrize("how", ["flag", "env"])
+@pytest.mark.parametrize(
+    ("value", "refusal"),
+    [
+        (f"alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"//alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"https:/alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"https//alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"https:alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"https:///alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"https:\\\\alice:{MARKER}@index.example\\simple\\", MUST_BE_HTTP),
+        (f"https://alice:{MARKER}@/simple/", MUST_BE_HTTP),
+        (f"htps://alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"ftp://alice:{MARKER}@index.example/simple/", MUST_BE_HTTP),
+        (f"file:///home/alice/{MARKER}/simple/", MUST_BE_HTTP),
+        (f"https://alice:{MARKER}@index.example:port/simple/", CANNOT_BE_PARSED),
+        (f"https://alice:{MARKER}@[::1/simple/", CANNOT_BE_PARSED),
+        (f"https://alice:{MARKER}/x@index.example/simple/", CANNOT_BE_PARSED),
+        (f"https://alice:1234/{MARKER}@index.example/simple/", None),
+        (f"https://alice/{MARKER}@index.example/simple/", None),
+        (f"https://index.example/org/alice:{MARKER}@feed/simple/", None),
+        (f"HTTPS://alice:{MARKER}@index.example/simple/?token={MARKER}#{MARKER}", None),
+        (f" https://alice:{MARKER}@index.example/simple/", None),
+        (f"https://{MARKER}@index.example/simple/", None),
+        (f"https://alice:{MARKER}@index.example/sim ple/", None),
+        (f"http://alice:{MARKER}@index.example/simple/", None),
+    ],
+)
+def test_no_shape_of_an_index_value_prints_its_password(
+    net: _Network,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+    refusal: str | None,
+    how: str,
+) -> None:
+    """Second audit, A3: `alice:<pw>@host/simple/` (the scheme forgotten) was printed whole, as
+    `index: alice://<pw>@host/simple/`. A value that does not start with http(s)://host is not
+    echoed at all; one that does is printed without its user info, and without what stands
+    before an `@` in its path (a password whose `/` was not percent-encoded ends up there).
+    The worst error a request can raise is assumed: one that quotes the URL that was asked."""
+    net.answers[PYPI.format("demo-pkg")] = _document()
+
+    def quotes_the_request(request: urllib.request.Request) -> BaseException:
+        text = f"URL can't contain control characters. {request.selector!r} in {request.full_url}"
+        return http.client.InvalidURL(text)
+
+    net.fallback = quotes_the_request
+    if how == "env":
+        monkeypatch.setenv("UV_INDEX_URL", value)
+    argv = ["verify-dep", "demo-pkg"] + (["--index", value] if how == "flag" else [])
+    assert main(argv) == 2
+    captured = capsys.readouterr()
+    assert MARKER not in captured.out + captured.err
+    assert base64.b64encode(f"alice:{MARKER}".encode()).decode() not in captured.out + captured.err
+    if refusal is not None:
+        assert f"could not query the index ({refusal}). Verify by hand." in captured.out
+        assert "index.example" not in captured.out and "alice" not in captured.out
+        assert net.urls == [PYPI.format("demo-pkg"), OSV], "nothing was sent to the index"
+    assert captured.out.endswith(f"\n{REMINDER}\n")
+
+
+# Covers F-0007.R8 (specs/0007-dependencies-verified-before-they-are-added.md).
+def test_ctrl_c_is_not_held_until_the_deadline(
+    serve: Callable[[Respond], _Server], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second audit, A4: the main thread waited for the request with one `join(deadline)`,
+    which Windows does not interrupt: Ctrl+C took effect when the deadline passed (60 s)."""
+    monkeypatch.setattr(cli, "HTTP_DEADLINE", 8.0)
+    index = serve(_never_answers)
+    interrupt = threading.Timer(0.3, _thread.interrupt_main)
+    start = time.monotonic()
+    interrupt.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            main(["verify-dep", "--index", index.url, "demo-pkg"])
+    finally:
+        interrupt.cancel()
+    assert time.monotonic() - start < 3, "Ctrl+C waited for the deadline"
+
+
+# Covers F-0007.R6 (specs/0007-dependencies-verified-before-they-are-added.md).
+@pytest.mark.parametrize(
+    ("versions", "latest"),
+    [
+        (["1.0", "2.0rc1"], "2.0rc1, a pre-release"),
+        (["1.0", "2.0.dev0"], "2.0.dev0, a pre-release"),
+        (["2.0a1"], "2.0a1, a pre-release"),
+        (["2.0rc1", "2.0"], "2.0"),
+        (["1.0", "1.0.post1"], "1.0.post1"),
+    ],
+)
+def test_a_pre_release_shown_as_the_latest_is_called_one(
+    net: _Network, capsys: pytest.CaptureFixture[str], versions: list[str], latest: str
+) -> None:
+    """Second audit, minor: `latest 2.0rc1` read as "the release you would get"."""
+    net.answers[INDEX + "demo-pkg/"] = json.dumps({"versions": versions})
+    net.answers[PYPI.format("demo-pkg")] = _http_error(404)
+    assert main(["verify-dep", "--index", INDEX, "demo-pkg"]) == 0
+    assert f"versions on index.example: {len(versions)} (latest {latest})" in (
+        capsys.readouterr().out
+    )
