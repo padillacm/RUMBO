@@ -18,11 +18,19 @@ The program of a step (its first word) is looked up before it runs. With a direc
 (``tools/lint``, ``.venv/Scripts/python``) it is taken against the project root, never against
 the directory the runner was started from, and on Windows ``.exe``, ``.cmd``, ``.bat`` and
 ``.com`` are tried. A bare name is left to the system, except on Windows when ``PATH`` holds
-it as a ``.cmd``/``.bat`` shim (``npx``, ``pnpm``): the shim is run by its path, still without
-a shell. A batch file is executed by ``cmd.exe`` whatever the caller does, and ``cmd.exe``
-parses its command line again, so an argument that contains one of ``& | < > ^ % "`` or a line
-break is refused for such a program (environment, exit 3) instead of being passed. Steps do
-not read the runner's standard input.
+it only as a ``.cmd``/``.bat`` shim (``npx``, ``pnpm``) outside the project: the shim is run
+by its path, still without a shell. A name is never taken from the project: relative
+entries of ``PATH`` are not searched, a batch file inside the project root is passed over,
+and while a step, a probe or git is started ``NoDefaultCurrentDirectoryInExePath`` is set,
+so that Windows does not look in the current directory either (a ``uv.cmd`` or ``uv.exe``
+written into the root is not run in place of ``uv``). A batch file is executed by ``cmd.exe``
+whatever the caller does, and ``cmd.exe`` parses its command line again, so an argument that
+contains one of ``& | < > ^ % "`` or a line break is refused for such a program
+(environment, exit 3) instead of being passed. Steps do not read the runner's standard input.
+
+A bare ``python`` is whatever the system finds first, usually not the project's environment
+(``python -m pytest`` then ends in "No module named pytest", exit 1, red): write
+``uv run python ...``.
 
 Two placeholders exist:
 
@@ -38,9 +46,10 @@ Two placeholders exist:
   is empty the step is not run and is reported ``ok   <name> (no changed files)``. When there
   is no usable git base (not a repository, no commits, unknown ref) it expands to ``.`` and
   the step line says ``no git base: whole tree``. When the files do not fit one command line
-  (30,000 characters on Windows, where the system takes 32,767; 120,000 bytes elsewhere) it
-  expands to ``.`` too and the step line says ``N changed files: too long for one command
-  line, whole tree``. Both notes are shown on green, red and environment lines. ``--full``
+  (30,000 characters on Windows, where the system takes 32,767, and 8,000 when the program is
+  a batch file, where ``cmd.exe`` takes 8,191; 120,000 bytes elsewhere) it expands to ``.``
+  too and the step line says ``N changed files: too long for one command line, whole
+  tree``. Both notes are shown on green, red and environment lines. ``--full``
   always expands it to ``.``. The header of a step names the first three files, then
   ``(+N more)``.
 
@@ -65,18 +74,27 @@ In order, for a step that did not exit 0:
 2. A crash is the environment whatever else is true: a negative return code (killed by a
    signal), 129 to 159 (``128 + signal``, how shells and launchers report it) and a Windows
    NTSTATUS failure (``0xC0000000`` and above, also when read as a negative number).
-3. A code the tool's own documentation reserves for "I could not do my job" is the
-   environment (``ENV_EXITS``: pytest 3; ``ruff check`` 2; pyright 2, 3, 4).
-4. Any other code, 1 included, is asked one question: the same launcher and tool are run
-   with ``--version`` (``uv run pytest --version`` for ``uv run pytest --cov``; for a script,
-   ``uv run python --version``), once per distinct command in a run. If that works the tool
-   started and what it refused is the code: the step failed. If it does not (``uv run`` exits
-   1 when it cannot build the environment), the environment is broken. A program with
-   nothing to ask (a script run by its path) is red on 1 and the environment otherwise.
+3. A code that only a broken setup produces is the environment (``ENV_EXITS``: ``ruff
+   check`` 2 and pyright 3, an invalid configuration).
+4. Exit 1 is red, unless the launcher cannot start its interpreter. The question is about
+   the launcher, never about the tool: the launcher words of the step up to and including
+   ``run``, then ``python --version`` (``uv run --offline python --version`` for ``uv run
+   --offline pytest -q``), or the words up to the interpreter the step names (``python
+   --version`` for ``python -m compileall``). ``uv run`` exits 1 when it cannot build the
+   environment, and then this fails too: the environment is broken. A tool that has no
+   ``--version`` is red on 1 like any other. A step with no launcher (a bare tool, ``uvx``,
+   a program by its path) is red on 1 and nothing is asked.
+5. Any other code is asked the question of ADR-0018: the same launcher and tool are run with
+   ``--version`` (``uv run pytest --version`` for ``uv run pytest --cov``). If that works the
+   tool started and what it refused is the code: the step failed. If it does not, the
+   environment is broken. A program of the project (a path, a ``.py`` file, a file of the
+   root) is never run a second time: its launcher is asked instead as in 4, and with no
+   launcher (``scripts/test.sh``) such a code is the environment.
 
-A tool that cannot answer ``--version`` with exit 0 is therefore never red: wrap it in a
-script. Launcher options that take a value must be glued to it (``uv run --group=dev
-pytest``), or the value is taken for the tool.
+Each distinct question is asked once in a run, has 60 seconds, and is silent. The options of
+``uv`` that take a value are known (``uv run --group dev pytest`` runs ``pytest``); for an
+option this file does not know, the next word is its value unless it is a launcher, a path
+or a program on ``PATH``.
 
 Standard library only: it is copied verbatim into every RUMBO project (ADR-0006).
 """
@@ -84,6 +102,7 @@ Standard library only: it is copied verbatim into every RUMBO project (ADR-0006)
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shlex
 import shutil
@@ -91,6 +110,7 @@ import subprocess
 import sys
 import tomllib
 from collections import deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, NoReturn
@@ -103,7 +123,40 @@ SPIKES = "spikes/"  # ADR-0020: prototypes are never checked, not even when they
 TAIL_LINES = 40
 SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", ">", "<", ">>", "2>&1"})
 LAUNCHERS = frozenset({"uv", "uvx", "run", "python", "python3", "py", "-m"})
+INTERPRETERS = frozenset({"python", "python3", "py"})
+UV = frozenset({"uv", "uvx"})
 INLINE_CODE = "-c"  # ``python -c "..."``: what runs is the interpreter, there is no tool
+# The options of ``uv``, ``uv run`` and ``uvx``, read from ``uv --help``, ``uv run --help`` and
+# ``uvx --help`` of uv 0.12.19: those printed with a ``<VALUE>`` take the next word, so that
+# ``uv run --group dev pytest`` names ``pytest``. An option in neither tuple (a newer uv) is
+# read by the word that follows it: see ``_takes_value``.
+UV_VALUE_OPTIONS = (
+    "--allow-insecure-host", "--build-constraints", "--cache-dir", "--color", "--config-file",
+    "--config-setting", "--config-settings-package", "--constraints", "--default-index",
+    "--directory", "--env-file", "--exclude-newer", "--exclude-newer-package", "--extra",
+    "--extra-index-url", "--find-links", "--fork-strategy", "--from", "--group", "--index",
+    "--index-strategy", "--index-url", "--keyring-provider", "--link-mode",
+    "--no-binary-package", "--no-build-isolation-package", "--no-build-package",
+    "--no-editable-package", "--no-extra", "--no-group", "--no-sources-package",
+    "--only-group", "--overrides", "--package", "--prerelease", "--prerelease-package",
+    "--project", "--python", "--python-platform", "--refresh-package", "--reinstall-package",
+    "--resolution", "--torch-backend", "--upgrade-group", "--upgrade-package", "--with",
+    "--with-editable", "--with-requirements", "-C", "-P", "-b", "-c", "-f", "-i", "-p", "-w",
+)  # fmt: skip
+UV_FLAGS = (
+    "--active", "--all-extras", "--all-groups", "--all-packages", "--compile-bytecode",
+    "--exact", "--frozen", "--gui-script", "--help", "--isolated", "--lfs", "--locked",
+    "--managed-python", "--module", "--no-binary", "--no-build", "--no-build-isolation",
+    "--no-cache", "--no-config", "--no-default-groups", "--no-dev", "--no-editable",
+    "--no-env-file", "--no-index", "--no-managed-python", "--no-progress", "--no-project",
+    "--no-python-downloads", "--no-sources", "--no-sync", "--offline", "--only-dev", "--quiet",
+    "--refresh", "--reinstall", "--script", "--system-certs", "--upgrade", "--verbose",
+    "--version", "-U", "-V", "-h", "-m", "-n", "-q", "-s", "-v",
+)  # fmt: skip
+# ``uv run`` flags that say what the command word is (a module, a script): they do not belong
+# in the question ``uv run ... python --version``.
+UV_COMMAND_FLAGS = ("-m", "--module", "-s", "--script", "--gui-script")
+PYTHON_VALUE_OPTIONS = ("-W", "-X")  # ``python --help``: "-W arg", "-X opt"
 PROBE_TIMEOUT = 60  # seconds
 WINDOWS = os.name == "nt"
 # The candidates of the anti-cheat sensor (DEFAULT_BASES in check_tests_not_weakened.py), in
@@ -113,37 +166,40 @@ FALLBACK_BASE = "main"
 # One command line: CreateProcess takes 32,767 characters; elsewhere the limit (ARG_MAX) also
 # holds the environment and is far larger. Both values leave a wide margin.
 WINDOWS_COMMAND_LINE = 30_000  # characters
+BATCH_COMMAND_LINE = 8_000  # characters: cmd.exe, which runs a batch file, takes 8,191
 POSIX_COMMAND_LINE = 120_000  # bytes
 TOO_LONG_WINERROR = 206  # ERROR_FILENAME_EXCED_RANGE: Python raises it as FileNotFoundError
 HEADER_FILES = 3  # files of {changed} named in a step header before "(+N more)"
 WINDOWS_SUFFIXES = (".exe", ".cmd", ".bat", ".com")
+PATH_SUFFIXES = (".com", ".exe", ".bat", ".cmd")  # the order of the default PATHEXT
+# Windows looks for a bare program name in the current directory before PATH, unless this
+# variable exists in the environment of the process that starts it (measured: Python 3.13
+# on Windows 11; cmd.exe documents it as NeedCurrentDirectoryForExePath).
+NO_CURRENT_DIRECTORY = "NoDefaultCurrentDirectoryInExePath"
 BATCH_SUFFIXES = (".cmd", ".bat")
 BATCH_UNSAFE = frozenset('&|<>^%"\r\n')  # what cmd.exe interprets in a batch file's arguments
 SIGNAL_EXIT = 128  # a shell or a launcher reports "killed by signal n" as exit 128 + n
 SIGNALS = 32
 NTSTATUS_ERROR = 0xC0000000  # Windows: severity "error", what a crashed process returns
 
-# ADR-0022: exit codes that the tool's own documentation reserves for "I could not do my job"
-# (a crash, an unreadable configuration, a bad command line). They are the environment, with no
-# probe. Keys are the tool, or "<tool> <sub-command>" when the meaning depends on it. Never add
-# a code from memory: every key has its documentation in ENV_EXIT_SOURCES, and a code that the
-# documentation also gives to bad code stays out (the probe of ADR-0018 decides):
-# - pytest 2 (interrupted; in practice also a collection error), 4 (usage error, "including
-#   ... a conftest.py that fails to import"), 5 (no tests collected) and 6 are not here;
-# - ``ruff format`` 2 is not here: documented like ``ruff check`` 2, but a file with a syntax
-#   error also exits 2 (measured with ruff 0.17.4), while ``ruff check`` reports it with 1;
-# - mypy is not here: its documentation does not describe its exit codes.
+# ADR-0022: exit codes that are the environment with no question asked. An entry needs two
+# things: the tool's documentation gives the code to a failure of the tool itself (the page is
+# in ENV_EXIT_SOURCES; never add a code from memory), and real runs show that code the agent
+# wrote does not produce it (the runs are listed in ADR-0022). Keys are the tool, or "<tool>
+# <sub-command>" when the meaning depends on it. What stays out, and takes the probe:
+# - pytest 3 ("internal error"): code under test that exits at import (an unguarded
+#   ``sys.exit(main())``) ends in "mainloop: caught unexpected SystemExit!" and exit 3;
+# - pytest 2, 4 (usage error, "including ... a conftest.py that fails to import"), 5 and 6;
+# - pyright 2 ("fatal error") and 4 ("illegal command-line parameters"): 4 is also a path on
+#   the command line that the change removed, and no run shows that bad code cannot give 2;
+# - ``ruff format`` 2: documented like ``ruff check`` 2, but a file with a syntax error also
+#   exits 2 (ruff 0.17.4), while ``ruff check`` reports it with 1;
+# - mypy: its documentation does not describe its exit codes.
 ENV_EXITS: dict[str, dict[int, str]] = {
-    "pytest": {3: "internal error"},
     "ruff check": {2: "abnormal termination"},
-    "pyright": {
-        2: "fatal error",
-        3: "config file could not be read or parsed",
-        4: "illegal command-line parameters",
-    },
+    "pyright": {3: "config file could not be read or parsed"},
 }
 ENV_EXIT_SOURCES = {
-    "pytest": "https://docs.pytest.org/en/stable/reference/exit-codes.html",
     "ruff check": "https://docs.astral.sh/ruff/linter/#exit-codes",
     "pyright": "https://github.com/microsoft/pyright/blob/main/docs/command-line.md",
 }
@@ -344,11 +400,17 @@ class Step:
     shown: list[str] | None = None  # argv for the header when ``argv`` names many files
 
 
-def _fits_one_command_line(argv: list[str]) -> bool:
-    """Whether the system can start ``argv``, with a wide margin (see the two limits)."""
-    if WINDOWS:
-        return len(subprocess.list2cmdline(argv)) <= WINDOWS_COMMAND_LINE
-    return sum(len(os.fsencode(arg)) + 1 for arg in argv) <= POSIX_COMMAND_LINE
+def _fits_one_command_line(argv: list[str], root: Path) -> bool:
+    """Whether the system can start ``argv``, with a wide margin (see the limits)."""
+    if not WINDOWS:
+        return sum(len(os.fsencode(arg)) + 1 for arg in argv) <= POSIX_COMMAND_LINE
+    try:
+        program = _launch_argv(argv[:1], root)[0]
+    except CannotStart:
+        program = argv[0]
+    batch = program.lower().endswith(BATCH_SUFFIXES)
+    limit = BATCH_COMMAND_LINE if batch else WINDOWS_COMMAND_LINE
+    return len(subprocess.list2cmdline([program, *argv[1:]])) <= limit
 
 
 def _expand(argv: list[str], files: list[str]) -> list[str]:
@@ -374,7 +436,7 @@ def plan_steps(
             plan[name] = Step(argv, "no changed files", skip=True)
             continue
         files, note, shown = changed.files, changed.note, None
-        if not _fits_one_command_line(_expand(argv, files)):
+        if not _fits_one_command_line(_expand(argv, files), root):
             # the whole tree rather than chunks: one run, one verdict, and the line says so
             note = f"{len(files)} changed files: too long for one command line, whole tree"
             files = [WHOLE_TREE]
@@ -386,9 +448,77 @@ def plan_steps(
 
 
 # --------------------------------------------------------------------------- running
+def _launcher_name(token: str) -> str:
+    """``uv`` for ``C:/tools/uv.exe``, ``python`` for ``.venv/bin/python``."""
+    return Path(token).name.lower().removesuffix(".exe")
+
+
 def _is_launcher(token: str) -> bool:
-    """``uv``, ``run``, ``python``, ``-m``; also by path (``.venv/bin/python``, ``uv.exe``)."""
-    return token in LAUNCHERS or Path(token).name.lower().removesuffix(".exe") in LAUNCHERS
+    """``uv``, ``run``, ``python``, ``-m``; uv and python also by path (``.venv/bin/python``)."""
+    return token in LAUNCHERS or _launcher_name(token) in UV | INTERPRETERS
+
+
+def _is_path(word: str) -> bool:
+    """A word with a directory part; a backslash counts on every system, to stay cautious."""
+    return "/" in word or "\\" in word
+
+
+def _takes_value(option: str, following: str | None, owner: str) -> bool:
+    """Whether the word after ``option`` is its value and not the program of the step.
+
+    ``owner`` is whose option it is: ``uv`` or ``python``. An option of uv that this file
+    does not know is decided by the next word: a launcher, a path, a ``.py`` file or a
+    program found on ``PATH`` is the program; anything else is the value.
+    """
+    if following is None or "=" in option or option == "--":
+        return False
+    if owner == "python":
+        return option in PYTHON_VALUE_OPTIONS
+    if owner != "uv":
+        return False
+    if option in UV_VALUE_OPTIONS:
+        return True
+    if option in UV_FLAGS or following.startswith("-") or _is_launcher(following):
+        return False
+    program = _is_path(following) or following.endswith(".py") or shutil.which(following)
+    return not program
+
+
+@dataclass(frozen=True)
+class _Command:
+    """A step read as launchers, then the program they run, then its arguments."""
+
+    prefix: list[str]  # the launchers and their options: ``uv run --frozen``
+    tool: str | None  # the program they run; None for inline code or nothing but launchers
+    interpreter: int | None  # the index in ``prefix`` of ``python``, when the step names it
+    runs: bool  # ``uv run``: the launcher starts a program of the environment
+
+
+def _read_command(argv: list[str]) -> _Command:
+    owner = ""  # whose options follow: "uv" or "python"
+    interpreter: int | None = None
+    runs = False
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        following = argv[index + 1] if index + 1 < len(argv) else None
+        if _is_launcher(token):
+            name = _launcher_name(token)
+            if name in UV:
+                owner = "uv"
+            elif name in INTERPRETERS:
+                owner = "python"
+                interpreter = index if interpreter is None else interpreter
+            elif name == "run":
+                runs = runs or owner == "uv"
+            index += 1
+        elif not token.startswith("-"):
+            return _Command(argv[:index], token, interpreter, runs)
+        elif token == INLINE_CODE and owner != "uv":
+            return _Command(argv[:index], None, interpreter, runs)
+        else:
+            index += 2 if _takes_value(token, following, owner) else 1
+    return _Command(list(argv), None, interpreter, runs)
 
 
 def _split_tool(argv: list[str]) -> tuple[list[str], str | None]:
@@ -396,12 +526,8 @@ def _split_tool(argv: list[str]) -> tuple[list[str], str | None]:
 
     The program is None when there is none to name: inline code or nothing but launchers.
     """
-    for index, token in enumerate(argv):
-        if token == INLINE_CODE:
-            return argv[:index], None
-        if not token.startswith("-") and not _is_launcher(token):
-            return argv[:index], token
-    return list(argv), None
+    command = _read_command(argv)
+    return command.prefix, command.tool
 
 
 def _tool_name(argv: list[str]) -> str:
@@ -410,16 +536,36 @@ def _tool_name(argv: list[str]) -> str:
     return Path(tool or argv[0]).name
 
 
-def _probe_argv(argv: list[str]) -> list[str] | None:
+def _launcher_probe(argv: list[str]) -> list[str] | None:
+    """The question about the launcher of a step (ADR-0022): can it start its interpreter?
+
+    The words up to the interpreter the step names, or up to ``run`` and then ``python``;
+    then ``--version``. None when the step has no launcher to ask (a bare tool, ``uvx``, a
+    program by its path): the program of the step is never part of this question.
+    """
+    command = _read_command(argv)
+    if command.interpreter is not None:
+        return [*command.prefix[: command.interpreter + 1], "--version"]
+    if command.runs:
+        # without the flags that say what the next word is: `uv run -m python` is no question
+        kept = [word for word in command.prefix if word not in UV_COMMAND_FLAGS]
+        return [*kept, "python", "--version"]
+    return None
+
+
+def _probe_argv(argv: list[str], root: Path | None = None) -> list[str] | None:
     """The step's command up to and including the tool, then ``--version`` (ADR-0018).
 
-    A script or inline code is the project's own: the probe stops at the interpreter. None
-    when nothing is left to ask.
+    A program of the project (a path, a ``.py`` file, a file of ``root``) and inline code are
+    never run a second time: the question goes to the launcher. None when nobody is left to
+    ask.
     """
     prefix, tool = _split_tool(argv)
-    if tool is not None and not tool.endswith(".py"):
-        return [*prefix, tool, "--version"]
-    return [*prefix, "--version"] if prefix else None
+    if tool is None or _is_path(tool) or tool.endswith(".py"):
+        return _launcher_probe(argv)
+    if root is not None and (root / tool).is_file():
+        return _launcher_probe(argv)
+    return [*prefix, tool, "--version"]
 
 
 def _missing_script(argv: list[str], root: Path) -> str | None:
@@ -430,13 +576,50 @@ def _missing_script(argv: list[str], root: Path) -> str | None:
     return None if (root / tool).is_file() else tool
 
 
+def _outside(path: Path, root: Path) -> bool:
+    """Whether ``path`` is absolute and not the project root nor anything under it."""
+    if not path.is_absolute():
+        return False
+    try:
+        resolved, base = path.resolve(), root.resolve()
+    except OSError:
+        return False
+    return resolved != base and base not in resolved.parents
+
+
+def _shim_on_path(program: str, root: Path) -> str | None:
+    """The batch shim that a bare ``program`` stands for on Windows, when it has one.
+
+    ``PATH`` is read here and not by ``shutil.which``, which looks in the current directory
+    first: relative entries are skipped and a batch file inside the project is passed over.
+    None when ``PATH`` also holds the name as an ``.exe`` or ``.com``: the system finds that
+    one itself, as it always did, and its arguments need no care about ``cmd.exe``.
+    """
+    known = Path(program).suffix.lower() in PATH_SUFFIXES
+    names = [program] if known else [f"{program}{suffix}" for suffix in PATH_SUFFIXES]
+    shim: str | None = None
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        directory = Path(entry)
+        if not entry or not directory.is_absolute():
+            continue
+        for name in names:
+            candidate = directory / name
+            if not candidate.is_file():
+                continue
+            if not name.lower().endswith(BATCH_SUFFIXES):
+                return None
+            if shim is None and _outside(candidate, root):
+                shim = str(candidate)
+    return shim
+
+
 def _launch_argv(argv: list[str], root: Path) -> list[str]:
     """``argv`` with its program made findable; ``argv`` itself when the system finds it.
 
     A program with a directory part is taken against ``root`` (CreateProcess would take it
     against the runner's own directory, and adds no extension to a path). A bare name is
-    rewritten only on Windows and only when ``PATH`` holds it as a batch shim, which
-    CreateProcess does not look for. Raises :class:`CannotStart`.
+    rewritten only on Windows and only when ``PATH`` holds it as nothing but a batch shim,
+    outside the project: CreateProcess does not look for one. Raises :class:`CannotStart`.
     """
     program = argv[0]
     if "/" in program or (WINDOWS and "\\" in program):
@@ -449,8 +632,8 @@ def _launch_argv(argv: list[str], root: Path) -> list[str]:
         if found is None:
             raise CannotStart(f"{path.name}: not found")
     else:
-        found = shutil.which(program) if WINDOWS else None
-        if found is None or not found.lower().endswith(BATCH_SUFFIXES):
+        found = _shim_on_path(program, root) if WINDOWS else None
+        if found is None:
             return argv
     launched = [found, *argv[1:]]
     if WINDOWS and found.lower().endswith(BATCH_SUFFIXES):
@@ -465,27 +648,42 @@ def _launch_argv(argv: list[str], root: Path) -> list[str]:
     return launched
 
 
+@contextlib.contextmanager
+def _not_from_the_current_directory() -> Iterator[None]:
+    """While a process is started, Windows does not look for it in the current directory.
+
+    The variable is read by the process that starts another one, so it is set in the runner's
+    own environment, for the time of the call, and inherited by what it starts.
+    """
+    if not WINDOWS:
+        yield
+        return
+    before = os.environ.get(NO_CURRENT_DIRECTORY)
+    os.environ[NO_CURRENT_DIRECTORY] = "1"
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop(NO_CURRENT_DIRECTORY, None)
+        else:
+            os.environ[NO_CURRENT_DIRECTORY] = before
+
+
 def _start(argv: list[str], root: Path, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
     """Run a step or its probe: in the root, without a shell, with no standard input."""
-    return subprocess.run(
-        _launch_argv(argv, root),
-        cwd=root,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        check=False,
-        **kwargs,
-    )
+    launched = _launch_argv(argv, root)
+    with _not_from_the_current_directory():
+        return subprocess.run(
+            launched, cwd=root, shell=False, stdin=subprocess.DEVNULL, check=False, **kwargs
+        )
 
 
-def _tool_starts(argv: list[str], root: Path, probes: dict[tuple[str, ...], bool]) -> bool:
-    """Ask the environment one silent question: can it start the tool of this step?
+def _answers(probe: list[str], root: Path, probes: dict[tuple[str, ...], bool]) -> bool:
+    """Ask the environment one silent question: does ``probe`` start and exit 0?
 
-    Any doubt (no probe, not found, timeout, non-zero) answers no. ``probes`` remembers the
-    answers of a run, so that several failing steps of one tool ask once.
+    Any doubt (not found, timeout, non-zero) answers no. ``probes`` remembers the answers of
+    a run, so that several failing steps ask the same question once.
     """
-    probe = _probe_argv(argv)
-    if probe is None:
-        return False
     key = tuple(probe)
     if key not in probes:
         try:
@@ -540,10 +738,16 @@ def _classify(
     reason = _env_exit(argv, code)
     if reason is not None:
         return ENV, f"{tool} exit {code}: {reason}"
-    if code == 1 and _probe_argv(argv) is None:
-        return RED, "exit 1"  # nothing stands between the runner and the program: its verdict
-    if _tool_starts(argv, root, probes):
-        return RED, "exit 1" if code == 1 else f"{tool} exit {code}"
+    if code == 1:
+        # the tool ran unless its launcher cannot start anything: only the launcher is asked
+        launcher = _launcher_probe(argv)
+        if launcher is None or _answers(launcher, root, probes):
+            return RED, "exit 1"
+        asked = " ".join([Path(launcher[0]).name, *launcher[1:]])
+        return ENV, f"{tool} exit 1: {asked} fails too"
+    probe = _probe_argv(argv, root)
+    if probe is not None and _answers(probe, root, probes):
+        return RED, f"{tool} exit {code}"
     return ENV, f"{tool} exit {code}"
 
 
@@ -714,7 +918,8 @@ def main(argv: list[str] | None = None) -> int:
     An interrupt (Ctrl+C) is not caught: Python ends the process as it always did."""
     args = build_parser().parse_args(argv)
     try:
-        return _run(args)
+        with _not_from_the_current_directory():  # git too is found on PATH, not in the root
+            return _run(args)
     except ConfigError as exc:
         print(_ascii(f"rumbo check: environment broken ({exc})"))
     except Exception as exc:  # the last resort: whatever it is, it is not a red step

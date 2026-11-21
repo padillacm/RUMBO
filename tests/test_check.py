@@ -825,27 +825,33 @@ def fake_tools(
 # ------------------------------------------- R1: exit 1 is red only when the tool starts
 # Covers F-0002.R11, F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
 def test_exit_1_from_an_environment_that_cannot_start_the_tool_is_env(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ADR-0022: `uv run pytest` exits 1 as well when uv cannot build the environment (offline,
-    index down). Then the probe fails too and the agent is not handed the repair."""
-    step = tool(tmp_path, "faketool", 1, 1) + " tests"
-    root = project(tmp_path, {"test": step, "never": exits(0, "never")})
-    assert run(root) == 3
-    assert calls(root) == ["tests", "--version"], "exit 1 is probed too"
-    assert ran(root) == []
-    lines = capsys.readouterr().out.splitlines()
-    assert "ENV  test (faketool exit 1)" in lines
-    assert lines[-1] == "rumbo check: environment broken (test)"
+    index down). Then `uv run python --version` fails too and the agent is not handed the
+    repair. The question is about the launcher: the tool is not asked."""
+    seen = fake_tools(monkeypatch, 1, version=1)
+    step = ["uv", "run", "--offline", "pytest", "-q"]
+    steps = {"test": check.Step(step), "never": check.Step(["uv", "run", "ruff", "check"])}
+    results = check.run_steps(steps, tmp_path, None, keep_going=False)
+    assert check.verdict(results) == (3, "rumbo check: environment broken (test)")
+    probe = ["uv", "run", "--offline", "python", "--version"]
+    assert [argv for argv, _ in seen] == [step, probe], "exit 1 asks the launcher"
+    assert len(results) == 1, "the run stops at the broken environment"
+    assert results[0].line == (
+        "ENV  test (pytest exit 1: uv run --offline python --version fails too)"
+    )
+    assert seen[1][1]["timeout"] == check.PROBE_TIMEOUT
 
 
 # Covers F-0002.R11, F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
 def test_exit_1_from_a_tool_that_starts_is_red(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    root = project(tmp_path, {"test": tool(tmp_path, "faketool", 1, 0) + " tests"})
+    """Second audit, F3: the tool answers `--version` with 2, and its exit 1 is still red."""
+    root = project(tmp_path, {"test": tool(tmp_path, "faketool", 1, 2) + " tests"})
     assert run(root) == 1
-    assert calls(root) == ["tests", "--version"]
+    assert calls(root) == ["tests"], "on exit 1 the tool is never run a second time"
     out = capfd.readouterr().out
     assert "FAIL test (exit 1)" in out.splitlines()
     assert "said to the probe" not in out, "the probe is silent"
@@ -854,11 +860,124 @@ def test_exit_1_from_a_tool_that_starts_is_red(
 # Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
 def test_the_probe_runs_once_per_distinct_command_in_a_run(tmp_path: Path) -> None:
     """ADR-0022: the red path stays cheap. Two failing steps of the same tool ask once."""
-    same = tool(tmp_path, "faketool", 1, 0)
-    other = tool(tmp_path, "othertool", 1, 0)
+    same = tool(tmp_path, "faketool", 2, 0)
+    other = tool(tmp_path, "othertool", 2, 0)
     root = project(tmp_path, {"a": same + " one", "b": same + " two", "c": other + " three"})
     assert run(root, "--keep-going") == 1
     assert calls(root) == ["one", "--version", "two", "three", "--version"]
+
+
+# Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_the_launcher_is_asked_once_for_every_red_step_of_a_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Five red steps under `uv run` cost one `uv run python --version`, not five probes."""
+    seen = fake_tools(monkeypatch, 1, version=0)
+    tools = ["ruff", "pyright", "pytest", "bandit"]
+    steps = {name: check.Step(["uv", "run", name, "."]) for name in tools}
+    steps["unit"] = check.Step(["uv", "run", "python", "-m", "unittest"])
+    results = check.run_steps(steps, tmp_path, None, keep_going=True)
+    assert [result.line for result in results] == [f"FAIL {name} (exit 1)" for name in steps]
+    probes = [argv for argv, _ in seen if argv[-1] == "--version"]
+    assert probes == [["uv", "run", "python", "--version"]]
+
+
+# Covers F-0002.R11 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_a_failing_tool_that_has_no_version_option_is_red(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Second audit, F3: `python -m unittest` and `python -m compileall` do not answer
+    `--version`; their exit 1 was called a broken environment."""
+    failing = "import unittest\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n"
+    write(tmp_path, "tests/test_a.py", failing + "        self.assertEqual(1, 2)\n")
+    write(tmp_path, "src/broken.py", "def f(:\n    pass\n")
+    steps = {"unit": f"{PY} -m unittest discover -s tests", "compile": f"{PY} -m compileall -q src"}
+    root = project(tmp_path, steps)
+    assert run(root, "--keep-going") == 1
+    lines = capfd.readouterr().out.splitlines()
+    assert "FAIL unit (exit 1)" in lines
+    assert "FAIL compile (exit 1)" in lines
+    assert lines[-1] == "rumbo check: red (unit, compile)"
+
+
+# Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_the_question_on_exit_1_is_about_the_launcher() -> None:
+    """Up to and including `run`, then `python --version`; or up to the interpreter the step
+    names. A step with no launcher has nobody to ask."""
+    ask = check._launcher_probe
+    version = ["python", "--version"]
+    assert ask(["uv", "run", "--offline", "pytest", "-q"]) == ["uv", "run", "--offline", *version]
+    assert ask(["uv", "run", "--group", "dev", "pytest"]) == [
+        "uv",
+        "run",
+        "--group",
+        "dev",
+        *version,
+    ]
+    assert ask(["uv", "--directory", "sub", "run", "ruff", "check"]) == [
+        "uv",
+        "--directory",
+        "sub",
+        "run",
+        *version,
+    ]
+    assert ask(["uv", "run", "--", "pytest"]) == ["uv", "run", "--", *version]
+    assert ask(["uv", "run", "python", "-m", "unittest", "discover"]) == ["uv", "run", *version]
+    assert ask(["python", "-m", "compileall", "-q", "src"]) == version
+    assert ask([".venv/bin/python", "-X", "dev", "-m", "pytest"]) == [
+        ".venv/bin/python",
+        "--version",
+    ]
+    assert ask(["py", "-3", "-m", "pytest"]) == ["py", "--version"]
+    module = [
+        "uv",
+        "run",
+        "--frozen",
+        "-m",
+        "pytest",
+        "-q",
+    ]  # uv's own `-m`: python is not a module
+    assert ask(module) == ["uv", "run", "--frozen", *version]
+    assert ask(["uv", "run", "--script", "tools/x.py"]) == ["uv", "run", *version]
+    assert ask(["scripts/run", "--fast"]) is None, "a project program is not the launcher `run`"
+    assert ask(["pytest", "-q"]) is None
+    assert ask(["scripts/test.sh", "--fast"]) is None
+    assert ask(["uvx", "ruff", "check"]) is None, "uvx has no interpreter to ask: red on 1"
+
+
+# Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_a_launcher_option_and_its_value_are_not_the_tool() -> None:
+    """Second audit, F3: `uv run --group dev pytest`, as uv's documentation writes it, named
+    the tool `dev`."""
+    name = check._tool_name
+    assert name(["uv", "run", "--group", "dev", "pytest", "-q"]) == "pytest"
+    assert name(["uv", "run", "--group=dev", "pytest", "-q"]) == "pytest"
+    assert name(["uv", "run", "-p", "3.12", "--with", "rich", "--frozen", "pyright"]) == "pyright"
+    assert name(["uv", "--directory", "sub", "--color", "never", "run", "ruff", "check"]) == "ruff"
+    assert name(["uv", "run", "--no-sync", "--", "pytest", "-q"]) == "pytest"
+    assert name(["uvx", "--from", "ruff==0.5", "ruff", "check"]) == "ruff"
+    assert name(["python", "-X", "dev", "-W", "error", "-m", "pytest"]) == "pytest"
+    assert name(["uv", "run", "python", "-X", "dev", "scripts/x.py", "--flag"]) == "x.py"
+    grouped = ["uv", "run", "--group", "dev", "pytest", "--cov"]
+    assert check._probe_argv(grouped) == ["uv", "run", "--group", "dev", "pytest", "--version"]
+    assert "--group" in check.UV_VALUE_OPTIONS and "--frozen" in check.UV_FLAGS
+    assert not set(check.UV_VALUE_OPTIONS) & set(check.UV_FLAGS)
+
+
+# Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_an_option_uv_did_not_have_is_read_by_what_follows_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An option newer than the list: the next word is its value unless it is a program."""
+    programs = {"pytest": "/usr/bin/pytest"}
+    monkeypatch.setattr(check.shutil, "which", lambda name: programs.get(name))
+    name = check._tool_name
+    assert name(["uv", "run", "--new-option", "some-value", "pytest"]) == "pytest"
+    assert name(["uv", "run", "--new-flag", "pytest", "-q"]) == "pytest"
+    assert name(["uv", "run", "--new-flag", "scripts/x.py"]) == "x.py"
+    assert name(["uv", "run", "--new-flag", "python", "-m", "pytest"]) == "pytest"
+    assert name(["uv", "run", "--new-option=glued", "ruff"]) == "ruff"
+    assert name(["uv", "run", "--frozen", "not-on-path-tool"]) == "not-on-path-tool"
 
 
 # Covers F-0002.R11 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
@@ -872,6 +991,40 @@ def test_exit_1_with_nothing_to_probe_stays_red(
     result = check.run_step("sensor", ["scripts/x.py", "--strict"], tmp_path, None)
     assert (result.status, result.detail) == (check.RED, "exit 1")
     assert len(seen) == 1
+
+
+# Covers F-0002.R11, F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+@pytest.mark.parametrize(("code", "line"), [(1, "FAIL s (exit 1)"), (2, "ENV  s (fail exit 2)")])
+def test_a_project_program_run_by_its_path_is_never_run_a_second_time(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], code: int, line: str
+) -> None:
+    """Second audit, F4: the probe re-ran `scripts/fail.cmd` with `--version`: a script with
+    side effects ran twice, and its exit 1 became a broken environment."""
+    if os.name == "nt":
+        write(tmp_path, "scripts/fail.cmd", f"@echo ran>>ran.log\n@exit /b {code}\n")
+    else:
+        write(tmp_path, "scripts/fail", f"#!/bin/sh\necho ran >> ran.log\nexit {code}\n")
+        (tmp_path / "scripts" / "fail").chmod(0o755)
+    root = project(tmp_path, {"s": "scripts/fail --fast"})
+    assert run(root) == (1 if code == 1 else 3)
+    assert line in capfd.readouterr().out.splitlines()
+    assert (root / "ran.log").read_text(encoding="utf-8").split() == ["ran"]
+
+
+# Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_a_project_file_behind_a_launcher_is_not_the_one_asked(tmp_path: Path) -> None:
+    """`uv run ./tools/lint --version` would run the project's own program: the launcher is
+    asked instead, and a program with no launcher has no probe at all."""
+    launcher = ["uv", "run", "python", "--version"]
+    assert check._probe_argv(["uv", "run", "./tools/lint", "--fix"]) == launcher
+    assert check._probe_argv(["uv", "run", "tools\\lint.cmd"]) == launcher
+    assert check._probe_argv(["uv", "run", "scripts/x.py"]) == launcher
+    assert check._probe_argv(["tools/lint", "--fix"]) is None
+    assert check._probe_argv(["./scripts/test.sh"]) is None
+    assert check._split_tool(["scripts/run", "all"]) == ([], "scripts/run"), "not uv's `run`"
+    write(tmp_path, "lint.sh", "exit 1\n")
+    assert check._probe_argv(["uv", "run", "lint.sh"], tmp_path) == launcher
+    assert check._probe_argv(["uv", "run", "ruff"], tmp_path) == ["uv", "run", "ruff", "--version"]
 
 
 # -------------------------------------------- R3: a crash is never a verdict on the code
@@ -900,7 +1053,7 @@ def test_a_crash_code_is_env_whatever_the_probe_would_say(
 
 
 # Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
-@pytest.mark.parametrize("code", [2, 5, 6, 64, 127, 128, 160, 255])
+@pytest.mark.parametrize("code", [2, 3, 4, 5, 6, 64, 127, 128, 160, 255])
 def test_codes_next_to_the_crash_ranges_still_take_the_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
 ) -> None:
@@ -936,12 +1089,16 @@ def test_a_missing_project_script_is_env_before_anything_runs(
 @pytest.mark.parametrize(
     ("argv", "code", "detail"),
     [
-        (["uv", "run", "pytest", "--cov"], 3, "pytest exit 3: internal error"),
-        (["python", "-m", "pytest"], 3, "pytest exit 3: internal error"),
         (["uv", "run", "ruff", "check", "."], 2, "ruff exit 2: abnormal termination"),
-        (["uv", "run", "pyright", "."], 2, "pyright exit 2: fatal error"),
+        (["python", "-m", "ruff", "check"], 2, "ruff exit 2: abnormal termination"),
+        (["uv", "run", "--group", "dev", "ruff", "check"], 2, "ruff exit 2: abnormal termination"),
+        (
+            ["uv", "run", "pyright", "."],
+            3,
+            "pyright exit 3: config file could not be read or parsed",
+        ),
         (["uv", "run", "pyright"], 3, "pyright exit 3: config file could not be read or parsed"),
-        (["uvx", "pyright.EXE", "src"], 4, "pyright.EXE exit 4: illegal command-line parameters"),
+        (["uvx", "pyright.EXE"], 3, "pyright.EXE exit 3: config file could not be read or parsed"),
     ],
 )
 def test_an_exit_code_the_tool_documents_as_not_a_verdict_is_env(
@@ -959,6 +1116,9 @@ def test_an_exit_code_the_tool_documents_as_not_a_verdict_is_env(
     ("argv", "code"),
     [
         (["uv", "run", "pytest"], 2),  # documented "interrupted"; measured: collection error
+        (["uv", "run", "pytest"], 3),  # "internal error": also the code under test exiting
+        (["uv", "run", "pyright"], 2),  # "fatal error": nothing shows that bad code cannot
+        (["uv", "run", "pyright", "src", "tests"], 4),  # also a path the change removed
         (["uv", "run", "pytest"], 4),  # usage error OR a conftest.py that fails to import
         (["uv", "run", "pytest"], 5),  # no tests collected: a fact about the code
         (["uv", "run", "ruff", "format", "--check", "."], 2),  # also a syntax error (measured)
@@ -982,12 +1142,38 @@ def test_an_ambiguous_or_undocumented_code_keeps_the_probe_rule(
 # Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
 def test_every_environment_exit_code_names_its_source() -> None:
     """ADR-0022: no exit code is written from memory; each tool's entry cites its documentation."""
-    assert set(check.ENV_EXITS) == {"pytest", "ruff check", "pyright"}
+    assert check.ENV_EXITS == {
+        "ruff check": {2: "abnormal termination"},
+        "pyright": {3: "config file could not be read or parsed"},
+    }, "second audit, F1: pytest 3 and pyright 2 and 4 can come from the code under test"
     assert set(check.ENV_EXIT_SOURCES) == set(check.ENV_EXITS)
     assert all(url.startswith("https://") for url in check.ENV_EXIT_SOURCES.values())
     for codes in check.ENV_EXITS.values():
         assert codes and all(code not in (0, 1) and reason for code, reason in codes.items())
     assert "mypy" not in check.ENV_EXITS, "its documentation does not separate crashes"
+
+
+# Covers F-0002.R12 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+@pytest.mark.parametrize(
+    "module",
+    [
+        "import sys\n\nsys.exit(3)\n",  # an unguarded `sys.exit(main())`
+        "import argparse\n\nargs = argparse.ArgumentParser().parse_args()\n",  # pytest's argv
+        "raise SystemExit('APP_TOKEN is not set')\n",
+    ],
+)
+def test_code_under_test_that_exits_at_import_is_red(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], module: str
+) -> None:
+    """Second audit, F1: pytest says "mainloop: caught unexpected SystemExit!" and exits 3, its
+    "internal error". It is the agent's own bug: red, never "the environment, do not fix"."""
+    write(tmp_path, "app.py", module)
+    write(tmp_path, "tests/test_app.py", "import app\n\n\ndef test_a():\n    assert app\n")
+    root = project(tmp_path, {"test": f"{PY} -m pytest -q -p no:cacheprovider tests"})
+    assert run(root) == 1
+    out = capfd.readouterr().out
+    assert "FAIL test (pytest exit 3)" in out.splitlines()
+    assert out.splitlines()[-1] == "rumbo check: red (test)"
 
 
 # ---------------------------------------- R2: a {changed} list longer than a command line
@@ -1006,6 +1192,7 @@ def test_changed_too_long_for_one_command_line_becomes_the_whole_tree(
     """CreateProcess takes 32,767 characters: 520 changed files were "python: not found"."""
     files = many_files(count)
     monkeypatch.setattr(check, "WINDOWS", windows)
+    monkeypatch.setenv("PATH", str(tmp_path))  # no `uv` shim of this machine in the way
     monkeypatch.setattr(check, "resolve_changed", lambda base, root, full: check.Changed(files))
     commands = {"lint": ["uv", "run", "ruff", "check", "{changed}"]}
     step = check.plan_steps(commands, "main", tmp_path, False)["lint"]
@@ -1015,6 +1202,26 @@ def test_changed_too_long_for_one_command_line_becomes_the_whole_tree(
     else:
         assert step.argv == ["uv", "run", "ruff", "check", "."]
         assert step.note == f"{count} changed files: too long for one command line, whole tree"
+
+
+# Covers F-0002.R6 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_a_batch_program_has_the_shorter_command_line_of_cmd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cmd.exe takes 8,191 characters, CreateProcess 32,767: behind a `.cmd` shim 200 files
+    were "FAIL types (exit 1)" with cmd's "The command line is too long"."""
+    files = many_files(200)  # about 12,000 characters
+    write(tmp_path, "bin/pyright.cmd", "")
+    root = tmp_path / "project"
+    root.mkdir()
+    monkeypatch.setattr(check, "WINDOWS", True)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.setattr(check, "resolve_changed", lambda base, root, full: check.Changed(files))
+    commands = {"types": ["pyright", "{changed}"], "lint": ["ruff", "check", "{changed}"]}
+    plan = check.plan_steps(commands, "main", root, False)
+    assert plan["types"].argv == ["pyright", "."]
+    assert plan["types"].note == "200 changed files: too long for one command line, whole tree"
+    assert plan["lint"].argv == ["ruff", "check", *files], "an .exe keeps the system's limit"
 
 
 # Covers F-0002.R6 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
@@ -1178,18 +1385,21 @@ def test_a_batch_shim_runs_by_its_path_and_never_through_a_shell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """npm, npx, pnpm are `.cmd` files on Windows: found with PATHEXT, run with shell=False."""
+    write(tmp_path, "bin/npx.cmd", "")
     shim = str(tmp_path / "bin" / "npx.cmd")
+    root = tmp_path / "project"
+    root.mkdir()
     monkeypatch.setattr(check, "WINDOWS", True)
-    monkeypatch.setattr(check.shutil, "which", lambda name: shim if name == "npx" else None)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     seen = fake_tools(monkeypatch, 0)
-    result = check.run_step("docs", ["npx", "markdownlint", "two words", "docs/"], tmp_path, None)
+    result = check.run_step("docs", ["npx", "markdownlint", "two words", "docs/"], root, None)
     assert result.status == check.GREEN
     ((argv, kwargs),) = seen
     assert argv == [shim, "markdownlint", "two words", "docs/"]
     assert kwargs["shell"] is False
 
     seen.clear()
-    plain = check.run_step("lint", ["ruff", "check", "a&b"], tmp_path, None)
+    plain = check.run_step("lint", ["ruff", "check", "a&b"], root, None)
     assert plain.status == check.GREEN, "an .exe receives its arguments verbatim"
     assert seen[0][0] == ["ruff", "check", "a&b"], "a name the system finds itself is left alone"
 
@@ -1203,12 +1413,15 @@ def test_a_batch_program_refuses_what_cmd_would_interpret(
 ) -> None:
     """A `.cmd`/`.bat` file is run by cmd.exe whatever the caller does, and cmd.exe parses
     its command line again: such an argument is refused, not passed."""
+    write(tmp_path, "bin/tool.bat", "")
+    root = tmp_path / "project"
+    root.mkdir()
     monkeypatch.setattr(check, "WINDOWS", True)
-    monkeypatch.setattr(check.shutil, "which", lambda name: str(tmp_path / "bin" / "tool.BAT"))
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     seen = fake_tools(monkeypatch, 0)
-    result = check.run_step("docs", ["tool", "ok", argument], tmp_path, None)
+    result = check.run_step("docs", ["tool", "ok", argument], root, None)
     assert result.status == check.ENV
-    assert result.detail.startswith("tool.BAT: a batch file, and cmd.exe would interpret ")
+    assert result.detail.startswith("tool.bat: a batch file, and cmd.exe would interpret ")
     assert seen == [], "nothing was started"
 
 
@@ -1217,10 +1430,13 @@ def test_a_batch_program_in_a_directory_cmd_would_interpret_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`C:/R&D/bin/tool.cmd`: the path of the program is part of what cmd.exe parses."""
+    write(tmp_path, "R&D/bin/tool.cmd", "")
+    root = tmp_path / "project"
+    root.mkdir()
     monkeypatch.setattr(check, "WINDOWS", True)
-    monkeypatch.setattr(check.shutil, "which", lambda name: "C:/R&D/bin/tool.cmd")
+    monkeypatch.setenv("PATH", str(tmp_path / "R&D" / "bin"))
     seen = fake_tools(monkeypatch, 0)
-    result = check.run_step("docs", ["tool", "docs"], tmp_path, None)
+    result = check.run_step("docs", ["tool", "docs"], root, None)
     assert result.status == check.ENV
     assert result.detail.startswith("tool.cmd: a batch file, and cmd.exe would interpret '&' in ")
     assert seen == [], "nothing was started"
@@ -1248,15 +1464,93 @@ def test_a_real_cmd_shim_on_path_runs_and_is_not_an_injection_route(
     bindir = tmp_path / "bin dir"
     write(bindir, "hellotool.cmd", "@echo hello from the shim [%1]\n@echo ran>>shim-ran.txt\n")
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
-    root = project(tmp_path, {"hello": "hellotool one"})
+    (tmp_path / "project").mkdir()  # the shim is outside the project, as a tool on PATH is
+    root = project(tmp_path / "project", {"hello": "hellotool one"})
     assert run(root) == 0
     assert "hello from the shim [one]" in capfd.readouterr().out
     (root / "shim-ran.txt").unlink()
 
-    root = project(tmp_path, {"hello": "hellotool 'x&echo INJECTED'"})
+    root = project(tmp_path / "project", {"hello": "hellotool 'x&echo INJECTED'"})
     assert run(root) == 3
     assert "cmd.exe would interpret" in capfd.readouterr().out
     assert not (root / "shim-ran.txt").exists()
+
+
+# Covers F-0002.R2 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+def test_a_program_named_without_a_directory_is_never_taken_from_the_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second audit, F2: a `uv.cmd` written into the project root (one line, `exit 0`) was
+    taken for `uv` and turned a failing test green. A shim is run by its path only when it
+    lies outside the project; relative entries of PATH are not searched."""
+    root = tmp_path / "project"
+    for planted in ("uv.cmd", "python.cmd", "tools/pytest.cmd", ".venv/Scripts/ruff.cmd"):
+        write(root, planted, "")
+    write(tmp_path, "outside/uv.cmd", "")
+    monkeypatch.setattr(check, "WINDOWS", True)
+    monkeypatch.chdir(root)
+    entries = [".", "", "tools", str(root), str(root / "tools"), str(root / ".venv" / "Scripts")]
+    monkeypatch.setenv("PATH", os.pathsep.join(entries))
+    for name in ("uv", "uv.cmd", "python", "pytest", "ruff"):
+        assert check._launch_argv([name, "x"], root) == [name, "x"], "left to the system"
+    shim = [str(tmp_path / "outside" / "uv.cmd"), "x"]
+    monkeypatch.setenv("PATH", os.pathsep.join([*entries, str(tmp_path / "outside")]))
+    assert check._launch_argv(["uv", "x"], root) == shim, "the planted ones are passed over"
+    monkeypatch.setenv("PATH", os.pathsep.join([".", str(tmp_path / "outside"), str(root)]))
+    assert check._launch_argv(["uv", "x"], root) == shim
+
+    # a version manager's uv.cmd in front of the real uv.exe: the system finds the .exe, as it
+    # always did, and no argument has to be refused because of cmd.exe
+    write(tmp_path, "real/uv.exe", "")
+    both = [str(tmp_path / "outside"), str(tmp_path / "real")]
+    monkeypatch.setenv("PATH", os.pathsep.join(both))
+    assert check._launch_argv(["uv", "run", "a&b"], root) == ["uv", "run", "a&b"]
+
+    variable = "NoDefaultCurrentDirectoryInExePath"
+    monkeypatch.delenv(variable, raising=False)
+    during: list[str | None] = []
+
+    def spy(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        during.append(os.environ.get(variable))
+        return subprocess.CompletedProcess(argv, 2 if argv[-1] != "--version" else 0)
+
+    monkeypatch.setattr(check.subprocess, "run", spy)
+    check.run_step("lint", ["ruff", "format", "."], root, None)
+    assert during == ["1", "1"], "the step and its probe: CreateProcess skips the directory"
+    assert variable not in os.environ, "and the runner's own environment is left as it was"
+
+
+# Covers F-0002.R2 (specs/0002-one-verification-runner-offline-on-three-platforms.md).
+@pytest.mark.skipif(os.name != "nt", reason="CreateProcess and batch files exist on Windows only")
+def test_files_planted_in_the_project_root_are_not_run_in_place_of_the_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """The runner is started from the project root, where CreateProcess looks before PATH."""
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)  # the default
+    planted = "@echo planted>>planted.txt\n@exit /b 0\n"
+    for name in ("uv.cmd", "python.cmd", "pytest.cmd"):
+        write(tmp_path, name, planted)
+    steps = {
+        "py": py("import sys; sys.exit(1)").replace(PY, "python"),
+        "uv": "uv --version",
+        "pytest": "pytest --version",
+    }
+    root = project(tmp_path, steps)
+    monkeypatch.chdir(root)
+    assert run(root, "--keep-going") in (1, 3), "never green: the real python exits 1"
+    lines = capfd.readouterr().out.splitlines()
+    assert "FAIL py (exit 1)" in lines
+    assert not (root / "planted.txt").exists(), "no planted batch file ran"
+
+    (root / "uv.cmd").unlink()
+    system = Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe"
+    shutil.copy(system, root / "uvstub.exe")  # exits 0 and prints the user when it runs
+    shutil.copy(system, root / "uv.exe")
+    project(root, {"stub": "uvstub", "uv": "uv"})
+    assert run(root, "--keep-going") == 3
+    lines = capfd.readouterr().out.splitlines()
+    assert "ENV  stub (uvstub: not found)" in lines
+    assert "ok   uv" not in lines, "the real uv prints its help and exits 2, or is not found"
 
 
 # ------------------------------------------------ R6: nothing unexpected exits 1 (red)
